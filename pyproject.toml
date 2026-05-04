@@ -1,0 +1,25 @@
+[project]
+name = "doc-diff-agent"
+version = "0.1.0"
+description = "Windows desktop document diff and QA agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6>=6.7.0",
+    "PyMuPDF>=1.24.0",
+    "python-docx>=1.1.0",
+    "docling>=2.31.0",
+    "faiss-cpu>=1.9.0",
+    "sqlalchemy>=2.0.0",
+    "sentence-transformers>=3.0.0",
+    "openai>=1.0.0",
+    "cryptography>=42.0.0",
+    "numpy>=1.26.0",
+    "langgraph>=0.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-qt>=4.4.0",
+]

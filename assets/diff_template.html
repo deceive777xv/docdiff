@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Diff View</title>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+      font-size: 14px;
+      background: #f9fafb;
+      color: #111827;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #container {
+      display: flex;
+      height: 100vh;
+      gap: 0;
+      overflow: hidden;
+    }
+
+    .pane {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+    }
+
+    #baseline-pane {
+      border-right: 2px solid #d1d5db;
+    }
+
+    .pane-header {
+      font-size: 12px;
+      font-weight: 600;
+      color: #6b7280;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #e5e7eb;
+      position: sticky;
+      top: 0;
+      background: #fff;
+      z-index: 10;
+    }
+
+    h3 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #374151;
+      margin-top: 20px;
+      margin-bottom: 8px;
+      padding: 6px 8px;
+      background: #f3f4f6;
+      border-radius: 4px;
+      border-left: 3px solid #d1d5db;
+    }
+
+    p {
+      line-height: 1.6;
+      color: #374151;
+      margin-bottom: 8px;
+    }
+
+    /* ── Diff highlight classes ─────────────────────────────────────────────── */
+
+    .diff-item {
+      display: inline;
+      border-radius: 3px;
+      padding: 1px 3px;
+      cursor: pointer;
+      transition: filter 0.1s ease;
+    }
+
+    .diff-item:hover {
+      filter: brightness(0.88);
+    }
+
+    .diff-item.selected {
+      outline: 2px solid #2563eb;
+      outline-offset: 1px;
+    }
+
+    /* 新增 — green */
+    .added {
+      background: #4a9e7220;
+      border-left: 3px solid #4a9e72;
+    }
+
+    /* 删减 — red */
+    .deleted {
+      background: #c0505020;
+      border-left: 3px solid #c05050;
+    }
+
+    /* 微调 — yellow */
+    .minor {
+      background: #b0983020;
+      border-left: 3px solid #b09830;
+    }
+
+    /* 实质修改 — orange */
+    .major {
+      background: #c0784020;
+      border-left: 3px solid #c07840;
+    }
+
+    /* 重写 — purple */
+    .rewrite {
+      background: #7a58c020;
+      border-left: 3px solid #7a58c0;
+    }
+
+    /* 格式变化 — gray */
+    .format {
+      background: #9ca3af20;
+      border-left: 3px solid #9ca3af;
+    }
+
+    /* Empty state */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 200px;
+      color: #9ca3af;
+      font-size: 13px;
+    }
+
+    .empty-state .icon {
+      font-size: 32px;
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <div class="pane" id="baseline-pane">
+      <div class="pane-header">基准文档</div>
+      <div id="baseline-content">
+        <div class="empty-state">
+          <div class="icon">&#128196;</div>
+          <div>请选择版本并运行对比</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pane" id="target-pane">
+      <div class="pane-header">目标文档</div>
+      <div id="target-content">
+        <div class="empty-state">
+          <div class="icon">&#128196;</div>
+          <div>请选择版本并运行对比</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      /**
+       * Attach click handlers to all .diff-item elements.
+       * Called from Python via page.runJavaScript() after injecting HTML.
+       */
+      function attachDiffHandlers() {
+        document.querySelectorAll('.diff-item').forEach(function (el) {
+          // Avoid double-binding by removing existing listener first
+          el.removeEventListener('click', el._diffClickHandler);
+          el._diffClickHandler = function () {
+            var diffId = el.getAttribute('data-diff-id');
+
+            // Notify Python bridge
+            if (diffId && window.bridge) {
+              window.bridge.onDiffClick(diffId);
+            }
+
+            // Visual selection highlight
+            document.querySelectorAll('.diff-item.selected').forEach(function (s) {
+              s.classList.remove('selected');
+            });
+            // Highlight both baseline and target spans with same diff-id
+            document.querySelectorAll('.diff-item[data-diff-id="' + diffId + '"]').forEach(function (s) {
+              s.classList.add('selected');
+            });
+          };
+          el.addEventListener('click', el._diffClickHandler);
+        });
+      }
+
+      // Expose globally so Python runJavaScript can call it
+      window.attachDiffHandlers = attachDiffHandlers;
+
+      // Initialize QWebChannel bridge when the transport is available
+      if (typeof qt !== 'undefined' && qt.webChannelTransport) {
+        new QWebChannel(qt.webChannelTransport, function (channel) {
+          window.bridge = channel.objects.bridge;
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

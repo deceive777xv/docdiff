@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/*.exe
+build/*.spec.bak
+.env
+*.db
+*.db-wal
+*.db-shm
+/app_data/
+venv/
+.venv/
+docs/
+.pytest_cache/
+.claude/
+Doc-Diff-Agent开发计划书.md
