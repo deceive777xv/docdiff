@@ -8,3 +8,4 @@ sentence-transformers>=3.0.0
 openai>=1.0.0
 cryptography>=42.0.0
 numpy>=1.26.0
+langgraph>=0.2.0
