@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import logging
 
+from langchain_core.messages import AIMessage, BaseMessageChunk, SystemMessage
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from app.agent.states import QAState
@@ -11,12 +14,12 @@ from app.db import document_repo
 
 logger = logging.getLogger(__name__)
 
-_QA_PROMPT = """你是一个专业的文档问答助手。请根据以下参考资料回答用户问题。
+_checkpointer = MemorySaver()
+
+_QA_SYSTEM_PROMPT = """你是一个专业的文档问答助手。请根据以下参考资料回答用户问题。
 
 参考资料：
 {context}
-
-用户问题：{question}
 
 回答要求：
 1. 只根据参考资料中的内容回答，不要编造信息
@@ -30,11 +33,25 @@ def _route(state: QAState) -> str:
     return "end" if state.get("error") else "continue"
 
 
-def resolve_scope(state: QAState) -> dict:
+def _format_context(hits: list) -> str:
+    parts = []
+    for i, hit in enumerate(hits, 1):
+        chunk = hit.chunk
+        ref = f"[{i}] "
+        if chunk.section_path:
+            ref += f"章节：{chunk.section_path}，"
+        if chunk.page_no:
+            ref += f"第{chunk.page_no}页，"
+        ref += f"内容：{chunk.text}"
+        parts.append(ref)
+    return "\n\n".join(parts)
+
+
+def resolve_scope(state: QAState, config: RunnableConfig) -> dict:
     """Map scope string to concrete version_id list."""
     try:
         scope = state.get("scope", "current_doc")
-        conn = state["conn"]
+        conn = config["configurable"]["conn"]
 
         if scope in ("current_doc", "compare"):
             ids = list(state.get("current_version_ids") or [])
@@ -67,14 +84,16 @@ def resolve_scope(state: QAState) -> dict:
         return {"error": str(e), "status": "failed"}
 
 
-def retrieve_chunks(state: QAState) -> dict:
+def retrieve_chunks(state: QAState, config: RunnableConfig) -> dict:
     """Vector search for relevant chunks."""
     try:
+        conn = config["configurable"]["conn"]
+        embedder = config["configurable"]["embedder"]
         hits = search(
             state["data_dir"],
-            state["conn"],
+            conn,
             state["question"],
-            state["embedder"],
+            embedder,
             state["_version_ids"],
             top_k=5,
         )
@@ -84,30 +103,33 @@ def retrieve_chunks(state: QAState) -> dict:
         return {"error": str(e), "status": "failed"}
 
 
-def generate_answer(state: QAState) -> dict:
-    """Generate answer from retrieved chunks using LLM."""
+async def generate_answer(state: QAState, config: RunnableConfig) -> dict:
+    """Generate answer via streaming LangChain model, accumulate into session messages."""
     try:
         hits = state.get("_hits", [])
         if not hits:
             return {"answer": "文档中未找到与问题相关的内容。", "status": "answered"}
 
-        context_parts = []
-        for i, hit in enumerate(hits, 1):
-            chunk = hit.chunk
-            ref = f"[{i}] "
-            if chunk.section_path:
-                ref += f"章节：{chunk.section_path}，"
-            if chunk.page_no:
-                ref += f"第{chunk.page_no}页，"
-            ref += f"内容：{chunk.text}"
-            context_parts.append(ref)
+        lc_model = config["configurable"].get("lc_model")
+        if not lc_model:
+            return {"answer": "请先在设置页面配置模型", "status": "answered"}
 
-        prompt = _QA_PROMPT.format(
-            context="\n\n".join(context_parts),
-            question=state["question"],
-        )
-        answer_text = state["provider"].chat([{"role": "user", "content": prompt}])
-        return {"answer": answer_text, "status": "answered"}
+        context = _format_context(hits)
+        system_msg = SystemMessage(content=_QA_SYSTEM_PROMPT.format(context=context))
+
+        history = list(state.get("messages", []))[-6:]
+        messages_to_send = [system_msg] + history
+
+        chunks: list[BaseMessageChunk] = []
+        async for chunk in lc_model.astream(messages_to_send):
+            chunks.append(chunk)
+        answer = "".join(c.content for c in chunks if isinstance(c.content, str))
+
+        return {
+            "answer": answer,
+            "messages": [AIMessage(content=answer)],
+            "status": "answered",
+        }
     except Exception as e:
         logger.exception("generate_answer failed")
         return {"error": str(e), "status": "failed"}
@@ -130,7 +152,7 @@ def _build_qa_graph():
     graph.add_conditional_edges("retrieve_chunks", _route, {"continue": "generate_answer",  "end": END})
     graph.add_conditional_edges("generate_answer", _route, {"continue": "attach_citations", "end": END})
     graph.add_edge("attach_citations", END)
-    return graph.compile()
+    return graph.compile(checkpointer=_checkpointer)
 
 
 qa_graph = _build_qa_graph()

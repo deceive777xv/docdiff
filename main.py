@@ -20,8 +20,9 @@ from app.ui.main_window import MainWindow, load_harmony_sans
 
 
 def _rebuild_providers(ctx: AppContext, compare, qa) -> None:
-    """Reload provider and embedder from current settings, then refresh pages."""
+    """Reload provider, embedder, and lc_model from current settings, then refresh pages."""
     from app.core.model.factory import get_embedder, get_provider
+    from app.core.model.lc_factory import get_chat_model
 
     try:
         ctx.provider = get_provider(ctx.settings)
@@ -31,6 +32,10 @@ def _rebuild_providers(ctx: AppContext, compare, qa) -> None:
         ctx.embedder = get_embedder(ctx.settings)
     except Exception:
         ctx.embedder = None
+    try:
+        ctx.lc_model = get_chat_model(ctx.settings)
+    except Exception:
+        ctx.lc_model = None
 
     compare.refresh_versions()
     qa.refresh_documents()
@@ -60,6 +65,7 @@ def main() -> None:
     conn = init_db(str(data_dir))
 
     from app.core.model.factory import get_embedder, get_provider
+    from app.core.model.lc_factory import get_chat_model
 
     try:
         provider = get_provider(settings)
@@ -69,6 +75,10 @@ def main() -> None:
         embedder = get_embedder(settings)
     except Exception:
         embedder = None
+    try:
+        lc_model = get_chat_model(settings)
+    except Exception:
+        lc_model = None
 
     ctx = AppContext(
         settings=settings,
@@ -76,6 +86,7 @@ def main() -> None:
         data_dir=str(data_dir),
         provider=provider,
         embedder=embedder,
+        lc_model=lc_model,
     )
 
     window = MainWindow(ctx)

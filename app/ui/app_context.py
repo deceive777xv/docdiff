@@ -14,3 +14,4 @@ class AppContext:
     data_dir: str
     provider: BaseProvider | None = None
     embedder: BaseProvider | None = None
+    lc_model: object | None = None  # BaseChatModel, typed as object to avoid hard dep

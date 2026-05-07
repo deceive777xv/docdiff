@@ -16,6 +16,9 @@ dependencies = [
     "cryptography>=42.0.0",
     "numpy>=1.26.0",
     "langgraph>=0.2.0",
+    "rank-bm25>=0.2",
+    "langchain-openai>=0.3",
+    "langchain-core>=0.3",
 ]
 
 [dependency-groups]

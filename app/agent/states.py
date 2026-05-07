@@ -1,8 +1,10 @@
 """TypedDict state definitions for LangGraph workflows."""
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 
@@ -59,9 +61,9 @@ class QAState(TypedDict, total=False):
     question: str
     scope: str                 # "current_doc" | "standard_lib" | "all"
     current_version_ids: list  # version IDs in scope for "current_doc"
-    provider: Any
-    embedder: Any
-    conn: Any
+
+    # ── Session memory (accumulated via add_messages reducer) ────────────────
+    messages: Annotated[list[BaseMessage], add_messages]
 
     # ── Node-internal ────────────────────────────────────────────────────────
     _version_ids: list
