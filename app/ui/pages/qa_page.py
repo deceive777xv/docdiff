@@ -1,7 +1,9 @@
-"""QA page — chat-style retrieval-augmented question answering."""
+"""QA page — chat-style retrieval-augmented question answering with streaming."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 
 from PySide6.QtCore import QObject, QThread, Signal
 from PySide6.QtWidgets import (
@@ -42,64 +44,87 @@ _ASST_BUBBLE_STYLE = (
 
 
 class _QaWorker(QObject):
-    """Run qa_service.answer in a background thread."""
+    """Run qa_graph via astream_events in a background thread."""
 
-    result_ready = Signal(str, list)
+    token_received = Signal(str)
+    citations_ready = Signal(list)
     error = Signal(str)
+    done = Signal()
 
     def __init__(
         self,
         data_dir: str,
         question: str,
-        provider,
         embedder,
+        lc_model,
         scope: RetrievalScope,
         current_version_ids: list[str],
+        thread_id: str,
         parent=None,
     ):
         super().__init__(parent)
         self._data_dir = data_dir
         self._question = question
-        self._provider = provider
         self._embedder = embedder
+        self._lc_model = lc_model
         self._scope = scope
         self._current_version_ids = current_version_ids
+        self._thread_id = thread_id
 
     def run(self) -> None:
+        asyncio.run(self._run_async())
+
+    async def _run_async(self) -> None:
+        from app.agent.qa_graph import qa_graph
+        from app.db.schema import open_db
+        from langchain_core.messages import HumanMessage
+
+        conn = open_db(self._data_dir)
         try:
-            from app.agent.qa_graph import qa_graph
-            from app.db.schema import open_db
-
-            conn = open_db(self._data_dir)
-            try:
-                result = qa_graph.invoke({
-                    "data_dir": self._data_dir,
-                    "question": self._question,
-                    "scope": self._scope.value,
-                    "current_version_ids": self._current_version_ids,
-                    "provider": self._provider,
-                    "embedder": self._embedder,
+            config = {
+                "configurable": {
+                    "thread_id": self._thread_id,
                     "conn": conn,
-                })
-            finally:
-                conn.close()
-
-            if result.get("error"):
-                self.error.emit(result["error"])
-            else:
-                self.result_ready.emit(result["answer"], result.get("citations", []))
-        except Exception as exc:
-            logger.exception("QA worker failed")
-            self.error.emit(str(exc))
+                    "embedder": self._embedder,
+                    "lc_model": self._lc_model,
+                }
+            }
+            state_input = {
+                "messages": [HumanMessage(content=self._question)],
+                "question": self._question,
+                "scope": self._scope.value,
+                "current_version_ids": self._current_version_ids,
+                "data_dir": self._data_dir,
+            }
+            try:
+                async for event in qa_graph.astream_events(state_input, config, version="v2"):
+                    if event["event"] == "on_chat_model_stream":
+                        token = event["data"]["chunk"].content
+                        if token:
+                            self.token_received.emit(token)
+                    elif event["event"] == "on_chain_error":
+                        self.error.emit(str(event["data"].get("error", "未知错误")))
+                        return
+                final = await qa_graph.aget_state(config)
+                self.citations_ready.emit(final.values.get("citations", []))
+            except Exception as exc:
+                logger.exception("QA worker failed")
+                self.error.emit(str(exc))
+        finally:
+            conn.close()
+            self.done.emit()
 
 
 class QaPage(QWidget):
-    """Chat-style QA page with RAG backend."""
+    """Chat-style QA page with streaming RAG backend and session memory."""
 
     def __init__(self, ctx: AppContext, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self._threads: set[QThread] = set()
+        self._thread_id: str = str(uuid.uuid4())
+        self._accumulated: str = ""
+        self._current_bubble: QLabel | None = None
         self._build_ui()
         self.refresh_documents()
 
@@ -111,7 +136,7 @@ class QaPage(QWidget):
         root.setSpacing(8)
         self.setStyleSheet(f"background-color:{Theme.BG_CARD};")
 
-        # ── Top: scope and document selectors ─────────────────────────────────
+        # ── Top: scope/document selectors + 新会话 button ──────────────────────
         top_group = QGroupBox()
         top_layout = QHBoxLayout(top_group)
         top_layout.setSpacing(10)
@@ -126,6 +151,7 @@ class QaPage(QWidget):
         self._doc_combo = QComboBox()
         self._doc_combo.setMinimumWidth(200)
         self._doc_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._doc_combo.currentIndexChanged.connect(self._on_doc_changed)
         top_layout.addWidget(self._doc_combo)
 
         self._compare_task_label = QLabel("对比任务：")
@@ -136,6 +162,13 @@ class QaPage(QWidget):
         top_layout.addWidget(self._compare_task_combo)
 
         top_layout.addStretch()
+
+        new_session_btn = QPushButton("新会话")
+        new_session_btn.setStyleSheet(Theme.btn_primary())
+        new_session_btn.setFixedWidth(72)
+        new_session_btn.clicked.connect(self._new_session)
+        top_layout.addWidget(new_session_btn)
+
         root.addWidget(top_group)
 
         # ── Middle: chat scroll area ───────────────────────────────────────────
@@ -173,13 +206,11 @@ class QaPage(QWidget):
 
         root.addLayout(input_row)
 
-        # Initial visibility based on default scope
         self._on_scope_changed(self._scope_combo.currentText())
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def refresh_documents(self) -> None:
-        """Repopulate document combo from DB."""
         self._doc_combo.blockSignals(True)
         try:
             self._doc_combo.clear()
@@ -197,7 +228,6 @@ class QaPage(QWidget):
             self._doc_combo.blockSignals(False)
 
     def refresh_compare_tasks(self) -> None:
-        """Repopulate compare task combo from DB (completed tasks only)."""
         self._compare_task_combo.blockSignals(True)
         try:
             self._compare_task_combo.clear()
@@ -229,12 +259,11 @@ class QaPage(QWidget):
             self._compare_task_combo.blockSignals(False)
 
     def send_question(self) -> None:
-        """Read input text, validate, and start QA worker."""
         question = self._input.toPlainText().strip()
         if not question:
             return
 
-        if self.ctx.provider is None or self.ctx.embedder is None:
+        if self.ctx.embedder is None or self.ctx.lc_model is None:
             self._add_message("assistant", "请先在设置页面配置模型")
             return
 
@@ -252,23 +281,29 @@ class QaPage(QWidget):
         elif scope == RetrievalScope.COMPARE:
             task_data = self._compare_task_combo.currentData()
             if task_data:
-                current_version_ids = list(task_data)  # [baseline_id, target_id]
+                current_version_ids = list(task_data)
+
+        bubble_label, _ = self._add_message("assistant", "")
+        self._current_bubble = bubble_label
+        self._accumulated = ""
 
         thread = QThread()
         worker = _QaWorker(
-            self.ctx.data_dir,
-            question,
-            self.ctx.provider,
-            self.ctx.embedder,
-            scope,
-            current_version_ids,
+            data_dir=self.ctx.data_dir,
+            question=question,
+            embedder=self.ctx.embedder,
+            lc_model=self.ctx.lc_model,
+            scope=scope,
+            current_version_ids=current_version_ids,
+            thread_id=self._thread_id,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.result_ready.connect(self._on_answer)
-        worker.result_ready.connect(thread.quit)
+        worker.token_received.connect(self._on_token)
+        worker.citations_ready.connect(self._on_citations)
         worker.error.connect(self._on_error)
-        worker.error.connect(thread.quit)
+        worker.done.connect(self._on_done)
+        worker.done.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(lambda: self._threads.discard(thread))
@@ -281,17 +316,71 @@ class QaPage(QWidget):
         self._doc_combo.setVisible(text == "当前文档")
         self._compare_task_label.setVisible(text == "对比文档")
         self._compare_task_combo.setVisible(text == "对比文档")
+        self._thread_id = str(uuid.uuid4())
 
-    def _on_answer(self, answer_text: str, hits: list) -> None:
-        self._add_message("assistant", answer_text, citations=hits)
+    def _on_doc_changed(self) -> None:
+        self._thread_id = str(uuid.uuid4())
+
+    def _new_session(self) -> None:
+        """Reset session: new thread_id + clear chat bubbles."""
+        self._thread_id = str(uuid.uuid4())
+        self._clear_chat()
+
+    def _clear_chat(self) -> None:
+        while self._chat_layout.count() > 1:
+            item = self._chat_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _on_token(self, token: str) -> None:
+        self._accumulated += token
+        if self._current_bubble is not None:
+            self._current_bubble.setText(self._accumulated)
+        self._chat_scroll.verticalScrollBar().setValue(
+            self._chat_scroll.verticalScrollBar().maximum()
+        )
+
+    def _on_citations(self, hits: list) -> None:
+        if not hits:
+            return
+        cit_outer = QWidget()
+        cit_layout = QHBoxLayout(cit_outer)
+        cit_layout.setContentsMargins(0, 0, 0, 0)
+
+        cit_parts: list[str] = []
+        for hit in hits:
+            chunk = hit.chunk
+            parts: list[str] = []
+            if chunk.section_path:
+                parts.append(chunk.section_path)
+            if chunk.page_no:
+                parts.append(f"p.{chunk.page_no}")
+            cit_parts.append("  ".join(parts))
+
+        cit_lbl = QLabel(f"引用：{' | '.join(cit_parts)}")
+        cit_lbl.setStyleSheet(
+            f"color:{Theme.TEXT_PLACEHOLDER};font-size:11px;margin-left:4px;"
+        )
+        cit_lbl.setWordWrap(True)
+        cit_layout.addWidget(cit_lbl)
+        cit_layout.addStretch()
+
+        self._chat_layout.insertWidget(self._chat_layout.count() - 1, cit_outer)
 
     def _on_error(self, msg: str) -> None:
-        self._add_message("assistant", f"错误：{msg}")
+        if self._current_bubble is not None:
+            self._current_bubble.setText(f"错误：{msg}")
+        else:
+            self._add_message("assistant", f"错误：{msg}")
+
+    def _on_done(self) -> None:
+        self._current_bubble = None
+        self._accumulated = ""
 
     # ── Message rendering ──────────────────────────────────────────────────────
 
-    def _add_message(self, role: str, text: str, citations: list | None = None) -> None:
-        """Add a chat bubble widget for user or assistant."""
+    def _add_message(self, role: str, text: str, citations: list | None = None) -> tuple[QLabel, QWidget]:
+        """Add a chat bubble. Returns (bubble_label, outer_widget)."""
         is_user = (role == "user")
 
         outer = QWidget()
@@ -311,32 +400,8 @@ class QaPage(QWidget):
             outer_layout.addStretch()
 
         self._chat_layout.insertWidget(self._chat_layout.count() - 1, outer)
-
-        if not is_user and citations:
-            cit_outer = QWidget()
-            cit_layout = QHBoxLayout(cit_outer)
-            cit_layout.setContentsMargins(0, 0, 0, 0)
-
-            cit_parts: list[str] = []
-            for hit in citations:
-                chunk = hit.chunk
-                parts: list[str] = []
-                if chunk.section_path:
-                    parts.append(chunk.section_path)
-                if chunk.page_no:
-                    parts.append(f"p.{chunk.page_no}")
-                cit_parts.append("  ".join(parts))
-
-            cit_lbl = QLabel(f"引用：{' | '.join(cit_parts)}")
-            cit_lbl.setStyleSheet(
-                f"color:{Theme.TEXT_PLACEHOLDER};font-size:11px;margin-left:4px;"
-            )
-            cit_lbl.setWordWrap(True)
-            cit_layout.addWidget(cit_lbl)
-            cit_layout.addStretch()
-
-            self._chat_layout.insertWidget(self._chat_layout.count() - 1, cit_outer)
-
         self._chat_scroll.verticalScrollBar().setValue(
             self._chat_scroll.verticalScrollBar().maximum()
         )
+
+        return bubble, outer

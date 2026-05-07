@@ -1,7 +1,7 @@
 # Doc-Diff-Agent 设计文档
 
-**日期**：2026-05-01  
-**状态**：第一阶段 MVP 已完成（2026-05-01）  
+**日期**：2026-05-01（最后更新：2026-05-07）  
+**状态**：第三阶段已完成（2026-05-07）  
 **技术路线**：方案 A（轻量直接模式，MVP 不引入 LangGraph）
 
 ---
@@ -373,9 +373,9 @@ PyInstaller --onedir
 
 ### 第三阶段
 
-- [ ] PyInstaller 打包 + Inno Setup 安装包
-- [ ] 数据备份恢复
-- [ ] 应用内更新检查
+- [x] PyInstaller 打包配置（build/doc_diff_agent.spec）+ Inno Setup 安装包脚本（build/installer.iss）（2026-05-07 完成）
+- [x] 数据备份恢复（app/services/backup_service.py，设置页集成，2026-05-07 完成）
+- [x] 应用内更新检查（app/services/update_checker.py，设置页集成，2026-05-07 完成）
 
 ---
 

@@ -85,7 +85,7 @@ def test_add_message_user(qtbot, qa_page):
 
 
 def test_add_message_assistant_with_citations(qtbot, qa_page):
-    """Assistant message with citations inserts bubble widget + citation widget."""
+    """Assistant message inserts one bubble; _on_citations inserts a second widget."""
     before = qa_page._chat_layout.count()
 
     chunk = Chunk(
@@ -97,9 +97,13 @@ def test_add_message_assistant_with_citations(qtbot, qa_page):
         text="示例文本",
     )
     hits = [ChunkHit(chunk=chunk, score=0.9)]
-    qa_page._add_message("assistant", "这是回答", citations=hits)
 
-    # bubble widget + citation widget = 2 items inserted before stretch
+    # _add_message inserts the bubble (1 item)
+    qa_page._add_message("assistant", "这是回答")
+    assert qa_page._chat_layout.count() == before + 1
+
+    # _on_citations inserts the citation row (1 more item)
+    qa_page._on_citations(hits)
     assert qa_page._chat_layout.count() == before + 2
 
 
