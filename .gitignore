@@ -11,6 +11,7 @@ build/*.spec.bak
 /app_data/
 venv/
 .venv/
+doc/
 docs/
 .pytest_cache/
 .claude/
