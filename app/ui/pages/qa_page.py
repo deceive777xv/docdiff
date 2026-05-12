@@ -35,7 +35,7 @@ _SCOPE_MAP: dict[str, RetrievalScope] = {
 
 def _user_bubble_style() -> str:
     return (
-        f"background:{Theme.COLOR_PRIMARY};color:white;"
+        f"background:{Theme.COLOR_PRIMARY};color:{Theme.NAV_ACTIVE_TEXT};"
         "border-radius:12px;padding:10px;margin:4px 0;"
     )
 

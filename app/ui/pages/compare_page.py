@@ -535,7 +535,7 @@ class ComparePage(QWidget):
 
         type_badge = QLabel(item.diff_type)
         type_badge.setStyleSheet(
-            f"background:{_color.name(QColor.NameFormat.HexArgb)};color:white;border-radius:4px;"
+            f"background:{_color.name(QColor.NameFormat.HexArgb)};color:{Theme.NAV_ACTIVE_TEXT};border-radius:4px;"
             "padding:2px 7px;font-size:11px;font-weight:bold;"
         )
         header_row.addWidget(type_badge)

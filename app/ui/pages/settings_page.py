@@ -167,7 +167,7 @@ class SettingsDialog(QDialog):
 
         save_btn = QPushButton("保存")
         save_btn.setStyleSheet(
-            f"background-color:{Theme.TEXT_PRIMARY};color:white;"
+            f"background-color:{Theme.TEXT_PRIMARY};color:{Theme.NAV_ACTIVE_TEXT};"
             "border:none;padding:8px 20px;border-radius:6px;font-size:13px;"
         )
         save_btn.setFixedWidth(80)
@@ -190,7 +190,7 @@ class SettingsDialog(QDialog):
             "border-radius:6px;font-size:13px;"
         )
         self._save_btn.setStyleSheet(
-            f"background-color:{Theme.TEXT_PRIMARY};color:white;"
+            f"background-color:{Theme.TEXT_PRIMARY};color:{Theme.NAV_ACTIVE_TEXT};"
             "border:none;padding:8px 20px;border-radius:6px;font-size:13px;"
         )
 

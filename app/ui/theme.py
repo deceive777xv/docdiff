@@ -12,7 +12,7 @@ CARD_RADIUS = 8
 LATTE: dict[str, str] = {
     # backgrounds
     "BG_SIDEBAR":      "#e6e9ef",
-    "BG_PAGE":         "#eff1f5",
+    "BG_PAGE":         "#e6e9ef",
     "BG_CARD":         "#ffffff",
     "BG_HEADER":       "#dce0e8",
     # text
@@ -21,7 +21,7 @@ LATTE: dict[str, str] = {
     "TEXT_PLACEHOLDER":"#9ca0b0",   # Overlay0
     # navigation
     "NAV_ACTIVE_BG":   "#209fb5",
-    "NAV_ACTIVE_TEXT": "#ffffff",
+    "NAV_ACTIVE_TEXT": "#b9bbbe",   # Mantle — off-white, avoids pure white
     "NAV_TEXT":        "#6c6f85",
     "LOGO_COLOR":      "#04a5e5",   # Sky
     # borders
@@ -44,21 +44,21 @@ LATTE: dict[str, str] = {
 # ── Catppuccin Mocha (dark) ───────────────────────────────────────────────────
 MOCHA: dict[str, str] = {
     # backgrounds
-    "BG_SIDEBAR":      "#181825",
-    "BG_PAGE":         "#1e1e2e",
-    "BG_CARD":         "#313244",
-    "BG_HEADER":       "#11111b",
+    "BG_SIDEBAR":      "#35394b",
+    "BG_PAGE":         "#35394b",
+    "BG_CARD":         "#414559",
+    "BG_HEADER":       "#232634",
     # text
     "TEXT_PRIMARY":    "#74c7ec",   # Sapphire — accent / heading color
     "TEXT_SECONDARY":  "#a6adc8",   # Subtext0
     "TEXT_PLACEHOLDER":"#6c7086",   # Overlay0
     # navigation
     "NAV_ACTIVE_BG":   "#74c7ec",
-    "NAV_ACTIVE_TEXT": "#1e1e2e",   # dark text on light Sapphire
+    "NAV_ACTIVE_TEXT": "#45475a",   # Surface1 — dark gray, not black
     "NAV_TEXT":        "#7f849c",   # Overlay0
     "LOGO_COLOR":      "#89dceb",   # Sky
     # borders
-    "BORDER":          "#45475a",   # Surface1
+    "BORDER":          "#8e94b3",   # Surface1
     # action palette
     "COLOR_PRIMARY":   "#74c7ec",
     "COLOR_SUCCESS":   "#94e2d5",   # Teal

@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>主题配色方案对比</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #f0f0f0; padding: 20px; }
+  h1 { font-size: 20px; margin-bottom: 20px; color: #333; text-align: center; }
+  h2 { font-size: 15px; margin-bottom: 12px; }
+  .row { display: flex; gap: 20px; margin-bottom: 30px; }
+  .panel { flex: 1; border-radius: 12px; padding: 16px; }
+  .panel-light { background: #eff1f5; border: 2px solid #ccd0da; }
+  .panel-dark  { background: #1e1e2e; border: 2px solid #313244; }
+  .panel-dark h2 { color: #cdd6f4; }
+  .swatch-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .swatch { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .swatch-box { width: 48px; height: 32px; border-radius: 6px; border: 1px solid rgba(0,0,0,0.15); }
+  .swatch-label { font-size: 9px; text-align: center; max-width: 52px; line-height: 1.2; }
+  .light-label { color: #4c4f69; }
+  .dark-label  { color: #a6adc8; }
+  .sep { font-size: 11px; margin: 8px 0 4px; font-weight: bold; }
+  .light-sep { color: #6c6f85; }
+  .dark-sep { color: #7f849c; }
+
+  /* Mock sidebar preview */
+  .preview-row { display: flex; gap: 20px; }
+  .mock { border-radius: 10px; overflow: hidden; width: 220px; height: 160px; flex-shrink: 0; box-shadow: 0 4px 16px rgba(0,0,0,0.18); }
+  .mock-sidebar-light { background: #e6e9ef; width: 60px; height: 100%; float: left; padding: 8px 4px; display: flex; flex-direction: column; gap: 4px; }
+  .mock-sidebar-dark  { background: #181825; width: 60px; height: 100%; float: left; padding: 8px 4px; display: flex; flex-direction: column; gap: 4px; }
+  .mock-content-light { background: #eff1f5; width: 160px; height: 100%; float: left; padding: 10px; }
+  .mock-content-dark  { background: #1e1e2e; width: 160px; height: 100%; float: left; padding: 10px; }
+  .nav-active-light { background: #209fb5; color: #fff; border-radius: 5px; font-size: 9px; padding: 4px 5px; text-align: center; }
+  .nav-inactive-light { color: #8c8fa1; font-size: 9px; padding: 4px 5px; text-align: center; }
+  .nav-active-dark  { background: #74c7ec; color: #11111b; border-radius: 5px; font-size: 9px; padding: 4px 5px; text-align: center; }
+  .nav-inactive-dark { color: #7f849c; font-size: 9px; padding: 4px 5px; text-align: center; }
+  .card-light { background: #ffffff; border: 1px solid #bcc0cc; border-radius: 6px; padding: 6px; margin-top: 6px; }
+  .card-dark  { background: #313244; border: 1px solid #45475a; border-radius: 6px; padding: 6px; margin-top: 6px; }
+  .card-title-light { color: #209fb5; font-size: 10px; font-weight: bold; }
+  .card-title-dark  { color: #74c7ec; font-size: 10px; font-weight: bold; }
+  .card-text-light  { color: #6c6f85; font-size: 8px; margin-top: 3px; }
+  .card-text-dark   { color: #a6adc8; font-size: 8px; margin-top: 3px; }
+  .toggle-btn-light { display: inline-block; background: #209fb5; color: #fff; border-radius: 14px; padding: 3px 8px; font-size: 8px; margin-top: 6px; }
+  .toggle-btn-dark  { display: inline-block; background: #74c7ec; color: #11111b; border-radius: 14px; padding: 3px 8px; font-size: 8px; margin-top: 6px; }
+  .logo-light { color: #04a5e5; font-size: 10px; font-weight: bold; padding: 4px 2px; }
+  .logo-dark  { color: #89dceb; font-size: 10px; font-weight: bold; padding: 4px 2px; }
+  .mock-inner { display: flex; height: 100%; }
+  .section-title { font-size: 13px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<h1>Catppuccin 主题配色对比预览</h1>
+
+<div class="preview-row" style="justify-content:center; margin-bottom: 28px;">
+  <div>
+    <p style="text-align:center;font-size:12px;color:#666;margin-bottom:6px;">☀️ 浅色主题 — Catppuccin Latte</p>
+    <div class="mock" style="width:220px;height:160px;">
+      <div class="mock-inner">
+        <div class="mock-sidebar-light">
+          <div class="logo-light">DocDiff</div>
+          <div class="nav-active-light">首页</div>
+          <div class="nav-inactive-light">对比</div>
+          <div class="nav-inactive-light">问答</div>
+        </div>
+        <div class="mock-content-light">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="color:#209fb5;font-size:11px;font-weight:bold;">文档对比</span>
+            <span class="toggle-btn-light">☀ 浅色</span>
+          </div>
+          <div class="card-light">
+            <div class="card-title-light">合同版本 v2</div>
+            <div class="card-text-light">发现 8 处差异 · 2处高风险</div>
+            <div style="margin-top:4px;display:flex;gap:3px;">
+              <span style="background:#209fb5;color:#fff;border-radius:3px;font-size:7px;padding:1px 4px;">新增</span>
+              <span style="background:#dd7878;color:#fff;border-radius:3px;font-size:7px;padding:1px 4px;">删减</span>
+              <span style="background:#df8e1d;color:#fff;border-radius:3px;font-size:7px;padding:1px 4px;">修改</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:flex;align-items:center;padding:0 10px;color:#999;font-size:20px;">⇄</div>
+
+  <div>
+    <p style="text-align:center;font-size:12px;color:#666;margin-bottom:6px;">🌙 深色主题 — Catppuccin Mocha</p>
+    <div class="mock" style="width:220px;height:160px;">
+      <div class="mock-inner">
+        <div class="mock-sidebar-dark">
+          <div class="logo-dark">DocDiff</div>
+          <div class="nav-active-dark">首页</div>
+          <div class="nav-inactive-dark">对比</div>
+          <div class="nav-inactive-dark">问答</div>
+        </div>
+        <div class="mock-content-dark">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <span style="color:#74c7ec;font-size:11px;font-weight:bold;">文档对比</span>
+            <span class="toggle-btn-dark">🌙 深色</span>
+          </div>
+          <div class="card-dark">
+            <div class="card-title-dark">合同版本 v2</div>
+            <div class="card-text-dark">发现 8 处差异 · 2处高风险</div>
+            <div style="margin-top:4px;display:flex;gap:3px;">
+              <span style="background:#74c7ec;color:#11111b;border-radius:3px;font-size:7px;padding:1px 4px;">新增</span>
+              <span style="background:#f2cdcd;color:#11111b;border-radius:3px;font-size:7px;padding:1px 4px;">删减</span>
+              <span style="background:#f9e2af;color:#11111b;border-radius:3px;font-size:7px;padding:1px 4px;">修改</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="panel panel-light">
+    <h2>☀️ Catppuccin Latte（浅色）</h2>
+    <p class="sep light-sep">背景层次</p>
+    <div class="swatch-row">
+      <div class="swatch"><div class="swatch-box" style="background:#eff1f5;"></div><div class="swatch-label light-label">页面背景<br>#eff1f5</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#e6e9ef;"></div><div class="swatch-label light-label">侧边栏<br>#e6e9ef</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#ffffff;"></div><div class="swatch-label light-label">卡片<br>#ffffff</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#dce0e8;"></div><div class="swatch-label light-label">表头<br>#dce0e8</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#bcc0cc;"></div><div class="swatch-label light-label">边框<br>#bcc0cc</div></div>
+    </div>
+    <p class="sep light-sep">强调色</p>
+    <div class="swatch-row">
+      <div class="swatch"><div class="swatch-box" style="background:#209fb5;"></div><div class="swatch-label light-label">主色 Sapphire<br>#209fb5</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#04a5e5;"></div><div class="swatch-label light-label">Logo Sky<br>#04a5e5</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#179299;"></div><div class="swatch-label light-label">成功 Teal<br>#179299</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#df8e1d;"></div><div class="swatch-label light-label">警告 Yellow<br>#df8e1d</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#d20f39;"></div><div class="swatch-label light-label">危险 Red<br>#d20f39</div></div>
+    </div>
+    <p class="sep light-sep">Diff 标注色</p>
+    <div class="swatch-row">
+      <div class="swatch"><div class="swatch-box" style="background:#209fb5;"></div><div class="swatch-label light-label">新增<br>#209fb5</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#dd7878;"></div><div class="swatch-label light-label">删减<br>#dd7878</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#dc8a78;"></div><div class="swatch-label light-label">微调<br>#dc8a78</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#df8e1d;"></div><div class="swatch-label light-label">实质修改<br>#df8e1d</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#ea76cb;"></div><div class="swatch-label light-label">重写<br>#ea76cb</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#8839ef;"></div><div class="swatch-label light-label">格式变化<br>#8839ef</div></div>
+    </div>
+  </div>
+
+  <div class="panel panel-dark">
+    <h2>🌙 Catppuccin Mocha（深色）</h2>
+    <p class="sep dark-sep">背景层次</p>
+    <div class="swatch-row">
+      <div class="swatch"><div class="swatch-box" style="background:#1e1e2e;border-color:rgba(255,255,255,0.1)"></div><div class="swatch-label dark-label">页面背景<br>#1e1e2e</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#181825;border-color:rgba(255,255,255,0.1)"></div><div class="swatch-label dark-label">侧边栏<br>#181825</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#313244;border-color:rgba(255,255,255,0.1)"></div><div class="swatch-label dark-label">卡片<br>#313244</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#11111b;border-color:rgba(255,255,255,0.1)"></div><div class="swatch-label dark-label">表头<br>#11111b</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#45475a;border-color:rgba(255,255,255,0.1)"></div><div class="swatch-label dark-label">边框<br>#45475a</div></div>
+    </div>
+    <p class="sep dark-sep">强调色</p>
+    <div class="swatch-row">
+      <div class="swatch"><div class="swatch-box" style="background:#74c7ec;"></div><div class="swatch-label dark-label">主色 Sapphire<br>#74c7ec</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#89dceb;"></div><div class="swatch-label dark-label">Logo Sky<br>#89dceb</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#94e2d5;"></div><div class="swatch-label dark-label">成功 Teal<br>#94e2d5</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#f9e2af;"></div><div class="swatch-label dark-label">警告 Yellow<br>#f9e2af</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#f38ba8;"></div><div class="swatch-label dark-label">危险 Red<br>#f38ba8</div></div>
+    </div>
+    <p class="sep dark-sep">Diff 标注色</p>
+    <div class="swatch-row">
+      <div class="swatch"><div class="swatch-box" style="background:#74c7ec;"></div><div class="swatch-label dark-label">新增<br>#74c7ec</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#f2cdcd;"></div><div class="swatch-label dark-label">删减<br>#f2cdcd</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#f5e0dc;"></div><div class="swatch-label dark-label">微调<br>#f5e0dc</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#f9e2af;"></div><div class="swatch-label dark-label">实质修改<br>#f9e2af</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#f5c2e7;"></div><div class="swatch-label dark-label">重写<br>#f5c2e7</div></div>
+      <div class="swatch"><div class="swatch-box" style="background:#cba6f7;"></div><div class="swatch-label dark-label">格式变化<br>#cba6f7</div></div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
