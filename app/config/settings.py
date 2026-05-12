@@ -48,12 +48,15 @@ class AppSettings:
 
 
 def load() -> AppSettings:
-    """Load settings from config.json. Returns defaults if file missing."""
+    """Load settings from config.json. Returns defaults if file missing or corrupt."""
     path = _config_path()
     if not path.exists():
         return AppSettings()
-    with path.open(encoding="utf-8") as f:
-        raw = json.load(f)
+    try:
+        with path.open(encoding="utf-8") as f:
+            raw = json.load(f)
+    except json.JSONDecodeError:
+        return AppSettings()
     providers = []
     for p in raw.get("providers", []):
         pc = ProviderConfig(
