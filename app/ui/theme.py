@@ -124,50 +124,25 @@ class Theme:
     PAGE_MARGIN = PAGE_MARGIN
     CARD_RADIUS = CARD_RADIUS
 
-    # Color attributes — initial values from LATTE, updated by ThemeManager
-    BG_SIDEBAR      = LATTE["BG_SIDEBAR"]
-    BG_PAGE         = LATTE["BG_PAGE"]
-    BG_CARD         = LATTE["BG_CARD"]
-    BG_HEADER       = LATTE["BG_HEADER"]
-    TEXT_PRIMARY    = LATTE["TEXT_PRIMARY"]
-    TEXT_SECONDARY  = LATTE["TEXT_SECONDARY"]
-    TEXT_PLACEHOLDER= LATTE["TEXT_PLACEHOLDER"]
-    NAV_ACTIVE_BG   = LATTE["NAV_ACTIVE_BG"]
-    NAV_ACTIVE_TEXT = LATTE["NAV_ACTIVE_TEXT"]
-    NAV_TEXT        = LATTE["NAV_TEXT"]
-    LOGO_COLOR      = LATTE["LOGO_COLOR"]
-    BORDER          = LATTE["BORDER"]
-    COLOR_PRIMARY   = LATTE["COLOR_PRIMARY"]
-    COLOR_SUCCESS   = LATTE["COLOR_SUCCESS"]
-    COLOR_DANGER    = LATTE["COLOR_DANGER"]
-    COLOR_WARNING   = LATTE["COLOR_WARNING"]
-    COLOR_COMPLETED = LATTE["COLOR_COMPLETED"]
-    DIFF_ADDED      = LATTE["DIFF_ADDED"]
-    DIFF_DELETED    = LATTE["DIFF_DELETED"]
-    DIFF_MINOR      = LATTE["DIFF_MINOR"]
-    DIFF_MAJOR      = LATTE["DIFF_MAJOR"]
-    DIFF_REWRITE    = LATTE["DIFF_REWRITE"]
-    DIFF_FORMAT     = LATTE["DIFF_FORMAT"]
-
     # QSS helper classmethods — read cls.X at call time, so they reflect current theme
     @classmethod
     def btn_primary(cls) -> str:
         return (
-            f"background-color:{cls.COLOR_PRIMARY};color:white;"
+            f"background-color:{cls.COLOR_PRIMARY};color:{cls.NAV_ACTIVE_TEXT};"
             f"border:none;border-radius:{CARD_RADIUS}px;padding:8px 16px;font-size:13px;"
         )
 
     @classmethod
     def btn_success(cls) -> str:
         return (
-            f"background-color:{cls.COLOR_SUCCESS};color:white;"
+            f"background-color:{cls.COLOR_SUCCESS};color:{cls.NAV_ACTIVE_TEXT};"
             f"border:none;border-radius:{CARD_RADIUS}px;padding:8px 16px;font-size:13px;"
         )
 
     @classmethod
     def btn_danger(cls) -> str:
         return (
-            f"background-color:{cls.COLOR_DANGER};color:white;"
+            f"background-color:{cls.COLOR_DANGER};color:{cls.NAV_ACTIVE_TEXT};"
             f"border:none;border-radius:{CARD_RADIUS}px;padding:8px 16px;font-size:13px;"
         )
 
@@ -189,3 +164,10 @@ class Theme:
     @classmethod
     def page_title(cls) -> str:
         return f"color:{cls.TEXT_PRIMARY};font-size:22px;font-weight:bold;"
+
+
+# Populate Theme color attributes from LATTE at import time.
+# ThemeManager can call setattr(Theme, k, v) for each key in MOCHA to switch themes.
+for _k, _v in LATTE.items():
+    setattr(Theme, _k, _v)
+del _k, _v
