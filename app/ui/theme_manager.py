@@ -70,4 +70,4 @@ class ThemeManager(QObject):
             from app.config import settings as settings_module
             settings_module.save(self._settings)
         except Exception:
-            logger.warning("Failed to save theme setting")
+            logger.warning("Failed to save theme setting", exc_info=True)
