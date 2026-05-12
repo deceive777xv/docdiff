@@ -40,6 +40,7 @@ class AppSettings:
     local_embedding: LocalEmbeddingConfig = field(default_factory=LocalEmbeddingConfig)
     active_provider: str = ""
     data_dir: str = field(default_factory=_default_data_dir)
+    theme: str = "light"
 
 
 def load() -> AppSettings:
@@ -69,6 +70,7 @@ def load() -> AppSettings:
         ),
         active_provider=raw.get("active_provider", ""),
         data_dir=raw.get("data_dir", "") or _default_data_dir(),
+        theme=raw.get("theme", "light"),
     )
 
 
@@ -94,6 +96,7 @@ def save(settings: AppSettings) -> None:
         },
         "active_provider": settings.active_provider,
         "data_dir": settings.data_dir,
+        "theme": settings.theme,
     }
     with path.open("w", encoding="utf-8") as f:
         json.dump(raw, f, ensure_ascii=False, indent=2)

@@ -89,3 +89,16 @@ def test_get_active_provider_fallback_to_first():
     settings = AppSettings(providers=[p1, p2], active_provider="nonexistent")
     result = get_active_provider(settings)
     assert result is p1
+
+
+def test_settings_theme_defaults_to_light():
+    s = AppSettings()
+    assert s.theme == "light"
+
+
+def test_settings_theme_persists_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    s = AppSettings(theme="dark")
+    save(s)
+    s2 = load()
+    assert s2.theme == "dark"
