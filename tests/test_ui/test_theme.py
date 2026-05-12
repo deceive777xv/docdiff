@@ -4,26 +4,34 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
+from app.ui.theme import LATTE, MOCHA, build_stylesheet
+from app.ui.theme_manager import ThemeManager, ThemeMode
+
+
+@pytest.fixture(autouse=True)
+def _reset_theme_manager():
+    from app.ui.theme_manager import ThemeManager
+    ThemeManager._instance = None
+    yield
+    ThemeManager._instance = None
+
 
 def test_build_stylesheet_latte_contains_primary():
     """build_stylesheet with LATTE includes the LATTE primary accent color."""
-    from app.ui.theme import LATTE, build_stylesheet
     qss = build_stylesheet(LATTE)
     assert LATTE["NAV_ACTIVE_BG"] in qss
 
 
 def test_build_stylesheet_mocha_contains_primary():
     """build_stylesheet with MOCHA includes the MOCHA primary accent color."""
-    from app.ui.theme import MOCHA, build_stylesheet
     qss = build_stylesheet(MOCHA)
     assert MOCHA["NAV_ACTIVE_BG"] in qss
 
 
 def test_theme_manager_toggle_cycles_light_dark_light():
     """toggle() cycles LIGHT → DARK → LIGHT."""
-    from app.ui.theme_manager import ThemeManager, ThemeMode
-
-    ThemeManager._instance = None
     tm = ThemeManager.instance()
     assert tm.mode() == ThemeMode.LIGHT
 
@@ -36,14 +44,9 @@ def test_theme_manager_toggle_cycles_light_dark_light():
     tm.toggle()
     assert tm.mode() == ThemeMode.LIGHT
 
-    ThemeManager._instance = None
-
 
 def test_theme_manager_persists_mode_to_settings():
     """After toggle(), settings.theme reflects the new mode value."""
-    from app.ui.theme_manager import ThemeManager, ThemeMode
-
-    ThemeManager._instance = None
     tm = ThemeManager.instance()
     mock_settings = MagicMock()
     mock_settings.theme = "light"
@@ -52,8 +55,6 @@ def test_theme_manager_persists_mode_to_settings():
 
     tm.toggle()
     assert mock_settings.theme == "dark"
-
-    ThemeManager._instance = None
 
 
 def test_fa_font_otf_exists():
