@@ -30,26 +30,35 @@ class _StatCard(QWidget):
 
     def __init__(self, label: str, value: str, color: str = Theme.COLOR_PRIMARY, parent=None):
         super().__init__(parent)
-        _color = QColor(color)
-        _color.setAlpha(50)
-        self.setStyleSheet(
-            f"background:{_color.name(QColor.NameFormat.HexArgb)};border:1px solid {color};"
-            f"border-radius:{Theme.CARD_RADIUS}px;padding:12px;"
-        )
+        self._color_hex = color
         layout = QVBoxLayout(self)
         layout.setSpacing(4)
 
         val_lbl = QLabel(value)
-        val_lbl.setStyleSheet(f"font-size:26px;font-weight:bold;color:{color};")
         val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(val_lbl)
 
         lbl = QLabel(label)
-        lbl.setStyleSheet(Theme.label_secondary()+f"font-size:14px;color:{color};")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl)
 
         self._val_lbl = val_lbl
+        self._lbl = lbl
+        self._apply_color(color)
+
+    def _apply_color(self, color: str) -> None:
+        self._color_hex = color
+        _c = QColor(color)
+        _c.setAlpha(50)
+        self.setStyleSheet(
+            f"background:{_c.name(QColor.NameFormat.HexArgb)};border:1px solid {color};"
+            f"border-radius:{Theme.CARD_RADIUS}px;padding:12px;"
+        )
+        self._val_lbl.setStyleSheet(f"font-size:26px;font-weight:bold;color:{color};")
+        self._lbl.setStyleSheet(Theme.label_secondary() + f"font-size:14px;color:{color};")
+
+    def refresh_theme(self) -> None:
+        self._apply_color(self._color_hex)
 
     def update_value(self, value: str) -> None:
         self._val_lbl.setText(value)
@@ -64,6 +73,9 @@ class HomePage(QWidget):
         super().__init__(parent)
         self.ctx = ctx
         self._build_ui()
+        self._apply_theme()
+        from app.ui.theme_manager import ThemeManager
+        ThemeManager.instance().theme_changed.connect(self._apply_theme)
         self.refresh()
 
     def _build_ui(self) -> None:
@@ -75,10 +87,12 @@ class HomePage(QWidget):
         # Title
         title = QLabel("Doc-Diff-Agent")
         title.setStyleSheet(Theme.page_title())
+        self._title = title
         layout.addWidget(title)
 
         subtitle = QLabel("智能文档对比与问答平台")
         subtitle.setStyleSheet(Theme.label_secondary()+f"font-size:14px;")
+        self._subtitle = subtitle
         layout.addWidget(subtitle)
 
         # Stat cards
@@ -100,19 +114,17 @@ class HomePage(QWidget):
         actions_layout.setSpacing(12)
 
         actions = [
-            ("导入标准文档", 2, Theme.COLOR_PRIMARY),
-            ("开始文档对比", 1, Theme.COLOR_SUCCESS),
-            ("智能问答",      3, Theme.COLOR_COMPLETED),
+            ("导入标准文档", 2, "COLOR_PRIMARY"),
+            ("开始文档对比", 1, "COLOR_SUCCESS"),
+            ("智能问答",      3, "COLOR_COMPLETED"),
         ]
-        for label, page_idx, color in actions:
+        self._action_buttons = []
+        for label, page_idx, color_attr in actions:
             btn = QPushButton(label)
-            btn.setStyleSheet(
-                f"background-color:{color};color:white;padding:10px 20px;"
-                f"border:none;border-radius:{Theme.CARD_RADIUS}px;font-size:16px;"
-            )
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda checked, i=page_idx: self.navigate_requested.emit(i))
             actions_layout.addWidget(btn)
+            self._action_buttons.append((btn, color_attr))
 
         layout.addWidget(actions_group)
 
@@ -131,6 +143,20 @@ class HomePage(QWidget):
 
         layout.addWidget(recent_group)
         layout.addStretch()
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
+        self._title.setStyleSheet(Theme.page_title())
+        self._subtitle.setStyleSheet(Theme.label_secondary() + "font-size:14px;")
+        self._card_docs.refresh_theme()
+        self._card_tasks.refresh_theme()
+        self._card_done.refresh_theme()
+        for btn, color_attr in self._action_buttons:
+            color = getattr(Theme, color_attr)
+            btn.setStyleSheet(
+                f"background-color:{color};color:white;padding:10px 20px;"
+                f"border:none;border-radius:{Theme.CARD_RADIUS}px;font-size:16px;"
+            )
 
     def refresh(self) -> None:
         """Reload stats and recent tasks from DB."""

@@ -70,6 +70,9 @@ class LibraryPage(QWidget):
         self.ctx = ctx
         self._threads: set[QThread] = set()
         self._build_ui()
+        self._apply_theme()
+        from app.ui.theme_manager import ThemeManager
+        ThemeManager.instance().theme_changed.connect(self._apply_theme)
         self.refresh()
 
     def _build_ui(self) -> None:
@@ -81,12 +84,14 @@ class LibraryPage(QWidget):
         header = QHBoxLayout()
         title = QLabel("标准文档库")
         title.setStyleSheet(Theme.page_title())
+        self._title = title
         header.addWidget(title)
         header.addStretch()
 
         import_btn = QPushButton("导入标准文档")
         import_btn.setStyleSheet(Theme.btn_primary())
         import_btn.clicked.connect(self._import_document)
+        self._import_btn = import_btn
         header.addWidget(import_btn)
 
         self._add_version_btn = QPushButton("新增版本")
@@ -119,6 +124,22 @@ class LibraryPage(QWidget):
         self._status = QLabel("")
         self._status.setStyleSheet(Theme.label_secondary())
         layout.addWidget(self._status)
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
+        if hasattr(self, '_title'):
+            self._title.setStyleSheet(Theme.page_title())
+        if hasattr(self, '_import_btn'):
+            self._import_btn.setStyleSheet(Theme.btn_primary())
+        if hasattr(self, '_add_version_btn'):
+            self._add_version_btn.setStyleSheet(Theme.btn_success())
+        self._table.setStyleSheet(
+            f"QTableWidget {{ background:{Theme.BG_CARD};gridline-color:{Theme.BORDER}; }}"
+            f"QHeaderView::section {{ background:{Theme.BG_HEADER};color:{Theme.TEXT_PRIMARY};"
+            f"border:1px solid {Theme.BORDER};padding:4px; }}"
+        )
+        if hasattr(self, '_status'):
+            self._status.setStyleSheet(Theme.label_secondary())
 
     def refresh(self) -> None:
         """Reload documents from DB."""
