@@ -131,6 +131,7 @@ class QaPage(QWidget):
         self._current_bubble: QLabel | None = None
         self._build_ui()
         self.refresh_documents()
+        self._apply_theme()
         from app.ui.theme_manager import ThemeManager
         ThemeManager.instance().theme_changed.connect(self._apply_theme)
 
