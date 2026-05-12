@@ -55,6 +55,10 @@ def main() -> None:
 
     settings = load()
 
+    # Apply theme before building any UI widgets
+    from app.ui.theme_manager import ThemeManager
+    ThemeManager.instance().setup(settings, app)
+
     data_dir = (
         Path(settings.data_dir)
         if settings.data_dir
