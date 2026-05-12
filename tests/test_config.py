@@ -1,6 +1,8 @@
 """Tests for app/config/crypto.py and app/config/settings.py."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.config.crypto import decrypt, encrypt
@@ -108,7 +110,6 @@ def test_settings_theme_persists_round_trip(tmp_path, monkeypatch):
 
 def test_settings_invalid_theme_resets_to_light(tmp_path, monkeypatch):
     """An invalid theme value in config.json is normalised to 'light'."""
-    import json
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"theme": "purple"}))
     monkeypatch.setattr("app.config.settings._config_path", lambda: config_path)
