@@ -37,20 +37,23 @@ logger = logging.getLogger(__name__)
 
 # ── Diff type → (CSS class, hex color) mapping ────────────────────────────────
 
-_DIFF_CSS: dict[str, tuple[str, str]] = {
-    "新增":     ("added",   Theme.DIFF_ADDED),
-    "删减":     ("deleted", Theme.DIFF_DELETED),
-    "微调":     ("minor",   Theme.DIFF_MINOR),
-    "实质修改": ("major",   Theme.DIFF_MAJOR),
-    "重写":     ("rewrite", Theme.DIFF_REWRITE),
-    "格式变化": ("format",  Theme.DIFF_FORMAT),
-}
+def _diff_css() -> dict:
+    return {
+        "新增":     ("added",   Theme.DIFF_ADDED),
+        "删减":     ("deleted", Theme.DIFF_DELETED),
+        "微调":     ("minor",   Theme.DIFF_MINOR),
+        "实质修改": ("major",   Theme.DIFF_MAJOR),
+        "重写":     ("rewrite", Theme.DIFF_REWRITE),
+        "格式变化": ("format",  Theme.DIFF_FORMAT),
+    }
 
-_RISK_COLORS: dict[str, str] = {
-    "high":   Theme.DIFF_DELETED,
-    "medium": Theme.DIFF_MAJOR,
-    "low":    Theme.DIFF_ADDED,
-}
+
+def _risk_colors() -> dict:
+    return {
+        "high":   Theme.DIFF_DELETED,
+        "medium": Theme.DIFF_MAJOR,
+        "low":    Theme.DIFF_ADDED,
+    }
 
 _RISK_LABELS: dict[str, str] = {
     "high":   "高风险",
@@ -140,6 +143,8 @@ class ComparePage(QWidget):
         self._diff_items_by_id: dict[str, DiffItem] = {}
         self._threads: set[QThread] = set()
         self._build_ui()
+        from app.ui.theme_manager import ThemeManager
+        ThemeManager.instance().theme_changed.connect(self._apply_theme)
         self.refresh_versions()
 
     # ── UI construction ────────────────────────────────────────────────────────
@@ -194,7 +199,7 @@ class ComparePage(QWidget):
         overview_layout = QHBoxLayout(overview_group)
         overview_layout.setSpacing(8)
         self._overview_labels: dict[str, QLabel] = {}
-        for diff_type, (_, color) in _DIFF_CSS.items():
+        for diff_type, (_, color) in _diff_css().items():
             _color = QColor(color)
             _color.setAlpha(30)
             lbl = QLabel(f"{diff_type}: 0")
@@ -261,7 +266,7 @@ class ComparePage(QWidget):
 
         self._filter_type_combo = QComboBox()
         self._filter_type_combo.addItem("全部类型", None)
-        for diff_type in _DIFF_CSS:
+        for diff_type in _diff_css():
             self._filter_type_combo.addItem(diff_type, diff_type)
         self._filter_type_combo.currentIndexChanged.connect(self._apply_filters)
         filter_bar.addWidget(self._filter_type_combo)
@@ -277,14 +282,9 @@ class ComparePage(QWidget):
 
         # Scrollable diff card list
         self._detail_scroll = QScrollArea()
+        self._detail_scroll.setObjectName("detail_scroll")
         self._detail_scroll.setWidgetResizable(True)
         self._detail_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._detail_scroll.setStyleSheet("""
-            QScrollArea {
-                border: 1px solid #dde1ea;
-                border-radius: 4px;
-            }
-        """)
         self._detail_content = QWidget()
         self._detail_layout = QVBoxLayout(self._detail_content)
         self._detail_layout.setSpacing(6)
@@ -472,7 +472,7 @@ class ComparePage(QWidget):
             target_parts.append(f"<h3>{section_title}</h3>")
 
             for item in items:
-                css_cls, _ = _DIFF_CSS.get(item.diff_type, ("format", Theme.DIFF_FORMAT))
+                css_cls, _ = _diff_css().get(item.diff_type, ("format", Theme.DIFF_FORMAT))
                 did = html.escape(item.diff_id)
 
                 if item.baseline_text:
@@ -513,8 +513,8 @@ class ComparePage(QWidget):
 
     def _make_diff_card(self, item: DiffItem) -> QWidget:
         """Build a compact info card for one DiffItem."""
-        css_cls, color = _DIFF_CSS.get(item.diff_type, ("format", Theme.DIFF_FORMAT))  # noqa: F841
-        risk_color = _RISK_COLORS.get(item.risk_level, Theme.TEXT_SECONDARY)
+        css_cls, color = _diff_css().get(item.diff_type, ("format", Theme.DIFF_FORMAT))  # noqa: F841
+        risk_color = _risk_colors().get(item.risk_level, Theme.TEXT_SECONDARY)
         _color = QColor(color)
         _color.setAlpha(20)
         _risk_color = QColor(risk_color)
@@ -535,7 +535,7 @@ class ComparePage(QWidget):
 
         type_badge = QLabel(item.diff_type)
         type_badge.setStyleSheet(
-            f"background:{_color.name(QColor.NameFormat.HexArgb)};color:white;border-radius:4px;"
+            f"background:{_color.name(QColor.NameFormat.HexArgb)};color:{Theme.NAV_ACTIVE_TEXT};border-radius:4px;"
             "padding:2px 7px;font-size:11px;font-weight:bold;"
         )
         header_row.addWidget(type_badge)
@@ -589,8 +589,21 @@ class ComparePage(QWidget):
             exp_text = item.explanation
             display = exp_text[:200] + ("…" if len(exp_text) > 200 else "")
             exp_lbl = QLabel(f"解释：{display}")
-            exp_lbl.setStyleSheet("color:#374151;font-size:12px;")
+            exp_lbl.setStyleSheet(f"color:{Theme.TEXT_SECONDARY};font-size:12px;")
             exp_lbl.setWordWrap(True)
             card_layout.addWidget(exp_lbl)
 
         return card
+
+    # ── Theme handling ─────────────────────────────────────────────────────────
+
+    def _apply_theme(self) -> None:
+        """Re-apply all inline stylesheets that reference Theme values."""
+        self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
+        self._run_btn.setStyleSheet(Theme.btn_primary())
+        self._loading_label.setStyleSheet(Theme.label_secondary())
+        self._export_btn.setStyleSheet(
+            f"background-color:transparent;color:{Theme.TEXT_PRIMARY};"
+            f"border:1px solid {Theme.TEXT_PRIMARY};padding:6px 14px;"
+            f"border-radius:{Theme.CARD_RADIUS}px;font-size:13px;"
+        )

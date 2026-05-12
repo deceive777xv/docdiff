@@ -33,14 +33,18 @@ _SCOPE_MAP: dict[str, RetrievalScope] = {
     "全部": RetrievalScope.ALL,
 }
 
-_USER_BUBBLE_STYLE = (
-    f"background:{Theme.COLOR_PRIMARY};color:white;"
-    "border-radius:12px;padding:10px;margin:4px 0;"
-)
-_ASST_BUBBLE_STYLE = (
-    f"background:{Theme.BG_CARD};border:1px solid {Theme.BORDER};"
-    "border-radius:12px;padding:10px;margin:4px 0;"
-)
+def _user_bubble_style() -> str:
+    return (
+        f"background:{Theme.COLOR_PRIMARY};color:{Theme.NAV_ACTIVE_TEXT};"
+        "border-radius:12px;padding:10px;margin:4px 0;"
+    )
+
+
+def _asst_bubble_style() -> str:
+    return (
+        f"background:{Theme.BG_CARD};border:1px solid {Theme.BORDER};"
+        "border-radius:12px;padding:10px;margin:4px 0;"
+    )
 
 
 class _QaWorker(QObject):
@@ -127,6 +131,9 @@ class QaPage(QWidget):
         self._current_bubble: QLabel | None = None
         self._build_ui()
         self.refresh_documents()
+        self._apply_theme()
+        from app.ui.theme_manager import ThemeManager
+        ThemeManager.instance().theme_changed.connect(self._apply_theme)
 
     # ── UI construction ────────────────────────────────────────────────────────
 
@@ -134,7 +141,6 @@ class QaPage(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(8)
-        self.setStyleSheet(f"background-color:{Theme.BG_CARD};")
 
         # ── Top: scope/document selectors + 新会话 button ──────────────────────
         top_group = QGroupBox()
@@ -163,24 +169,19 @@ class QaPage(QWidget):
 
         top_layout.addStretch()
 
-        new_session_btn = QPushButton("新会话")
-        new_session_btn.setStyleSheet(Theme.btn_primary())
-        new_session_btn.setFixedWidth(72)
-        new_session_btn.clicked.connect(self._new_session)
-        top_layout.addWidget(new_session_btn)
+        self._new_session_btn = QPushButton("新会话")
+        self._new_session_btn.setStyleSheet(Theme.btn_primary())
+        self._new_session_btn.setFixedWidth(72)
+        self._new_session_btn.clicked.connect(self._new_session)
+        top_layout.addWidget(self._new_session_btn)
 
         root.addWidget(top_group)
 
         # ── Middle: chat scroll area ───────────────────────────────────────────
         self._chat_scroll = QScrollArea()
+        self._chat_scroll.setObjectName("chat_scroll")
         self._chat_scroll.setWidgetResizable(True)
         self._chat_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        self._chat_scroll.setStyleSheet("""
-            QScrollArea {
-                border: 1px solid #dde1ea;
-                border-radius: 4px;
-            }
-        """)
         self._chat_content = QWidget()
         self._chat_layout = QVBoxLayout(self._chat_content)
         self._chat_layout.setSpacing(4)
@@ -198,15 +199,22 @@ class QaPage(QWidget):
         self._input.setPlaceholderText("输入问题…")
         input_row.addWidget(self._input, 1)
 
-        send_btn = QPushButton("发送")
-        send_btn.setStyleSheet(Theme.btn_primary())
-        send_btn.setFixedWidth(72)
-        send_btn.clicked.connect(self.send_question)
-        input_row.addWidget(send_btn)
+        self._send_btn = QPushButton("发送")
+        self._send_btn.setStyleSheet(Theme.btn_primary())
+        self._send_btn.setFixedWidth(72)
+        self._send_btn.clicked.connect(self.send_question)
+        input_row.addWidget(self._send_btn)
 
         root.addLayout(input_row)
 
         self._on_scope_changed(self._scope_combo.currentText())
+
+    # ── Theme ──────────────────────────────────────────────────────────────────
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(f"background-color:{Theme.BG_CARD};")
+        self._new_session_btn.setStyleSheet(Theme.btn_primary())
+        self._send_btn.setStyleSheet(Theme.btn_primary())
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -389,7 +397,7 @@ class QaPage(QWidget):
 
         bubble = QLabel(text)
         bubble.setWordWrap(True)
-        bubble.setStyleSheet(_USER_BUBBLE_STYLE if is_user else _ASST_BUBBLE_STYLE)
+        bubble.setStyleSheet(_user_bubble_style() if is_user else _asst_bubble_style())
         bubble.setMaximumWidth(600)
 
         if is_user:

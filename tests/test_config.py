@@ -1,6 +1,8 @@
 """Tests for app/config/crypto.py and app/config/settings.py."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.config.crypto import decrypt, encrypt
@@ -89,3 +91,27 @@ def test_get_active_provider_fallback_to_first():
     settings = AppSettings(providers=[p1, p2], active_provider="nonexistent")
     result = get_active_provider(settings)
     assert result is p1
+
+
+def test_settings_theme_defaults_to_light():
+    """AppSettings defaults theme to 'light'."""
+    s = AppSettings()
+    assert s.theme == "light"
+
+
+def test_settings_theme_persists_round_trip(tmp_path, monkeypatch):
+    """theme value survives a save/load cycle."""
+    monkeypatch.setattr("app.config.settings._config_path", lambda: tmp_path / "config.json")
+    s = AppSettings(theme="dark")
+    save(s)
+    s2 = load()
+    assert s2.theme == "dark"
+
+
+def test_settings_invalid_theme_resets_to_light(tmp_path, monkeypatch):
+    """An invalid theme value in config.json is normalised to 'light'."""
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"theme": "purple"}))
+    monkeypatch.setattr("app.config.settings._config_path", lambda: config_path)
+    s = load()
+    assert s.theme == "light"

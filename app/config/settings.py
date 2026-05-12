@@ -40,15 +40,23 @@ class AppSettings:
     local_embedding: LocalEmbeddingConfig = field(default_factory=LocalEmbeddingConfig)
     active_provider: str = ""
     data_dir: str = field(default_factory=_default_data_dir)
+    theme: str = "light"
+
+    def __post_init__(self):
+        if self.theme not in ("light", "dark"):
+            self.theme = "light"
 
 
 def load() -> AppSettings:
-    """Load settings from config.json. Returns defaults if file missing."""
+    """Load settings from config.json. Returns defaults if file missing or corrupt."""
     path = _config_path()
     if not path.exists():
         return AppSettings()
-    with path.open(encoding="utf-8") as f:
-        raw = json.load(f)
+    try:
+        with path.open(encoding="utf-8") as f:
+            raw = json.load(f)
+    except json.JSONDecodeError:
+        return AppSettings()
     providers = []
     for p in raw.get("providers", []):
         pc = ProviderConfig(
@@ -61,7 +69,7 @@ def load() -> AppSettings:
         )
         providers.append(pc)
     le_raw = raw.get("local_embedding", {})
-    return AppSettings(
+    settings = AppSettings(
         providers=providers,
         local_embedding=LocalEmbeddingConfig(
             enabled=le_raw.get("enabled", False),
@@ -69,7 +77,9 @@ def load() -> AppSettings:
         ),
         active_provider=raw.get("active_provider", ""),
         data_dir=raw.get("data_dir", "") or _default_data_dir(),
+        theme=raw.get("theme", "light"),
     )
+    return settings
 
 
 def save(settings: AppSettings) -> None:
@@ -94,6 +104,7 @@ def save(settings: AppSettings) -> None:
         },
         "active_provider": settings.active_provider,
         "data_dir": settings.data_dir,
+        "theme": settings.theme,
     }
     with path.open("w", encoding="utf-8") as f:
         json.dump(raw, f, ensure_ascii=False, indent=2)
