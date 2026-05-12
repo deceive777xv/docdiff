@@ -92,12 +92,14 @@ def test_get_active_provider_fallback_to_first():
 
 
 def test_settings_theme_defaults_to_light():
+    """AppSettings defaults theme to 'light'."""
     s = AppSettings()
     assert s.theme == "light"
 
 
 def test_settings_theme_persists_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setenv("APPDATA", str(tmp_path))
+    """theme value survives a save/load cycle."""
+    monkeypatch.setattr("app.config.settings._config_path", lambda: tmp_path / "config.json")
     s = AppSettings(theme="dark")
     save(s)
     s2 = load()
@@ -105,12 +107,10 @@ def test_settings_theme_persists_round_trip(tmp_path, monkeypatch):
 
 
 def test_settings_invalid_theme_resets_to_light(tmp_path, monkeypatch):
-    monkeypatch.setenv("APPDATA", str(tmp_path))
-    # Write a config with an invalid theme value
+    """An invalid theme value in config.json is normalised to 'light'."""
     import json
-    config_path = tmp_path / "DocDiffAgent" / "config.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"theme": "purple"}))
-    from app.config.settings import load
+    monkeypatch.setattr("app.config.settings._config_path", lambda: config_path)
     s = load()
     assert s.theme == "light"

@@ -42,6 +42,10 @@ class AppSettings:
     data_dir: str = field(default_factory=_default_data_dir)
     theme: str = "light"
 
+    def __post_init__(self):
+        if self.theme not in ("light", "dark"):
+            self.theme = "light"
+
 
 def load() -> AppSettings:
     """Load settings from config.json. Returns defaults if file missing."""
@@ -72,8 +76,6 @@ def load() -> AppSettings:
         data_dir=raw.get("data_dir", "") or _default_data_dir(),
         theme=raw.get("theme", "light"),
     )
-    if settings.theme not in ("light", "dark"):
-        settings.theme = "light"
     return settings
 
 
