@@ -109,8 +109,10 @@ class ThemeToggleButton(QToolButton):
         from app.ui.theme_manager import ThemeManager, ThemeMode
         if ThemeManager.instance().mode() == ThemeMode.LIGHT:
             self.setText(_FA_MOON)
+            self.setStyleSheet("color: black;")
         else:
             self.setText(_FA_SUN)
+            self.setStyleSheet("color: white;")
         if not _FA_SOLID_FAMILY:
             # FA font not loaded — fall back to emoji
             self.setText("☀" if ThemeManager.instance().mode() == ThemeMode.DARK else "🌙")
