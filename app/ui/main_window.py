@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -38,9 +39,12 @@ _FA_SOLID_FAMILY: str = ""
 _HARMONY_SANS_DIR = Path(__file__).parent.parent.parent / "assets" / "fonts" / "HarmonyOS_Sans"
 _HARMONY_FAMILY: str = ""
 
+# FA glyphs: moon = shown in light mode (click → go dark), sun = shown in dark mode
+_FA_MOON = "\uf186"
+_FA_SUN  = "\uf185"
+
 
 def _load_fa_solid() -> str:
-    """Load FA Solid font on first call; return the font family name."""
     global _FA_SOLID_FAMILY
     if not _FA_SOLID_FAMILY and _FA_SOLID_OTF.exists():
         fid = QFontDatabase.addApplicationFont(str(_FA_SOLID_OTF))
@@ -52,7 +56,6 @@ def _load_fa_solid() -> str:
 
 
 def load_harmony_sans() -> str:
-    """Load all HarmonyOS Sans weights; return the font family name."""
     global _HARMONY_FAMILY
     if _HARMONY_FAMILY:
         return _HARMONY_FAMILY
@@ -73,45 +76,62 @@ def load_harmony_sans() -> str:
 
 
 class NavButton(QPushButton):
-    _ACTIVE_STYLE = (
-        f"background-color:{Theme.NAV_ACTIVE_BG};color:{Theme.NAV_ACTIVE_TEXT};"
-        "border:none;padding:12px 8px;text-align:left;font-size:14px;border-radius:6px;"
-    )
-    _INACTIVE_STYLE = (
-        f"background-color:transparent;color:{Theme.NAV_TEXT};"
-        "border:none;padding:12px 8px;text-align:left;font-size:14px;border-radius:6px;"
-    )
+    """Navigation button whose active/inactive style is driven by global QSS
+    via the dynamic property ``nav_active``."""
 
     def __init__(self, label: str, parent=None):
         super().__init__(label, parent)
-        self.setStyleSheet(self._INACTIVE_STYLE)
+        self._is_active = False
+        self.setProperty("nav_active", "false")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedWidth(Theme.SIDEBAR_WIDTH - 16)
 
     def set_active(self, active: bool) -> None:
-        self.setStyleSheet(self._ACTIVE_STYLE if active else self._INACTIVE_STYLE)
+        self._is_active = active
+        self.setProperty("nav_active", "true" if active else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+
+class ThemeToggleButton(QToolButton):
+    """Top-right button that shows a moon (light mode) or sun (dark mode) glyph."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        fa_family = _load_fa_solid()
+        if fa_family:
+            self.setFont(QFont(fa_family, 16))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet("border:none;padding:4px 8px;background:transparent;")
+        self._update_glyph()
+
+    def _update_glyph(self) -> None:
+        from app.ui.theme_manager import ThemeManager, ThemeMode
+        if ThemeManager.instance().mode() == ThemeMode.LIGHT:
+            self.setText(_FA_MOON)
+        else:
+            self.setText(_FA_SUN)
+        if not self.font().family():
+            # FA font not loaded — fall back to emoji
+            self.setText("☀" if ThemeManager.instance().mode() == ThemeMode.DARK else "🌙")
+
+    def on_theme_changed(self) -> None:
+        self._update_glyph()
 
 
 class SideBar(QWidget):
     def __init__(self, on_navigate, on_settings, parent=None):
         super().__init__(parent)
+        self.setObjectName("sidebar")
         self.setFixedWidth(Theme.SIDEBAR_WIDTH)
-        self.setStyleSheet(f"background-color:{Theme.BG_SIDEBAR};")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 16, 8, 16)
         layout.setSpacing(4)
 
-        # Logo row: icon + text
+        # Logo row — objectName used by global QSS for border color
         logo_row = QWidget()
-        logo_row.setStyleSheet("""
-            QWidget {
-            border-top-left-radius: 5px;
-            border-top-right-radius: 5px;
-            border-bottom: 2px solid #3498db;
-            border-right: 2px solid #3498db;
-            }
-        """)
+        logo_row.setObjectName("logo_row")
         logo_layout = QHBoxLayout(logo_row)
         logo_layout.setContentsMargins(4, 4, 4, 4)
         logo_layout.setSpacing(8)
@@ -125,11 +145,11 @@ class SideBar(QWidget):
             logo_img.setStyleSheet("border: none;")
         logo_layout.addWidget(logo_img)
 
-        logo_text = QLabel("DocDiff")
+        self._logo_text = QLabel("DocDiff")
         _harmony = load_harmony_sans()
-        logo_text.setFont(QFont(_harmony or "Segoe UI", 14, QFont.Weight.Bold))
-        logo_text.setStyleSheet(f"color:{Theme.LOGO_COLOR};border: none;")
-        logo_layout.addWidget(logo_text)
+        self._logo_text.setFont(QFont(_harmony or "Segoe UI", 14, QFont.Weight.Bold))
+        self._logo_text.setStyleSheet(f"color:{Theme.LOGO_COLOR};border: none;")
+        logo_layout.addWidget(self._logo_text)
         logo_layout.addStretch()
         layout.addWidget(logo_row)
         layout.addSpacing(16)
@@ -144,35 +164,46 @@ class SideBar(QWidget):
 
         layout.addStretch()
 
-        # Settings row: FA icon (FA font) + "设置" (HarmonyOS Sans)
-        settings_row = QWidget()
-        settings_row.setFixedWidth(Theme.SIDEBAR_WIDTH - 16)
-        settings_row.setCursor(Qt.CursorShape.PointingHandCursor)
-        settings_row.setStyleSheet(
-            f"background-color:transparent;border-top:1px solid {Theme.BORDER};"
-        )
-        _sr_layout = QHBoxLayout(settings_row)
+        # Settings row
+        self._settings_row = QWidget()
+        self._settings_row.setFixedWidth(Theme.SIDEBAR_WIDTH - 16)
+        self._settings_row.setCursor(Qt.CursorShape.PointingHandCursor)
+        _sr_layout = QHBoxLayout(self._settings_row)
         _sr_layout.setContentsMargins(8, 12, 8, 12)
         _sr_layout.setSpacing(6)
 
-        _icon_lbl = QLabel("\uf013")
+        self._settings_icon = QLabel("\uf013")
         fa_family = _load_fa_solid()
         if fa_family:
-            _icon_lbl.setFont(QFont(fa_family, 14))
-        _icon_lbl.setStyleSheet(f"color:{Theme.NAV_TEXT};border:none;")
-        _sr_layout.addWidget(_icon_lbl)
+            self._settings_icon.setFont(QFont(fa_family, 14))
+        _sr_layout.addWidget(self._settings_icon)
 
-        _text_lbl = QLabel("设置")
+        self._settings_text = QLabel("设置")
         if _harmony:
-            _text_lbl.setFont(QFont(_harmony, 16, QFont.Weight.Bold))
-        _text_lbl.setStyleSheet(f"color:{Theme.NAV_TEXT};border:none;font-size:16px;")
-        _sr_layout.addWidget(_text_lbl)
+            self._settings_text.setFont(QFont(_harmony, 16, QFont.Weight.Bold))
+        _sr_layout.addWidget(self._settings_text)
         _sr_layout.addStretch()
 
-        settings_row.mousePressEvent = lambda e: on_settings()
-        layout.addWidget(settings_row)
+        self._settings_row.mousePressEvent = lambda e: on_settings()
+        layout.addWidget(self._settings_row)
 
         self._set_active(0)
+        self._apply_theme()
+
+        from app.ui.theme_manager import ThemeManager
+        ThemeManager.instance().theme_changed.connect(self._apply_theme)
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet("")   # let global QSS handle sidebar bg via objectName
+        self._logo_text.setStyleSheet(f"color:{Theme.LOGO_COLOR};border:none;")
+        self._settings_icon.setStyleSheet(f"color:{Theme.NAV_TEXT};border:none;")
+        self._settings_text.setStyleSheet(f"color:{Theme.NAV_TEXT};border:none;font-size:16px;")
+        self._settings_row.setStyleSheet(
+            f"background-color:transparent;border-top:1px solid {Theme.BORDER};"
+        )
+        # Re-apply nav button active states so QSS re-polishes them
+        for btn in self._buttons:
+            btn.set_active(btn._is_active)
 
     def _set_active(self, index: int) -> None:
         for i, btn in enumerate(self._buttons):
@@ -191,7 +222,6 @@ class MainWindow(QMainWindow):
         self.ctx = ctx
         self.setWindowTitle(_WINDOW_TITLE)
         self.resize(*_WINDOW_SIZE)
-        self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -202,9 +232,27 @@ class MainWindow(QMainWindow):
         self._sidebar = SideBar(self._on_navigate, self._on_settings_btn)
         root_layout.addWidget(self._sidebar)
 
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+
+        # Top bar with theme toggle
+        top_bar = QWidget()
+        top_bar.setFixedHeight(40)
+        top_bar_layout = QHBoxLayout(top_bar)
+        top_bar_layout.setContentsMargins(0, 0, 8, 0)
+        top_bar_layout.addStretch()
+
+        self._theme_btn = ThemeToggleButton()
+        self._theme_btn.clicked.connect(self._on_theme_toggle)
+        top_bar_layout.addWidget(self._theme_btn)
+        right_layout.addWidget(top_bar)
+
         self._stack = QStackedWidget()
-        self._stack.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
-        root_layout.addWidget(self._stack, 1)
+        right_layout.addWidget(self._stack, 1)
+
+        root_layout.addWidget(right_panel, 1)
 
         for label, _ in _NAV_ITEMS:
             placeholder = QLabel(f"{label} 页面")
@@ -212,8 +260,17 @@ class MainWindow(QMainWindow):
             placeholder.setStyleSheet(f"font-size:24px;color:{Theme.TEXT_PLACEHOLDER};")
             self._stack.addWidget(placeholder)
 
+        self._apply_theme()
+
+        from app.ui.theme_manager import ThemeManager
+        ThemeManager.instance().theme_changed.connect(self._apply_theme)
+        ThemeManager.instance().theme_changed.connect(self._theme_btn.on_theme_changed)
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
+        self._stack.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
+
     def add_page(self, index: int, widget: QWidget) -> None:
-        """Replace the placeholder at index with a real page widget."""
         old = self._stack.widget(index)
         self._stack.insertWidget(index, widget)
         if old is not None:
@@ -226,6 +283,10 @@ class MainWindow(QMainWindow):
 
     def _on_settings_btn(self) -> None:
         self.settings_requested.emit()
+
+    def _on_theme_toggle(self) -> None:
+        from app.ui.theme_manager import ThemeManager
+        ThemeManager.instance().toggle()
 
     def navigate_to(self, index: int) -> None:
         self._on_navigate(index)
