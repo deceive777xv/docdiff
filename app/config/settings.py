@@ -62,7 +62,7 @@ def load() -> AppSettings:
         )
         providers.append(pc)
     le_raw = raw.get("local_embedding", {})
-    return AppSettings(
+    settings = AppSettings(
         providers=providers,
         local_embedding=LocalEmbeddingConfig(
             enabled=le_raw.get("enabled", False),
@@ -72,6 +72,9 @@ def load() -> AppSettings:
         data_dir=raw.get("data_dir", "") or _default_data_dir(),
         theme=raw.get("theme", "light"),
     )
+    if settings.theme not in ("light", "dark"):
+        settings.theme = "light"
+    return settings
 
 
 def save(settings: AppSettings) -> None:

@@ -102,3 +102,15 @@ def test_settings_theme_persists_round_trip(tmp_path, monkeypatch):
     save(s)
     s2 = load()
     assert s2.theme == "dark"
+
+
+def test_settings_invalid_theme_resets_to_light(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    # Write a config with an invalid theme value
+    import json
+    config_path = tmp_path / "DocDiffAgent" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"theme": "purple"}))
+    from app.config.settings import load
+    s = load()
+    assert s.theme == "light"
