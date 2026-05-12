@@ -148,13 +148,13 @@ class HomePage(QWidget):
         self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
         self._title.setStyleSheet(Theme.page_title())
         self._subtitle.setStyleSheet(Theme.label_secondary() + "font-size:14px;")
-        self._card_docs.refresh_theme()
-        self._card_tasks.refresh_theme()
-        self._card_done.refresh_theme()
+        self._card_docs._apply_color(Theme.COLOR_PRIMARY)
+        self._card_tasks._apply_color(Theme.COLOR_SUCCESS)
+        self._card_done._apply_color(Theme.COLOR_COMPLETED)
         for btn, color_attr in self._action_buttons:
             color = getattr(Theme, color_attr)
             btn.setStyleSheet(
-                f"background-color:{color};color:white;padding:10px 20px;"
+                f"background-color:{color};color:{Theme.NAV_ACTIVE_TEXT};padding:10px 20px;"
                 f"border:none;border-radius:{Theme.CARD_RADIUS}px;font-size:16px;"
             )
 
