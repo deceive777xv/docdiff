@@ -139,6 +139,49 @@
       font-size: 32px;
       margin-bottom: 8px;
     }
+
+    /* ── Dark mode (body.dark toggled from Python) ──────────────────────────── */
+
+    body.dark {
+      background: #1e1e2e;
+      color: #cdd6f4;
+    }
+
+    body.dark .pane {
+      background: #414559;
+      border-color: #45475a;
+    }
+
+    body.dark #baseline-pane {
+      border-right-color: #585b70;
+    }
+
+    body.dark .pane-header {
+      color: #a6adc8;
+      border-bottom-color: #45475a;
+      background: #414559;
+    }
+
+    body.dark h3 {
+      color: #74c7ec;
+      background: #232634;
+      border-left-color: #45475a;
+    }
+
+    body.dark p {
+      color: #cdd6f4;
+    }
+
+    body.dark .added    { background: #74c7ec20; border-left-color: #74c7ec; }
+    body.dark .deleted  { background: #f38ba820; border-left-color: #f38ba8; }
+    body.dark .minor    { background: #f9e2af20; border-left-color: #f9e2af; }
+    body.dark .major    { background: #fab38720; border-left-color: #fab387; }
+    body.dark .rewrite  { background: #cba6f720; border-left-color: #cba6f7; }
+    body.dark .format   { background: #a6adc820; border-left-color: #a6adc8; }
+
+    body.dark .empty-state { color: #6c7086; }
+
+    body.dark .diff-item.selected { outline-color: #89b4fa; }
   </style>
 </head>
 <body>

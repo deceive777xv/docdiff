@@ -1,6 +1,10 @@
 """Centralized UI theme — palette dicts, global QSS builder, and Theme compat shim."""
 from __future__ import annotations
 
+from pathlib import Path
+
+_ICONS_DIR = Path(__file__).parent.parent.parent / "assets" / "icons"
+
 
 # ── Layout constants (theme-independent) ──────────────────────────────────────
 SIDEBAR_WIDTH = 140
@@ -77,6 +81,8 @@ MOCHA: dict[str, str] = {
 
 def build_stylesheet(p: dict) -> str:
     """Return global QSS for objectName/property-targeted elements."""
+    is_dark = p.get("BG_PAGE") == MOCHA["BG_PAGE"]
+    chevron = (_ICONS_DIR / ("chevron-down-mocha.svg" if is_dark else "chevron-down-latte.svg")).as_posix()
     return f"""
     QWidget#sidebar {{
         background-color: {p["BG_SIDEBAR"]};
@@ -106,12 +112,113 @@ def build_stylesheet(p: dict) -> str:
         border-radius: 6px;
     }}
     QScrollArea#detail_scroll {{
+        background-color: {p["BG_CARD"]};
         border: 1px solid {p["BORDER"]};
-        border-radius: 4px;
+        border-radius: 6px;
     }}
     QScrollArea#chat_scroll {{
+        background-color: {p["BG_CARD"]};
+        border: 1px solid {p["BORDER"]};
+        border-radius: 6px;
+    }}
+    QWidget#top_bar {{
+        background-color: {p["BG_HEADER"]};
+        border-bottom: 1px solid {p["BORDER"]};
+    }}
+    QLabel {{
+        color: {p["TEXT_SECONDARY"]};
+    }}
+    QGroupBox {{
+        background-color: {p["BG_CARD"]};
+        border: 1px solid {p["BORDER"]};
+        border-radius: 6px;
+        margin-top: 8px;
+        color: {p["TEXT_SECONDARY"]};
+        font-size: 13px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        subcontrol-position: top left;
+        padding: 0 6px;
+        color: {p["TEXT_PRIMARY"]};
+    }}
+    QComboBox {{
+        background-color: {p["BG_CARD"]};
+        color: {p["TEXT_PRIMARY"]};
         border: 1px solid {p["BORDER"]};
         border-radius: 4px;
+        padding: 4px 24px 4px 8px;
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: center right;
+        width: 20px;
+        border: none;
+    }}
+    QComboBox::down-arrow {{
+        image: url({chevron});
+        width: 10px;
+        height: 6px;
+    }}
+    QComboBox QAbstractItemView {{
+        background-color: {p["BG_CARD"]};
+        color: {p["TEXT_PRIMARY"]};
+        selection-background-color: {p["NAV_ACTIVE_BG"]};
+        selection-color: {p["NAV_ACTIVE_TEXT"]};
+        border: 1px solid {p["BORDER"]};
+    }}
+    QLineEdit {{
+        background-color: {p["BG_CARD"]};
+        color: {p["TEXT_PRIMARY"]};
+        border: 1px solid {p["BORDER"]};
+        border-radius: 4px;
+        padding: 4px 6px;
+    }}
+    QTextEdit {{
+        background-color: {p["BG_CARD"]};
+        color: {p["TEXT_PRIMARY"]};
+        border: 1px solid {p["BORDER"]};
+        border-radius: 2px;
+    }}
+    QTreeWidget {{
+        background-color: {p["BG_CARD"]};
+        color: {p["TEXT_PRIMARY"]};
+        border: 1px solid {p["BORDER"]};
+        alternate-background-color: {p["BG_SIDEBAR"]};
+    }}
+    QTreeWidget::item:selected {{
+        background-color: {p["NAV_ACTIVE_BG"]};
+        color: {p["NAV_ACTIVE_TEXT"]};
+    }}
+    QTableWidget {{
+        background-color: {p["BG_CARD"]};
+        gridline-color: {p["BORDER"]};
+        color: {p["TEXT_PRIMARY"]};
+    }}
+    QHeaderView::section {{
+        background-color: {p["BG_HEADER"]};
+        color: {p["TEXT_PRIMARY"]};
+        border: 1px solid {p["BORDER"]};
+        padding: 4px;
+    }}
+    QCheckBox {{
+        color: {p["TEXT_PRIMARY"]};
+        font-size: 13px;
+    }}
+    QPushButton {{
+        background-color: {p["BG_CARD"]};
+        color: {p["TEXT_PRIMARY"]};
+        border: 1px solid {p["BORDER"]};
+        border-radius: 4px;
+        padding: 6px 12px;
+        font-size: 13px;
+    }}
+    QPushButton:hover {{
+        background-color: {p["BG_HEADER"]};
+    }}
+    QPushButton:disabled {{
+        color: {p["TEXT_PLACEHOLDER"]};
+        border-color: {p["BORDER"]};
     }}
     """
 
@@ -164,6 +271,26 @@ class Theme:
     @classmethod
     def page_title(cls) -> str:
         return f"color:{cls.TEXT_PRIMARY};font-size:22px;font-weight:bold;"
+
+    @classmethod
+    def form_label(cls) -> str:
+        return f"color:{cls.TEXT_SECONDARY};font-size:14px;"
+    
+    @classmethod
+    def form_label_large(cls) -> str:
+        return f"color:{cls.TEXT_SECONDARY};font-size:18px;"
+
+    @classmethod
+    def caption(cls) -> str:
+        return f"color:{cls.TEXT_PLACEHOLDER};font-size:11px;"
+
+    @classmethod
+    def btn_secondary(cls) -> str:
+        return (
+            f"background-color:transparent;color:{cls.TEXT_PRIMARY};"
+            f"border:1px solid {cls.BORDER};border-radius:{CARD_RADIUS}px;"
+            "padding:8px 16px;font-size:13px;"
+        )
 
 
 # Populate Theme color attributes from LATTE at import time.
