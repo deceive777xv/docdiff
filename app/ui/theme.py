@@ -278,7 +278,7 @@ class Theme:
     
     @classmethod
     def form_label_large(cls) -> str:
-        return f"color:{cls.TEXT_SECONDARY};font-size:18px;"
+        return f"color:{cls.TEXT_SECONDARY};font-size:18px;font-weight:bold;"
 
     @classmethod
     def caption(cls) -> str:
