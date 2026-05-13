@@ -160,13 +160,17 @@ class ComparePage(QWidget):
         top_layout = QHBoxLayout(top_group)
         top_layout.setSpacing(10)
 
-        top_layout.addWidget(QLabel("基准版本："))
+        tmp_label = QLabel("基准版本：")
+        tmp_label.setStyleSheet(Theme.form_label_large())
+        top_layout.addWidget(tmp_label)
         self._baseline_combo = QComboBox()
         self._baseline_combo.setMinimumWidth(200)
         self._baseline_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         top_layout.addWidget(self._baseline_combo)
 
-        top_layout.addWidget(QLabel("目标版本："))
+        tmp_label = QLabel("目标版本：")
+        tmp_label.setStyleSheet(Theme.form_label_large())
+        top_layout.addWidget(tmp_label)
         self._target_combo = QComboBox()
         self._target_combo.setMinimumWidth(200)
         self._target_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -195,7 +199,7 @@ class ComparePage(QWidget):
         root.addWidget(top_group)
 
         # ── Overview bar: diff-type counts ─────────────────────────────────────
-        overview_group = QGroupBox("差异概览")
+        overview_group = QGroupBox()
         overview_layout = QHBoxLayout(overview_group)
         overview_layout.setSpacing(8)
         self._overview_labels: dict[str, QLabel] = {}
@@ -205,7 +209,7 @@ class ComparePage(QWidget):
             lbl = QLabel(f"{diff_type}: 0")
             lbl.setStyleSheet(
                 f"background:{_color.name(QColor.NameFormat.HexArgb)};border:1px solid {color};"
-                "border-radius:4px;padding:3px 8px;font-size:12px;"
+                f"color:{Theme.TEXT_PRIMARY};border-radius:4px;padding:3px 8px;font-size:12px;"
             )
             overview_layout.addWidget(lbl)
             self._overview_labels[diff_type] = lbl
@@ -236,6 +240,7 @@ class ComparePage(QWidget):
             Path(__file__).parent.parent.parent.parent / "assets" / "diff_template.html"
         )
         self._web_view.load(QUrl.fromLocalFile(str(template_path)))
+        self._web_view.loadFinished.connect(lambda _: self._apply_webview_theme())
         splitter.addWidget(self._web_view)
         splitter.setStretchFactor(1, 1)
 
@@ -262,8 +267,10 @@ class ComparePage(QWidget):
         # Filter bar
         filter_bar = QHBoxLayout()
         filter_bar.setSpacing(6)
-        filter_bar.addWidget(QLabel("筛选："))
-
+        tmp_label = QLabel("筛选：")
+        tmp_label.setStyleSheet(Theme.form_label_large())
+        filter_bar.addWidget(tmp_label)
+        
         self._filter_type_combo = QComboBox()
         self._filter_type_combo.addItem("全部类型", None)
         for diff_type in _diff_css():
@@ -285,6 +292,7 @@ class ComparePage(QWidget):
         self._detail_scroll.setObjectName("detail_scroll")
         self._detail_scroll.setWidgetResizable(True)
         self._detail_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._detail_scroll.viewport().setStyleSheet("background: transparent;")
         self._detail_content = QWidget()
         self._detail_layout = QVBoxLayout(self._detail_content)
         self._detail_layout.setSpacing(6)
@@ -607,3 +615,18 @@ class ComparePage(QWidget):
             f"border:1px solid {Theme.TEXT_PRIMARY};padding:6px 14px;"
             f"border-radius:{Theme.CARD_RADIUS}px;font-size:13px;"
         )
+        for diff_type, lbl in self._overview_labels.items():
+            _, color = _diff_css()[diff_type]
+            _c = QColor(color)
+            _c.setAlpha(30)
+            lbl.setStyleSheet(
+                f"background:{_c.name(QColor.NameFormat.HexArgb)};border:1px solid {color};"
+                f"color:{Theme.TEXT_PRIMARY};border-radius:4px;padding:3px 8px;font-size:12px;"
+            )
+        self._apply_webview_theme()
+
+    def _apply_webview_theme(self) -> None:
+        from app.ui.theme_manager import ThemeManager, ThemeMode
+        is_dark = ThemeManager.instance().mode() == ThemeMode.DARK
+        js = f"document.body.classList.{'add' if is_dark else 'remove'}('dark');"
+        self._web_view.page().runJavaScript(js)

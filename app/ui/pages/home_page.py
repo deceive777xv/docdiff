@@ -91,7 +91,7 @@ class HomePage(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel("智能文档对比与问答平台")
-        subtitle.setStyleSheet(Theme.label_secondary()+f"font-size:14px;")
+        subtitle.setStyleSheet(Theme.form_label())
         self._subtitle = subtitle
         layout.addWidget(subtitle)
 
@@ -109,7 +109,7 @@ class HomePage(QWidget):
         layout.addLayout(cards_layout)
 
         # Quick actions
-        actions_group = QGroupBox("快捷操作")
+        actions_group = QGroupBox()
         actions_layout = QHBoxLayout(actions_group)
         actions_layout.setSpacing(12)
 
@@ -147,10 +147,15 @@ class HomePage(QWidget):
     def _apply_theme(self) -> None:
         self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
         self._title.setStyleSheet(Theme.page_title())
-        self._subtitle.setStyleSheet(Theme.label_secondary() + "font-size:14px;")
+        self._subtitle.setStyleSheet(Theme.form_label())
         self._card_docs._apply_color(Theme.COLOR_PRIMARY)
         self._card_tasks._apply_color(Theme.COLOR_SUCCESS)
         self._card_done._apply_color(Theme.COLOR_COMPLETED)
+        self._tasks_table.setStyleSheet(
+            f"QTableWidget {{ background:{Theme.BG_CARD};gridline-color:{Theme.BORDER}; }}"
+            f"QHeaderView::section {{ background:{Theme.BG_HEADER};color:{Theme.TEXT_PRIMARY};"
+            f"border:1px solid {Theme.BORDER};padding:4px; }}"
+        )
         for btn, color_attr in self._action_buttons:
             color = getattr(Theme, color_attr)
             btn.setStyleSheet(

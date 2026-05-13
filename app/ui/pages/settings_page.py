@@ -112,7 +112,7 @@ class SettingsDialog(QDialog):
 
         backup_row = QHBoxLayout()
         self._backup_label = QLabel("备份当前数据库、解析缓存和配置文件到 zip")
-        self._backup_label.setStyleSheet(f"color:{Theme.TEXT_SECONDARY};font-size:14px;")
+        self._backup_label.setStyleSheet(Theme.form_label())
         backup_row.addWidget(self._backup_label)
         backup_row.addStretch()
         backup_btn = QPushButton("创建备份…")
@@ -123,7 +123,7 @@ class SettingsDialog(QDialog):
 
         restore_row = QHBoxLayout()
         self._restore_label = QLabel("从备份 zip 恢复数据（将覆盖当前数据，请谨慎操作）")
-        self._restore_label.setStyleSheet(f"color:{Theme.TEXT_SECONDARY};font-size:14px;")
+        self._restore_label.setStyleSheet(Theme.form_label())
         restore_row.addWidget(self._restore_label)
         restore_row.addStretch()
         restore_btn = QPushButton("从备份恢复…")
@@ -139,7 +139,7 @@ class SettingsDialog(QDialog):
         update_layout = QHBoxLayout(update_group)
         from app.services.update_checker import APP_VERSION
         self._update_status = QLabel(f"当前版本：{APP_VERSION}")
-        self._update_status.setStyleSheet(f"color:{Theme.TEXT_SECONDARY};font-size:14px;")
+        self._update_status.setStyleSheet(Theme.form_label())
         update_layout.addWidget(self._update_status)
         update_layout.addStretch()
         check_btn = QPushButton("检查更新")
@@ -155,21 +155,14 @@ class SettingsDialog(QDialog):
         btn_row.addStretch()
 
         cancel_btn = QPushButton("取消")
-        cancel_btn.setStyleSheet(
-            f"background-color:transparent;color:{Theme.TEXT_PRIMARY};"
-            f"border:1px solid {Theme.BORDER};padding:8px 20px;"
-            "border-radius:6px;font-size:13px;"
-        )
+        cancel_btn.setStyleSheet(Theme.btn_secondary())
         cancel_btn.setFixedWidth(80)
         cancel_btn.clicked.connect(self.reject)
         self._cancel_btn = cancel_btn
         btn_row.addWidget(cancel_btn)
 
         save_btn = QPushButton("保存")
-        save_btn.setStyleSheet(
-            f"background-color:{Theme.TEXT_PRIMARY};color:{Theme.NAV_ACTIVE_TEXT};"
-            "border:none;padding:8px 20px;border-radius:6px;font-size:13px;"
-        )
+        save_btn.setStyleSheet(Theme.btn_primary())
         save_btn.setFixedWidth(80)
         save_btn.clicked.connect(self._save)
         self._save_btn = save_btn
@@ -181,18 +174,12 @@ class SettingsDialog(QDialog):
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
-        self._backup_label.setStyleSheet(f"color:{Theme.TEXT_SECONDARY};font-size:14px;")
-        self._restore_label.setStyleSheet(f"color:{Theme.TEXT_SECONDARY};font-size:14px;")
-        self._update_status.setStyleSheet(f"color:{Theme.TEXT_SECONDARY};font-size:14px;")
-        self._cancel_btn.setStyleSheet(
-            f"background-color:transparent;color:{Theme.TEXT_PRIMARY};"
-            f"border:1px solid {Theme.BORDER};padding:8px 20px;"
-            "border-radius:6px;font-size:13px;"
-        )
-        self._save_btn.setStyleSheet(
-            f"background-color:{Theme.TEXT_PRIMARY};color:{Theme.NAV_ACTIVE_TEXT};"
-            "border:none;padding:8px 20px;border-radius:6px;font-size:13px;"
-        )
+        self._backup_label.setStyleSheet(Theme.form_label())
+        self._restore_label.setStyleSheet(Theme.form_label())
+        self._update_status.setStyleSheet(Theme.form_label())
+        self._cancel_btn.setStyleSheet(Theme.btn_secondary())
+        self._save_btn.setStyleSheet(Theme.btn_primary())
+
 
     def _load_values(self) -> None:
         s = self.ctx.settings

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QFontDatabase, QPixmap
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -28,7 +28,7 @@ _NAV_ITEMS = [
 
 _WINDOW_TITLE = "Doc-Diff-Agent"
 _WINDOW_SIZE = (1280, 800)
-_ICON_PATH = Path(__file__).parent.parent.parent / "assets" / "icons" / "docdiff.png"
+_ICON_PATH = Path(__file__).parent.parent.parent / "assets" / "icons" / "docdiff.svg"
 _FA_SOLID_OTF = (
     Path(__file__).parent.parent.parent
     / "assets/fonts/fontawesome-free-7.2.0-desktop/otfs"
@@ -109,10 +109,10 @@ class ThemeToggleButton(QToolButton):
         from app.ui.theme_manager import ThemeManager, ThemeMode
         if ThemeManager.instance().mode() == ThemeMode.LIGHT:
             self.setText(_FA_MOON)
-            self.setStyleSheet("color: black;")
+            self.setStyleSheet("color: #232634; border:none;") 
         else:
             self.setText(_FA_SUN)
-            self.setStyleSheet("color: white;")
+            self.setStyleSheet("color: #dce0e8; border:none;") 
         if not _FA_SOLID_FAMILY:
             # FA font not loaded — fall back to emoji
             self.setText("☀" if ThemeManager.instance().mode() == ThemeMode.DARK else "🌙")
@@ -241,6 +241,7 @@ class MainWindow(QMainWindow):
 
         # Top bar with theme toggle
         top_bar = QWidget()
+        top_bar.setObjectName("top_bar")
         top_bar.setFixedHeight(40)
         top_bar_layout = QHBoxLayout(top_bar)
         top_bar_layout.setContentsMargins(0, 0, 8, 0)

@@ -147,13 +147,17 @@ class QaPage(QWidget):
         top_layout = QHBoxLayout(top_group)
         top_layout.setSpacing(10)
 
-        top_layout.addWidget(QLabel("检索范围："))
+        tmp_label = QLabel("检索范围：")
+        tmp_label.setStyleSheet(Theme.form_label_large())
+        top_layout.addWidget(tmp_label)
         self._scope_combo = QComboBox()
         self._scope_combo.addItems(list(_SCOPE_MAP.keys()))
         self._scope_combo.currentTextChanged.connect(self._on_scope_changed)
         top_layout.addWidget(self._scope_combo)
 
-        top_layout.addWidget(QLabel("文档："))
+        tmp_label = QLabel("文档：")
+        tmp_label.setStyleSheet(Theme.form_label_large())
+        top_layout.addWidget(tmp_label)
         self._doc_combo = QComboBox()
         self._doc_combo.setMinimumWidth(200)
         self._doc_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -182,6 +186,7 @@ class QaPage(QWidget):
         self._chat_scroll.setObjectName("chat_scroll")
         self._chat_scroll.setWidgetResizable(True)
         self._chat_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._chat_scroll.viewport().setStyleSheet("background: transparent;")
         self._chat_content = QWidget()
         self._chat_layout = QVBoxLayout(self._chat_content)
         self._chat_layout.setSpacing(4)
@@ -191,7 +196,9 @@ class QaPage(QWidget):
         root.addWidget(self._chat_scroll, 1)
 
         # ── Bottom: input area ─────────────────────────────────────────────────
-        input_row = QHBoxLayout()
+        input_group = QGroupBox()
+        input_row = QHBoxLayout(input_group)
+        input_row.setContentsMargins(4, 4, 4, 4)
         input_row.setSpacing(8)
 
         self._input = QTextEdit()
@@ -205,7 +212,7 @@ class QaPage(QWidget):
         self._send_btn.clicked.connect(self.send_question)
         input_row.addWidget(self._send_btn)
 
-        root.addLayout(input_row)
+        root.addWidget(input_group)
 
         self._on_scope_changed(self._scope_combo.currentText())
 
@@ -366,9 +373,7 @@ class QaPage(QWidget):
             cit_parts.append("  ".join(parts))
 
         cit_lbl = QLabel(f"引用：{' | '.join(cit_parts)}")
-        cit_lbl.setStyleSheet(
-            f"color:{Theme.TEXT_PLACEHOLDER};font-size:11px;margin-left:4px;"
-        )
+        cit_lbl.setStyleSheet(Theme.caption() + "margin-left:4px;")
         cit_lbl.setWordWrap(True)
         cit_layout.addWidget(cit_lbl)
         cit_layout.addStretch()
