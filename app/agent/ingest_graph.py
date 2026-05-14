@@ -54,7 +54,7 @@ def parse_doc(state: IngestState) -> dict:
     try:
         ir, quality = parse_document(state["file_path"])
         if quality.needs_ocr:
-            logger.warning("Document needs OCR (Phase 2 feature): %s", quality.ocr_pages)
+            logger.warning("Document needs OCR (Phase 2 feature)")
         return {"_ir": ir, "status": "parsed"}
     except Exception as e:
         logger.exception("parse_doc failed")

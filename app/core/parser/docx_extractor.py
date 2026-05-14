@@ -69,7 +69,6 @@ def extract(file_path: str) -> tuple[DocumentIR, ParseQualityReport]:
                 sections.insert(0, default_section)
             p = Paragraph(
                 paragraph_id=str(uuid.uuid4()),
-                page_no=0,   # python-docx doesn't expose page numbers
                 text=text,
                 sentences=_split_sentences(text),
             )

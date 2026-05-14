@@ -22,7 +22,6 @@ def build_chunks(ir: DocumentIR, version_id: str, max_chars: int = 500) -> list[
                     version_id=version_id,
                     chunk_no=chunk_no,
                     section_path=section_path,
-                    page_no=para.page_no,
                     text=para.text,
                 ))
                 chunk_no += 1
@@ -36,7 +35,6 @@ def build_chunks(ir: DocumentIR, version_id: str, max_chars: int = 500) -> list[
                         version_id=version_id,
                         chunk_no=chunk_no,
                         section_path=section_path,
-                        page_no=para.page_no,
                         text=sent.text,
                     ))
                     chunk_no += 1

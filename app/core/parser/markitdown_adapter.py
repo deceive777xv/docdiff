@@ -48,7 +48,7 @@ def _parse_markdown(md_text: str, title: str, doc_hash: str) -> DocumentIR:
             joined = " ".join(para_buffer).strip()
             if joined:
                 current_section.paragraphs.append(
-                    Paragraph(paragraph_id=str(uuid.uuid4()), page_no=0, text=joined)  # TODO Task 4: remove page_no=0
+                    Paragraph(paragraph_id=str(uuid.uuid4()), text=joined)
                 )
         para_buffer.clear()
 

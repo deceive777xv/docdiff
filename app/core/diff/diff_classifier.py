@@ -103,8 +103,6 @@ def classify(
                 target_text=pp.target_para.text,
                 similarity_score=0.0,
                 explanation="目标文档新增段落",
-                baseline_page=0,
-                target_page=pp.target_para.page_no,
             ))
         elif pp.baseline_para is not None and pp.target_para is None:
             items.append(DiffItem(
@@ -116,8 +114,6 @@ def classify(
                 target_text="",
                 similarity_score=0.0,
                 explanation="基准文档段落被删除",
-                baseline_page=pp.baseline_para.page_no,
-                target_page=0,
             ))
         elif pp.baseline_para is not None and pp.target_para is not None:
             if policy.use_llm_classify and provider is not None:
@@ -143,8 +139,6 @@ def classify(
                 target_text=pp.target_para.text,
                 similarity_score=pp.similarity,
                 explanation=explanation,
-                baseline_page=pp.baseline_para.page_no,
-                target_page=pp.target_para.page_no,
             ))
     return DiffResult(
         task_id=task_id,

@@ -14,7 +14,6 @@ class Sentence:
 @dataclass
 class Paragraph:
     paragraph_id: str
-    page_no: int
     text: str
     sentences: list[Sentence] = field(default_factory=list)
 
@@ -42,7 +41,6 @@ class DocumentIR:
 class ParseQualityReport:
     quality_score: float        # 0.0–1.0
     needs_ocr: bool
-    ocr_pages: list[int] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -54,8 +52,8 @@ class Chunk:
     version_id: str
     chunk_no: int
     section_path: str
-    page_no: int
     text: str
+    page_no: int = 0
     faiss_index_id: int = -1
 
 
@@ -90,8 +88,6 @@ class DiffItem:
     target_text: str
     similarity_score: float
     explanation: str
-    baseline_page: int
-    target_page: int
 
 
 @dataclass

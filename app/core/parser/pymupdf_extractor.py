@@ -105,7 +105,6 @@ def extract(file_path: str) -> tuple[DocumentIR, ParseQualityReport]:
                     sections.insert(0, default_section)
                 p = Paragraph(
                     paragraph_id=str(uuid.uuid4()),
-                    page_no=page_num,
                     text=text,
                     sentences=_split_sentences(text),
                 )
@@ -140,7 +139,6 @@ def extract(file_path: str) -> tuple[DocumentIR, ParseQualityReport]:
     report = ParseQualityReport(
         quality_score=round(quality_score, 2),
         needs_ocr=needs_ocr,
-        ocr_pages=low_text_pages,
         warnings=warnings,
     )
     return ir, report

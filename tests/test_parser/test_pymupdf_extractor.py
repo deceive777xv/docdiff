@@ -36,15 +36,6 @@ def test_sections_extracted(sample_pdf):
     assert len(ir.sections) >= 1
 
 
-def test_paragraphs_have_page_no(sample_pdf):
-    """All paragraphs have page_no >= 1."""
-    from app.core.parser.pymupdf_extractor import extract
-    ir, report = extract(str(sample_pdf))
-    for section in ir.sections:
-        for para in section.paragraphs:
-            assert para.page_no >= 1
-
-
 def test_quality_report(sample_pdf):
     """ParseQualityReport for a normal PDF: needs_ocr=False, quality_score > 0.5."""
     from app.core.parser.pymupdf_extractor import extract

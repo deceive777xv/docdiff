@@ -28,8 +28,6 @@ def make_diff_item(diff_type="新增", risk_level="high"):
         target_text="新文",
         similarity_score=0.8,
         explanation="说明",
-        baseline_page=1,
-        target_page=1,
     )
 
 

@@ -27,7 +27,6 @@ def _make_ir(
         paras = [
             Paragraph(
                 paragraph_id=f"p{s}-{p}",
-                page_no=1,
                 text=para_text,
                 sentences=[Sentence(text=para_text)],
             )

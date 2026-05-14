@@ -77,10 +77,8 @@ def extract(file_path: str) -> tuple[DocumentIR, ParseQualityReport]:
             if target is default_section and default_section not in sections:
                 sections.insert(0, default_section)
             prov = getattr(item, "prov", [])
-            page_no = prov[0].page_no if prov else 0
             p = Paragraph(
                 paragraph_id=str(uuid.uuid4()),
-                page_no=page_no,
                 text=text,
                 sentences=_split_sentences(text),
             )

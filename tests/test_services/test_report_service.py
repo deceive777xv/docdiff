@@ -19,8 +19,6 @@ def _make_result() -> DiffResult:
             target_text="合同金额为200万元，付款期限60日。",
             similarity_score=0.82,
             explanation="金额和期限均发生变化",
-            baseline_page=1,
-            target_page=1,
         ),
         DiffItem(
             diff_id=str(uuid.uuid4()),
@@ -31,8 +29,6 @@ def _make_result() -> DiffResult:
             target_text="乙方须在交货前提交质量证明文件。",
             similarity_score=0.0,
             explanation="目标文档新增段落",
-            baseline_page=0,
-            target_page=2,
         ),
         DiffItem(
             diff_id=str(uuid.uuid4()),
@@ -43,8 +39,6 @@ def _make_result() -> DiffResult:
             target_text="乙方承担全部物流及验收责任，费用另行结算。",
             similarity_score=0.12,
             explanation="文本结构大幅调整",
-            baseline_page=2,
-            target_page=3,
         ),
     ]
     return DiffResult(
@@ -117,8 +111,6 @@ def test_export_html_escapes_html_characters(tmp_path):
             target_text="text & more",
             similarity_score=0.9,
             explanation="",
-            baseline_page=1,
-            target_page=1,
         )
     ]
     result = DiffResult(

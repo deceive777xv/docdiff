@@ -41,10 +41,9 @@ class MockEmbedder(BaseProvider):
         return True
 
 
-def make_para(text: str, page_no: int = 1) -> Paragraph:
+def make_para(text: str) -> Paragraph:
     return Paragraph(
         paragraph_id=str(uuid.uuid4()),
-        page_no=page_no,
         text=text,
         sentences=[Sentence(text=text)],
     )
