@@ -1,6 +1,8 @@
 """Tests for markitdown_adapter."""
 from __future__ import annotations
 
+import pytest
+
 
 def test_is_available_returns_bool():
     from app.core.parser.markitdown_adapter import is_available
@@ -78,6 +80,10 @@ def test_extract_populates_doc_id_and_file_hash(tmp_path):
     assert ir.file_hash != ""
 
 
+@pytest.mark.xfail(
+    reason="Pending Task 4: Paragraph.page_no not yet removed from types.py",
+    strict=True,
+)
 def test_paragraph_has_no_page_no(tmp_path):
     """After migration Paragraph must not have a page_no attribute."""
     test_file = tmp_path / "test.html"

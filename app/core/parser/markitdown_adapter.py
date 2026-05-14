@@ -6,7 +6,7 @@ import re
 import uuid
 from pathlib import Path
 
-from app.core.types import DocumentIR, Paragraph, Section, Sentence
+from app.core.types import DocumentIR, Paragraph, Section
 
 
 def is_available() -> bool:
@@ -35,7 +35,7 @@ def extract(
     result = md.convert(file_path)
     title = Path(file_path).stem
     file_hash = hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
-    return _parse_markdown(result.text_content, title, file_hash)
+    return _parse_markdown(result.markdown, title, file_hash)
 
 
 def _parse_markdown(md_text: str, title: str, doc_hash: str) -> DocumentIR:
@@ -48,7 +48,7 @@ def _parse_markdown(md_text: str, title: str, doc_hash: str) -> DocumentIR:
             joined = " ".join(para_buffer).strip()
             if joined:
                 current_section.paragraphs.append(
-                    Paragraph(paragraph_id=str(uuid.uuid4()), page_no=0, text=joined)
+                    Paragraph(paragraph_id=str(uuid.uuid4()), page_no=0, text=joined)  # TODO Task 4: remove page_no=0
                 )
         para_buffer.clear()
 
