@@ -36,7 +36,6 @@ def _load_ir(version_id: str, conn) -> DocumentIR:
         paras = [
             Paragraph(
                 paragraph_id=p["paragraph_id"],
-                page_no=p["page_no"],
                 text=p["text"],
                 sentences=[Sentence(text=s["text"]) for s in p.get("sentences", [])],
             )

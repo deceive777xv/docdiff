@@ -21,14 +21,12 @@ def _make_ir(
     n_sections: int = 2,
     paras_per_section: int = 3,
     para_text: str = "这是一段正常长度的合同条款文字，用于测试解析质量评估函数。",
-    page_no: int = 1,
 ) -> DocumentIR:
     sections = []
     for s in range(n_sections):
         paras = [
             Paragraph(
                 paragraph_id=f"p{s}-{p}",
-                page_no=page_no,
                 text=para_text,
                 sentences=[Sentence(text=para_text)],
             )
@@ -70,16 +68,10 @@ class TestEvaluateQuality:
 
     def test_very_short_paragraphs_lower_score(self):
         from app.core.parser.router import evaluate_quality
-        ir = _make_ir(para_text="短", page_no=0)  # 1-char paragraphs, no page numbers
+        ir = _make_ir(para_text="短")  # 1-char paragraphs
         report = evaluate_quality(ir)
         assert report.quality_score < 0.6
         assert len(report.warnings) > 0
-
-    def test_missing_page_numbers_adds_warning(self):
-        from app.core.parser.router import evaluate_quality
-        ir = _make_ir(page_no=0)  # page_no=0 → not counted as having page numbers
-        report = evaluate_quality(ir)
-        assert any("页码" in w for w in report.warnings)
 
     def test_returns_parse_quality_report_type(self):
         from app.core.parser.router import evaluate_quality

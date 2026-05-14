@@ -16,6 +16,8 @@ class IngestState(TypedDict, total=False):
     document_id: Optional[str] # set when adding new version to existing doc
     embedder: Any
     conn: Any                  # sqlite3.Connection, opened and closed by caller
+    llm_client: Any            # openai.OpenAI, for markitdown-ocr; None → OCR skipped
+    llm_model: str
 
     # ── Node-internal intermediate values ───────────────────────────────────
     _file_hash: str

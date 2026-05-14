@@ -64,7 +64,7 @@ def insert_diff_items(conn: sqlite3.Connection, task_id: str, items: list[DiffIt
             item.diff_id, task_id, item.section_path, item.diff_type,
             item.risk_level, item.baseline_text, item.target_text,
             item.similarity_score, item.explanation,
-            item.baseline_page, item.target_page,
+            0, 0,
         )
         for item in items
     ]

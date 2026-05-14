@@ -12,7 +12,7 @@ def make_ir(section_titles: list[str]) -> DocumentIR:
     for title in section_titles:
         sec = Section(section_id=str(uuid.uuid4()), title=title, level=1)
         sec.paragraphs = [Paragraph(
-            paragraph_id=str(uuid.uuid4()), page_no=1,
+            paragraph_id=str(uuid.uuid4()),
             text=f"内容：{title}", sentences=[Sentence(text=f"内容：{title}")]
         )]
         sections.append(sec)

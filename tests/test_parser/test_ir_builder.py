@@ -20,7 +20,6 @@ def _make_ir(sections_data: list[tuple[str, list[tuple[str, list[str]]]]]) -> Do
             sentences = [Sentence(text=s) for s in sent_texts]
             sec.paragraphs.append(Paragraph(
                 paragraph_id=str(uuid.uuid4()),
-                page_no=1,
                 text=para_text,
                 sentences=sentences,
             ))

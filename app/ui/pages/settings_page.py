@@ -281,6 +281,16 @@ class SettingsDialog(QDialog):
             from app.core.model.factory import build_provider, get_embedder
             self.ctx.provider = build_provider(provider)
             self.ctx.embedder = get_embedder(self.ctx.settings)
+            if provider.api_key:
+                from openai import OpenAI
+                self.ctx.openai_client = OpenAI(
+                    api_key=provider.api_key,
+                    base_url=provider.base_url or None,
+                )
+                self.ctx.openai_model = provider.chat_model
+            else:
+                self.ctx.openai_client = None
+                self.ctx.openai_model = ""
             self.provider_changed.emit()
             self.accept()
         except Exception as e:

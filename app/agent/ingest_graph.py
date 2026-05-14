@@ -52,9 +52,13 @@ def file_check(state: IngestState) -> dict:
 def parse_doc(state: IngestState) -> dict:
     """Parse the file into a DocumentIR."""
     try:
-        ir, quality = parse_document(state["file_path"])
+        ir, quality = parse_document(
+            state["file_path"],
+            llm_client=state.get("llm_client"),
+            llm_model=state.get("llm_model", ""),
+        )
         if quality.needs_ocr:
-            logger.warning("Document needs OCR (Phase 2 feature): %s", quality.ocr_pages)
+            logger.warning("Low-quality document, OCR may be needed: %s", state["file_path"])
         return {"_ir": ir, "status": "parsed"}
     except Exception as e:
         logger.exception("parse_doc failed")
