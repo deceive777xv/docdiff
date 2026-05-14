@@ -73,7 +73,6 @@ def test_graph_happy_path(tmp_path):
         plain_text="",
     )
     # ParseQualityReport requires quality_score (float) and needs_ocr (bool);
-    # ocr_pages and warnings have defaults via field(default_factory=list).
     # Using MagicMock() in the patch return value so no explicit instantiation needed.
 
     with (

@@ -170,8 +170,6 @@ def test_show_diff_list_renders_cards(qtbot, ctx, mem_conn, compare_page):
             target_text="修订内容 A",
             similarity_score=0.62,
             explanation="段落语义发生重大变化。",
-            baseline_page=1,
-            target_page=1,
         ),
         DiffItem(
             diff_id="d2",
@@ -182,8 +180,6 @@ def test_show_diff_list_renders_cards(qtbot, ctx, mem_conn, compare_page):
             target_text="新增内容 B",
             similarity_score=0.0,
             explanation="目标文档新增段落。",
-            baseline_page=0,
-            target_page=2,
         ),
     ]
 
