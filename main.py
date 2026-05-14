@@ -83,6 +83,21 @@ def main() -> None:
         lc_model = get_chat_model(settings)
     except Exception:
         lc_model = None
+    try:
+        from openai import OpenAI
+        _active = settings.providers[0] if settings.providers else None
+        if _active and _active.api_key:
+            _openai_client = OpenAI(
+                api_key=_active.api_key,
+                base_url=_active.base_url or None,
+            )
+            _openai_model = _active.chat_model
+        else:
+            _openai_client = None
+            _openai_model = ""
+    except Exception:
+        _openai_client = None
+        _openai_model = ""
 
     ctx = AppContext(
         settings=settings,
@@ -91,6 +106,8 @@ def main() -> None:
         provider=provider,
         embedder=embedder,
         lc_model=lc_model,
+        openai_client=_openai_client,
+        openai_model=_openai_model,
     )
 
     window = MainWindow(ctx)
