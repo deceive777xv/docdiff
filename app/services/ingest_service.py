@@ -24,6 +24,8 @@ def ingest_document(
     source_type: str = "standard",
     business_category: str = "",
     embedder: BaseProvider | None = None,
+    llm_client=None,
+    llm_model: str = "",
 ) -> tuple[str, str]:
     """
     Import a document file.
@@ -57,7 +59,7 @@ def ingest_document(
         shutil.copy2(str(path), str(dest))
 
     # Parse
-    ir, quality = parse_document(str(path))
+    ir, quality = parse_document(str(path), llm_client=llm_client, llm_model=llm_model)
     if quality.needs_ocr:
         logger.warning("Low-quality document, OCR may be needed: %s", path)
 
@@ -107,6 +109,8 @@ def ingest_new_version(
     document_id: str,
     version_label: str = "",
     embedder: BaseProvider | None = None,
+    llm_client=None,
+    llm_model: str = "",
 ) -> str:
     """Add a new version to an existing document. Returns version_id."""
     path = Path(file_path)
@@ -115,7 +119,7 @@ def ingest_new_version(
     versions = document_repo.list_versions(conn, document_id)
     version_no = (max(v["version_no"] for v in versions) + 1) if versions else 1
 
-    ir, quality = parse_document(str(path))
+    ir, quality = parse_document(str(path), llm_client=llm_client, llm_model=llm_model)
     if quality.needs_ocr:
         logger.warning("Low-quality new version, OCR may be needed: %s", path)
 

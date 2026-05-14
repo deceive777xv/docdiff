@@ -15,3 +15,5 @@ class AppContext:
     provider: BaseProvider | None = None
     embedder: BaseProvider | None = None
     lc_model: object | None = None  # BaseChatModel, typed as object to avoid hard dep
+    openai_client: object | None = None  # openai.OpenAI, for markitdown-ocr
+    openai_model: str = ""

@@ -49,6 +49,8 @@ class _IngestWorker(QObject):
                     "document_id": self.document_id,
                     "embedder": self.ctx.embedder,
                     "conn": conn,
+                    "llm_client": self.ctx.openai_client,
+                    "llm_model": self.ctx.openai_model,
                 })
             finally:
                 conn.close()
