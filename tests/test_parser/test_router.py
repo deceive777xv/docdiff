@@ -50,7 +50,10 @@ def test_parse_document_has_no_mode_parameter():
     assert "mode" not in sig.parameters
 
 
-@pytest.mark.xfail(reason="ocr_pages will be removed from ParseQualityReport in Task 4")
+@pytest.mark.xfail(
+    strict=True,
+    reason="ocr_pages will be removed from ParseQualityReport in Task 4",
+)
 def test_quality_report_has_no_ocr_pages_field():
     from app.core.types import ParseQualityReport
     fields = {f.name for f in dataclasses.fields(ParseQualityReport)}

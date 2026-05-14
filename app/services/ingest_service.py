@@ -24,7 +24,6 @@ def ingest_document(
     source_type: str = "standard",
     business_category: str = "",
     embedder: BaseProvider | None = None,
-    parse_mode: str = "standard",
 ) -> tuple[str, str]:
     """
     Import a document file.
@@ -58,9 +57,9 @@ def ingest_document(
         shutil.copy2(str(path), str(dest))
 
     # Parse
-    ir, quality = parse_document(str(path), mode=parse_mode)
+    ir, quality = parse_document(str(path))
     if quality.needs_ocr:
-        logger.warning("Document has low-quality pages (OCR needed): %s", quality.ocr_pages)
+        logger.warning("Low-quality document, OCR may be needed: %s", path)
 
     # Save IR JSON
     parsed_dir = Path(data_dir) / "parsed"
@@ -108,7 +107,6 @@ def ingest_new_version(
     document_id: str,
     version_label: str = "",
     embedder: BaseProvider | None = None,
-    parse_mode: str = "standard",
 ) -> str:
     """Add a new version to an existing document. Returns version_id."""
     path = Path(file_path)
@@ -117,9 +115,9 @@ def ingest_new_version(
     versions = document_repo.list_versions(conn, document_id)
     version_no = (max(v["version_no"] for v in versions) + 1) if versions else 1
 
-    ir, quality = parse_document(str(path), mode=parse_mode)
+    ir, quality = parse_document(str(path))
     if quality.needs_ocr:
-        logger.warning("New version has low-quality pages: %s", quality.ocr_pages)
+        logger.warning("Low-quality new version, OCR may be needed: %s", path)
 
     parsed_dir = Path(data_dir) / "parsed"
     parsed_dir.mkdir(parents=True, exist_ok=True)
