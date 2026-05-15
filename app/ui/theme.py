@@ -33,7 +33,7 @@ LATTE: dict[str, str] = {
     # action palette
     "COLOR_PRIMARY":   "#209fb5",
     "COLOR_SUCCESS":   "#179299",   # Teal
-    "COLOR_DANGER":    "#d20f39",   # Red
+    "COLOR_DANGER":    "#e64553",   # Red
     "COLOR_WARNING":   "#df8e1d",   # Yellow
     "COLOR_COMPLETED": "#179299",
     # diff

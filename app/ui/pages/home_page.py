@@ -99,7 +99,7 @@ class HomePage(QWidget):
         cards_layout = QGridLayout()
         cards_layout.setSpacing(16)
 
-        self._card_docs = _StatCard("标准文档", "0", Theme.COLOR_PRIMARY)
+        self._card_docs = _StatCard("文档", "0", Theme.COLOR_PRIMARY)
         self._card_tasks = _StatCard("对比任务", "0", Theme.COLOR_SUCCESS)
         self._card_done = _StatCard("已完成", "0", Theme.COLOR_COMPLETED)
 
@@ -114,7 +114,7 @@ class HomePage(QWidget):
         actions_layout.setSpacing(12)
 
         actions = [
-            ("导入标准文档", 2, "COLOR_PRIMARY"),
+            ("导入文档", 2, "COLOR_PRIMARY"),
             ("开始文档对比", 1, "COLOR_SUCCESS"),
             ("智能问答",      3, "COLOR_COMPLETED"),
         ]
