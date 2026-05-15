@@ -1,4 +1,4 @@
-"""Standard document library page."""
+"""Document library page."""
 from __future__ import annotations
 import logging
 from pathlib import Path
@@ -65,7 +65,7 @@ class _IngestWorker(QObject):
 
 
 class LibraryPage(QWidget):
-    """Standard document library management page."""
+    """Document library management page."""
 
     def __init__(self, ctx: AppContext, parent=None):
         super().__init__(parent)
@@ -84,13 +84,13 @@ class LibraryPage(QWidget):
 
         # Header
         header = QHBoxLayout()
-        title = QLabel("标准文档库")
+        title = QLabel("文档库")
         title.setStyleSheet(Theme.page_title())
         self._title = title
         header.addWidget(title)
         header.addStretch()
 
-        import_btn = QPushButton("导入标准文档")
+        import_btn = QPushButton("导入文档")
         import_btn.setStyleSheet(Theme.btn_primary())
         import_btn.clicked.connect(self._import_document)
         self._import_btn = import_btn
@@ -101,16 +101,22 @@ class LibraryPage(QWidget):
         self._add_version_btn.setEnabled(False)
         self._add_version_btn.clicked.connect(self._add_version)
         header.addWidget(self._add_version_btn)
+
+        self._delete_btn = QPushButton("删除")
+        self._delete_btn.setStyleSheet(Theme.btn_danger())
+        self._delete_btn.setEnabled(False)
+        self._delete_btn.clicked.connect(self._delete_document)
+        header.addWidget(self._delete_btn)
+
         layout.addLayout(header)
         layout.addSpacing(12)
 
-        # Table
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["文档名称", "类型", "来源", "导入时间"])
+        # Table — 3 columns: name, type, import date
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["文档名称", "类型", "导入时间"])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setAlternatingRowColors(True)
@@ -135,6 +141,8 @@ class LibraryPage(QWidget):
             self._import_btn.setStyleSheet(Theme.btn_primary())
         if hasattr(self, '_add_version_btn'):
             self._add_version_btn.setStyleSheet(Theme.btn_success())
+        if hasattr(self, '_delete_btn'):
+            self._delete_btn.setStyleSheet(Theme.btn_danger())
         self._table.setStyleSheet(
             f"QTableWidget {{ background:{Theme.BG_CARD};gridline-color:{Theme.BORDER}; }}"
             f"QHeaderView::section {{ background:{Theme.BG_HEADER};color:{Theme.TEXT_PRIMARY};"
@@ -155,10 +163,8 @@ class LibraryPage(QWidget):
                 item0.setData(Qt.UserRole, doc["id"])
                 self._table.setItem(row, 0, item0)
                 self._table.setItem(row, 1, QTableWidgetItem(doc["doc_type"].upper()))
-                src = "标准" if doc["source_type"] == "standard" else "上传"
-                self._table.setItem(row, 2, QTableWidgetItem(src))
                 created = str(doc["created_at"])[:10]
-                self._table.setItem(row, 3, QTableWidgetItem(created))
+                self._table.setItem(row, 2, QTableWidgetItem(created))
             self._status.setText(f"共 {len(docs)} 份文档")
         except Exception as e:
             logger.exception("Failed to refresh library")
@@ -166,7 +172,7 @@ class LibraryPage(QWidget):
 
     def _import_document(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择标准文档", "",
+            self, "选择文档", "",
             "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt)"
             ";;PDF (*.pdf);;Word (*.docx);;PowerPoint (*.pptx)"
             ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;其他 (*.csv *.json *.xml *.epub *.txt)"
@@ -193,11 +199,13 @@ class LibraryPage(QWidget):
 
     def _on_ingest_done(self, file_path: str) -> None:
         name = Path(file_path).name
-        QMessageBox.information(self, "导入成功", f"《{name}》已成功导入标准库。")
+        QMessageBox.information(self, "导入成功", f"《{name}》已成功导入文档库。")
         self.refresh()
 
     def _on_selection_changed(self) -> None:
-        self._add_version_btn.setEnabled(len(self._table.selectedItems()) > 0)
+        has_selection = len(self._table.selectedItems()) > 0
+        self._add_version_btn.setEnabled(has_selection)
+        self._delete_btn.setEnabled(has_selection)
 
     def _add_version(self) -> None:
         rows = self._table.selectionModel().selectedRows()
@@ -216,3 +224,28 @@ class LibraryPage(QWidget):
         )
         for path in paths:
             self._run_ingest(path, document_id=doc_id)
+
+    def _delete_document(self) -> None:
+        rows = self._table.selectionModel().selectedRows()
+        if not rows:
+            return
+        row = rows[0].row()
+        doc_id = self._table.item(row, 0).data(Qt.UserRole)
+        doc_name = self._table.item(row, 0).text()
+
+        confirm = QMessageBox.question(
+            self,
+            "确认删除",
+            f"删除《{doc_name}》将同时删除该文档的所有版本、向量索引和关联的对比记录，且不可恢复。\n\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            from app.db.document_repo import delete_document
+            delete_document(self.ctx.conn, doc_id, data_dir=self.ctx.data_dir)
+            self.refresh()
+        except Exception as e:
+            logger.exception("Failed to delete document")
+            QMessageBox.critical(self, "删除失败", str(e))
