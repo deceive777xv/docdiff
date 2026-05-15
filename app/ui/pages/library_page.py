@@ -167,7 +167,9 @@ class LibraryPage(QWidget):
     def _import_document(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self, "选择标准文档", "",
-            "文档文件 (*.pdf *.docx);;PDF 文件 (*.pdf);;Word 文档 (*.docx)"
+            "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt)"
+            ";;PDF (*.pdf);;Word (*.docx);;PowerPoint (*.pptx)"
+            ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;其他 (*.csv *.json *.xml *.epub *.txt)"
         )
         if not paths:
             return
@@ -208,7 +210,9 @@ class LibraryPage(QWidget):
             self,
             f"为《{doc_name}》选择新版本文件",
             "",
-            "文档文件 (*.pdf *.docx);;PDF 文件 (*.pdf);;Word 文档 (*.docx)",
+            "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt)"
+            ";;PDF (*.pdf);;Word (*.docx);;PowerPoint (*.pptx)"
+            ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;其他 (*.csv *.json *.xml *.epub *.txt)",
         )
         for path in paths:
             self._run_ingest(path, document_id=doc_id)
