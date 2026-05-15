@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 _SCOPE_MAP: dict[str, RetrievalScope] = {
     "当前文档": RetrievalScope.CURRENT_DOC,
     "对比文档": RetrievalScope.COMPARE,
-    "标准文档库": RetrievalScope.STANDARD_LIB,
+    "文档库": RetrievalScope.STANDARD_LIB,
     "全部": RetrievalScope.ALL,
 }
 
@@ -165,6 +165,7 @@ class QaPage(QWidget):
         top_layout.addWidget(self._doc_combo)
 
         self._compare_task_label = QLabel("对比任务：")
+        self._compare_task_label.setStyleSheet(Theme.form_label_large())
         top_layout.addWidget(self._compare_task_label)
         self._compare_task_combo = QComboBox()
         self._compare_task_combo.setMinimumWidth(280)

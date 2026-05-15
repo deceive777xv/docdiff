@@ -98,3 +98,52 @@ def update_version_status(conn: sqlite3.Connection, version_id: str, status: str
         "UPDATE document_versions SET status = ? WHERE id = ?", (status, version_id)
     )
     conn.commit()
+
+
+def delete_document(
+    conn: sqlite3.Connection,
+    doc_id: str,
+    data_dir: str | None = None,
+) -> None:
+    """Delete a document and all associated data (versions, chunks, compare tasks, diff items).
+
+    If data_dir is provided, also removes FAISS index dirs and parsed JSON files from disk.
+    """
+    import shutil
+    from pathlib import Path
+
+    versions = conn.execute(
+        "SELECT id, parsed_json_path FROM document_versions WHERE document_id = ?",
+        (doc_id,),
+    ).fetchall()
+    version_ids = [v["id"] for v in versions]
+
+    if version_ids:
+        placeholders = ",".join("?" * len(version_ids))
+        task_ids = [
+            row[0]
+            for row in conn.execute(
+                f"SELECT id FROM compare_tasks WHERE baseline_version_id IN ({placeholders})"
+                f" OR target_version_id IN ({placeholders})",
+                version_ids + version_ids,
+            ).fetchall()
+        ]
+        if task_ids:
+            t_placeholders = ",".join("?" * len(task_ids))
+            conn.execute(f"DELETE FROM diff_items WHERE compare_task_id IN ({t_placeholders})", task_ids)
+            conn.execute(f"DELETE FROM compare_tasks WHERE id IN ({t_placeholders})", task_ids)
+        conn.execute(f"DELETE FROM chunks WHERE version_id IN ({placeholders})", version_ids)
+
+    conn.execute("DELETE FROM document_versions WHERE document_id = ?", (doc_id,))
+    conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+    conn.commit()
+
+    if data_dir:
+        for ver in versions:
+            faiss_dir = Path(data_dir) / "faiss" / ver["id"]
+            if faiss_dir.exists():
+                shutil.rmtree(faiss_dir, ignore_errors=True)
+            if ver["parsed_json_path"]:
+                p = Path(ver["parsed_json_path"])
+                if p.exists():
+                    p.unlink(missing_ok=True)
