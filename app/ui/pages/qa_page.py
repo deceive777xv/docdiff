@@ -5,7 +5,7 @@ import asyncio
 import logging
 import uuid
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -45,6 +45,27 @@ def _asst_bubble_style() -> str:
         f"background:{Theme.BG_CARD};border:1px solid {Theme.BORDER};"
         "border-radius:12px;padding:10px;margin:4px 0;"
     )
+
+
+class CustomTextEdit(QTextEdit):
+    def __init__(self, button=None, parent=None):
+        super().__init__(parent)
+        self.button = button
+
+    def keyPressEvent(self, event):
+        # 检查是否按下 Enter 键
+        if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
+            # 检查是否同时按下了 Shift
+            if event.modifiers() == Qt.ShiftModifier:
+                # Shift+Enter: 正常换行
+                super().keyPressEvent(event)
+            else:
+                # 单独的 Enter: 触发按钮点击
+                if self.button and self.button.isEnabled():
+                    self.button.click()
+        else:
+            # 其他按键正常处理
+            super().keyPressEvent(event)
 
 
 class _QaWorker(QObject):
@@ -202,15 +223,16 @@ class QaPage(QWidget):
         input_row.setContentsMargins(4, 4, 4, 4)
         input_row.setSpacing(8)
 
-        self._input = QTextEdit()
-        self._input.setMaximumHeight(40)
-        self._input.setPlaceholderText("输入问题…")
-        input_row.addWidget(self._input, 1)
-
         self._send_btn = QPushButton("发送")
         self._send_btn.setStyleSheet(Theme.btn_primary())
         self._send_btn.setFixedWidth(72)
         self._send_btn.clicked.connect(self.send_question)
+
+        self._input = CustomTextEdit(button=self._send_btn)
+        self._input.setMaximumHeight(40)
+        self._input.setPlaceholderText("输入问题…")
+        input_row.addWidget(self._input, 1)
+        
         input_row.addWidget(self._send_btn)
 
         root.addWidget(input_group)
