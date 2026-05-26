@@ -195,6 +195,14 @@ def build_stylesheet(p: dict) -> str:
         gridline-color: {p["BORDER"]};
         color: {p["TEXT_PRIMARY"]};
     }}
+    QTableView{{
+        alternate-background-color: {p["BG_CARD"]};
+        background-color: {p["BG_PAGE"]};
+    }}
+    QTableCornerButton::section{{
+        background-color: {p["BG_HEADER"]};
+        border: 1px solid {p["BORDER"]};
+    }}
     QHeaderView::section {{
         background-color: {p["BG_HEADER"]};
         color: {p["TEXT_PRIMARY"]};
