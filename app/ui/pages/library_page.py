@@ -120,11 +120,7 @@ class LibraryPage(QWidget):
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setAlternatingRowColors(True)
-        self._table.setStyleSheet(
-            f"QTableWidget {{ background:{Theme.BG_CARD};gridline-color:{Theme.BORDER}; }}"
-            f"QHeaderView::section {{ background:{Theme.BG_HEADER};color:{Theme.TEXT_PRIMARY};"
-            f"border:1px solid {Theme.BORDER};padding:4px; }}"
-        )
+        
         layout.addWidget(self._table, 1)
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
 
@@ -143,11 +139,7 @@ class LibraryPage(QWidget):
             self._add_version_btn.setStyleSheet(Theme.btn_success())
         if hasattr(self, '_delete_btn'):
             self._delete_btn.setStyleSheet(Theme.btn_danger())
-        self._table.setStyleSheet(
-            f"QTableWidget {{ background:{Theme.BG_CARD};gridline-color:{Theme.BORDER}; }}"
-            f"QHeaderView::section {{ background:{Theme.BG_HEADER};color:{Theme.TEXT_PRIMARY};"
-            f"border:1px solid {Theme.BORDER};padding:4px; }}"
-        )
+        
         if hasattr(self, '_status'):
             self._status.setStyleSheet(Theme.label_secondary())
 
