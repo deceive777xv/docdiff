@@ -74,7 +74,7 @@ def get_db_path(data_dir: str) -> Path:
 def open_db(data_dir: str) -> sqlite3.Connection:
     """Open an existing database for use within one thread (no DDL applied)."""
     db_path = get_db_path(data_dir)
-    conn = sqlite3.connect(str(db_path), check_same_thread=True)
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
