@@ -262,7 +262,8 @@ class MainWindow(QMainWindow):
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
             placeholder.setStyleSheet(f"font-size:24px;color:{Theme.TEXT_PLACEHOLDER};")
             self._stack.addWidget(placeholder)
-
+        self._stack.currentChanged.connect(self.on_page_changed)
+        
         self._apply_theme()
 
         from app.ui.theme_manager import ThemeManager
@@ -293,3 +294,10 @@ class MainWindow(QMainWindow):
 
     def navigate_to(self, index: int) -> None:
         self._on_navigate(index)
+
+    def on_page_changed(self, index) -> None:
+        current_widget = self._stack.widget(index)
+        if hasattr(current_widget, 'refresh'):
+            current_widget.refresh()
+
+        
