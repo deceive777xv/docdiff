@@ -13,8 +13,10 @@ from app.core.retrieval.searcher import search
 from app.db import document_repo
 
 logger = logging.getLogger(__name__)
-
-_checkpointer = MemorySaver()
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from app.core.types import Chunk, ChunkHit
+serde = JsonPlusSerializer(allowed_msgpack_modules=[Chunk, ChunkHit])
+_checkpointer = MemorySaver(serde=serde)
 
 _QA_SYSTEM_PROMPT = """你是一个专业的文档问答助手。请根据以下参考资料回答用户问题。
 
