@@ -146,6 +146,7 @@ class QaPage(QWidget):
     def __init__(self, ctx: AppContext, parent=None):
         super().__init__(parent)
         self.ctx = ctx
+        self._thread: QThread | None = None
         self._threads: set[QThread] = set()
         self._thread_id: str = str(uuid.uuid4())
         self._accumulated: str = ""
@@ -247,7 +248,10 @@ class QaPage(QWidget):
         self._send_btn.setStyleSheet(Theme.btn_primary())
 
     # ── Public API ─────────────────────────────────────────────────────────────
-
+    def refresh(self) -> None:
+        self.refresh_documents()
+        self.refresh_compare_tasks()
+        
     def refresh_documents(self) -> None:
         self._doc_combo.blockSignals(True)
         try:
@@ -325,8 +329,8 @@ class QaPage(QWidget):
         self._current_bubble = bubble_label
         self._accumulated = ""
 
-        thread = QThread()
-        worker = _QaWorker(
+        self._thread = QThread()
+        self.worker = _QaWorker(
             data_dir=self.ctx.data_dir,
             question=question,
             embedder=self.ctx.embedder,
@@ -335,18 +339,18 @@ class QaPage(QWidget):
             current_version_ids=current_version_ids,
             thread_id=self._thread_id,
         )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.token_received.connect(self._on_token)
-        worker.citations_ready.connect(self._on_citations)
-        worker.error.connect(self._on_error)
-        worker.done.connect(self._on_done)
-        worker.done.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._threads.discard(thread))
-        self._threads.add(thread)
-        thread.start()
+        self.worker.moveToThread(self._thread)
+        self.thread.started.connect(self.worker.run)
+        self.worker.token_received.connect(self._on_token)
+        self.worker.citations_ready.connect(self._on_citations)
+        self.worker.error.connect(self._on_error)
+        self.worker.done.connect(self._on_done)
+        self.worker.done.connect(self._thread.quit)
+        self._thread.finished.connect(self.worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(lambda: self._threads.discard(self._thread))
+        self._threads.add(self._thread)
+        self._thread.start()
 
     # ── Slots ──────────────────────────────────────────────────────────────────
 
