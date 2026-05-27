@@ -70,6 +70,7 @@ class LibraryPage(QWidget):
     def __init__(self, ctx: AppContext, parent=None):
         super().__init__(parent)
         self.ctx = ctx
+        self._thread: QThread | None = None
         self._threads: set[QThread] = set()
         self._build_ui()
         self._apply_theme()
@@ -175,19 +176,19 @@ class LibraryPage(QWidget):
             self._run_ingest(path)
 
     def _run_ingest(self, file_path: str, document_id: str | None = None) -> None:
-        thread = QThread()
-        worker = _IngestWorker(self.ctx, file_path, document_id=document_id)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(lambda doc_id, ver_id: self._on_ingest_done(file_path))
-        worker.finished.connect(thread.quit)
-        worker.error.connect(lambda msg: QMessageBox.warning(self, "导入错误", msg))
-        worker.error.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._threads.discard(thread))
-        self._threads.add(thread)
-        thread.start()
+        self._thread = QThread()
+        self.worker = _IngestWorker(self.ctx, file_path, document_id=document_id)
+        self.worker.moveToThread(self._thread)
+        self._thread.started.connect(self.worker.run)
+        self.worker.finished.connect(lambda doc_id, ver_id: self._on_ingest_done(file_path))
+        self.worker.finished.connect(self._thread.quit)
+        self.worker.error.connect(lambda msg: QMessageBox.warning(self, "导入错误", msg))
+        self.worker.error.connect(self._thread.quit)
+        self._thread.finished.connect(self.worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(lambda: self._threads.discard(self._thread))
+        self._threads.add(self._thread)
+        self._thread.start()
 
     def _on_ingest_done(self, file_path: str) -> None:
         name = Path(file_path).name
