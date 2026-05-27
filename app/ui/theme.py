@@ -199,6 +199,10 @@ def build_stylesheet(p: dict) -> str:
         alternate-background-color: {p["BG_CARD"]};
         background-color: {p["BG_PAGE"]};
     }}
+    QTableView::item:selected{{
+        background-color: {p["NAV_ACTIVE_BG"]};
+        color: {p["NAV_ACTIVE_TEXT"]};
+    }}
     QTableCornerButton::section{{
         background-color: {p["BG_HEADER"]};
         border: 1px solid {p["BORDER"]};
