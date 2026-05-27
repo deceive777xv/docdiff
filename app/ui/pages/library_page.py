@@ -26,8 +26,9 @@ logger = logging.getLogger(__name__)
 
 class _IngestWorker(QObject):
     """Run ingest in a background thread."""
-    finished = Signal(str, str)   # doc_id, version_id
+    finished = Signal()   
     error = Signal(str)
+    refresh_needed = Signal()
 
     def __init__(self, ctx: AppContext, file_path: str, document_id: str | None = None):
         super().__init__()
@@ -58,7 +59,9 @@ class _IngestWorker(QObject):
             if result.get("error"):
                 self.error.emit(result["error"])
             else:
-                self.finished.emit(result["doc_id"], result["version_id"])
+                self.finished.emit()
+                self.refresh_needed.emit()
+                
         except Exception as e:
             logger.exception("Ingest worker failed")
             self.error.emit(f"导入失败：{e}")
@@ -180,7 +183,7 @@ class LibraryPage(QWidget):
         self.worker = _IngestWorker(self.ctx, file_path, document_id=document_id)
         self.worker.moveToThread(self._thread)
         self._thread.started.connect(self.worker.run)
-        self.worker.finished.connect(lambda doc_id, ver_id: self._on_ingest_done(file_path))
+        self.worker.refresh_needed.connect(lambda: self._on_ingest_done(file_path))
         self.worker.finished.connect(self._thread.quit)
         self.worker.error.connect(lambda msg: QMessageBox.warning(self, "导入错误", msg))
         self.worker.error.connect(self._thread.quit)
