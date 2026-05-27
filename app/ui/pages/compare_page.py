@@ -141,6 +141,7 @@ class ComparePage(QWidget):
         self.ctx = ctx
         self._current_result: Optional[DiffResult] = None
         self._diff_items_by_id: dict[str, DiffItem] = {}
+        self._thread: QThread | None = None
         self._threads: set[QThread] = set()
         self._build_ui()
         from app.ui.theme_manager import ThemeManager
@@ -304,7 +305,9 @@ class ComparePage(QWidget):
         return widget
 
     # ── Public API ─────────────────────────────────────────────────────────────
-
+    def refresh(self) -> None:
+        self.refresh_versions()
+        
     def refresh_versions(self) -> None:
         """Repopulate baseline/target combos from the database."""
         self._baseline_combo.blockSignals(True)
@@ -356,8 +359,8 @@ class ComparePage(QWidget):
         self._run_btn.setEnabled(False)
         self._loading_label.setText("对比中，请稍候…")
 
-        thread = QThread()
-        worker = _CompareWorker(
+        self._thread = QThread()
+        self._worker = _CompareWorker(
             self.ctx.data_dir,
             baseline_version_id,
             target_version_id,
@@ -365,17 +368,17 @@ class ComparePage(QWidget):
             self.ctx.provider,
             ComparePolicy(),
         )
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.result_ready.connect(self._on_compare_done)
-        worker.result_ready.connect(thread.quit)
-        worker.error.connect(self._on_compare_error)
-        worker.error.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._threads.discard(thread))
-        self._threads.add(thread)
-        thread.start()
+        self.worker.moveToThread(self._thread)
+        self._thread.started.connect(self.worker.run)
+        self.worker.result_ready.connect(self._on_compare_done)
+        self.worker.result_ready.connect(self._thread.quit)
+        self.worker.error.connect(self._on_compare_error)
+        self.worker.error.connect(self._thread.quit)
+        self._thread.finished.connect(self.worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(lambda: self._threads.discard(self._thread))
+        self._threads.add(self._thread)
+        self._thread.start()
 
     def _on_compare_done(self, result: DiffResult) -> None:
         self._current_result = result
