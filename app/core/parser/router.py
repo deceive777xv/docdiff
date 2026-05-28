@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.parser import markitdown_adapter
+from app.core.parser import markitdown_adapter, pymupdf4llm_adapter
 from app.core.types import DocumentIR, ParseQualityReport
 
 SUPPORTED_EXTENSIONS = {
@@ -21,7 +21,10 @@ def parse_document(
     suffix = Path(file_path).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported format: {suffix!r}")
-    ir = markitdown_adapter.extract(file_path, llm_client, llm_model)
+    if suffix == ".pdf":
+        ir = pymupdf4llm_adapter.extract(file_path)
+    else:
+        ir = markitdown_adapter.extract(file_path, llm_client, llm_model)
     report = evaluate_quality(ir)
     return ir, report
 
