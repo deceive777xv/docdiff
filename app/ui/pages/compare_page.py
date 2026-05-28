@@ -566,6 +566,8 @@ class ComparePage(QWidget):
         section_lbl.setWordWrap(True)
         card_layout.addWidget(section_lbl)
 
+        _bg0 = QColor(Theme.DIFF_DELETED)
+        _bg0.setAlpha(20)
         # Baseline text (truncated)
         if item.baseline_text:
             b_text = item.baseline_text
@@ -573,11 +575,13 @@ class ComparePage(QWidget):
             b_lbl = QLabel(f"基准：{display}")
             b_lbl.setStyleSheet(
                 f"color:{Theme.TEXT_PRIMARY};font-size:12px;"
-                f"background:{Theme.DIFF_DELETED}20;border-radius:3px;padding:3px 5px;"
+                f"background:{_bg0.name(QColor.NameFormat.HexArgb)};border-radius:3px;padding:3px 5px;"
             )
             b_lbl.setWordWrap(True)
             card_layout.addWidget(b_lbl)
 
+        _bg1 = QColor(Theme.DIFF_ADDED)
+        _bg1.setAlpha(20)
         # Target text (truncated)
         if item.target_text:
             t_text = item.target_text
@@ -585,7 +589,7 @@ class ComparePage(QWidget):
             t_lbl = QLabel(f"目标：{display}")
             t_lbl.setStyleSheet(
                 f"color:{Theme.TEXT_PRIMARY};font-size:12px;"
-                f"background:{Theme.DIFF_ADDED}20;border-radius:3px;padding:3px 5px;"
+                f"background:{_bg1.name(QColor.NameFormat.HexArgb)};border-radius:3px;padding:3px 5px;"
             )
             t_lbl.setWordWrap(True)
             card_layout.addWidget(t_lbl)
