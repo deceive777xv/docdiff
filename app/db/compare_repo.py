@@ -8,7 +8,7 @@ from app.core.types import DiffItem
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now().isoformat()
 
 
 def create_compare_task(
