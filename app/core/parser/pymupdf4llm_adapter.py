@@ -25,7 +25,7 @@ def extract(
 
     import pymupdf4llm  # noqa: F401
 
-    result = md = pymupdf4llm.to_markdown(file_path)
+    result = pymupdf4llm.to_markdown(file_path)
     title = Path(file_path).stem
     file_hash = hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
     return _parse_markdown(result, title, file_hash)
