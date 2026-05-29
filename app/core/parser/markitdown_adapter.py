@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
+from app.core.parser.clean_md_table import clean_md_table_cells
 
 
 def is_available() -> bool:
@@ -33,9 +34,10 @@ def extract(
         llm_model=llm_model or None,
     )
     result = md.convert(file_path)
+    result_md = clean_md_table_cells(result.markdown)
     title = Path(file_path).stem
     file_hash = hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
-    return _parse_markdown(result.markdown, title, file_hash)
+    return _parse_markdown(result_md, title, file_hash)
 
 SENTENCE_END_PATTERN = re.compile(
     r'(?:(?<!\d)[.!?](?!\d))\s+'   # 英文句末标点：点前非数字，点后非数字（防止日期、小数等）
