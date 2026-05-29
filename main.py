@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 logging.basicConfig(
+    filename='app.log',
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
