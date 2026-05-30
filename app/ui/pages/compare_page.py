@@ -54,12 +54,14 @@ def _risk_colors() -> dict:
         "high":   Theme.DIFF_DELETED,
         "medium": Theme.DIFF_MAJOR,
         "low":    Theme.DIFF_ADDED,
+        "none":   Theme.TEXT_SECONDARY,
     }
 
 _RISK_LABELS: dict[str, str] = {
     "high":   "高风险",
     "medium": "中风险",
     "low":    "低风险",
+    "none":   "无风险",
 }
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
@@ -725,7 +727,30 @@ class ComparePage(QWidget):
         """Highlight the clicked diff in the right panel."""
         item = self._diff_items_by_id.get(diff_id)
         if item:
+            self._sync_filter_controls(item)
             self._show_diff_list([item])
+
+    def _on_diff_card_clicked(self, diff_id: str) -> None:
+        """Focus the middle panes on the clicked diff card."""
+        item = self._diff_items_by_id.get(diff_id)
+        if item:
+            self._sync_filter_controls(item)
+        self._focus_diff_in_webview(diff_id)
+
+    def _sync_filter_controls(self, item: DiffItem) -> None:
+        """Update filter combos without triggering a filter rebuild."""
+        self._filter_type_combo.blockSignals(True)
+        self._filter_risk_combo.blockSignals(True)
+        try:
+            self._select_combo_value(self._filter_type_combo, item.diff_type)
+            self._select_combo_value(self._filter_risk_combo, item.risk_level)
+        finally:
+            self._filter_type_combo.blockSignals(False)
+            self._filter_risk_combo.blockSignals(False)
+
+    def _focus_diff_in_webview(self, diff_id: str) -> None:
+        js = f"focusDiff({json.dumps(diff_id, ensure_ascii=False)});"
+        self._web_view.page().runJavaScript(js)
 
     def _on_tree_item_clicked(self, tree_item: QTreeWidgetItem, _column: int) -> None:
         if self._current_result is None:
@@ -826,16 +851,15 @@ class ComparePage(QWidget):
         """Build a compact info card for one DiffItem."""
         css_cls, color = _diff_css().get(item.diff_type, ("format", Theme.DIFF_FORMAT))  # noqa: F841
         risk_color = _risk_colors().get(item.risk_level, Theme.TEXT_SECONDARY)
-        _color = QColor(color)
-        _color.setAlpha(20)
-        _risk_color = QColor(risk_color)
-        _risk_color.setAlpha(20)
         card = QWidget()
+        card.setCursor(Qt.CursorShape.PointingHandCursor)
         card.setStyleSheet(
-            f"background:{_color.name(QColor.NameFormat.HexArgb)};border:1px solid {color};"
+            f"background:{self._card_surface_color()};border:1px solid {Theme.BORDER};"
+            f"border-left:4px solid {color};"
             "border-radius:8px;padding:8px;"
         )
         card.setProperty("diff_id", item.diff_id)
+        card.mousePressEvent = lambda _event, diff_id=item.diff_id: self._on_diff_card_clicked(diff_id)
         card_layout = QVBoxLayout(card)
         card_layout.setSpacing(4)
         card_layout.setContentsMargins(8, 8, 8, 8)
@@ -845,15 +869,17 @@ class ComparePage(QWidget):
         header_row.setSpacing(6)
 
         type_badge = QLabel(item.diff_type)
+        type_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         type_badge.setStyleSheet(
-            f"background:{_color.name(QColor.NameFormat.HexArgb)};color:{Theme.NAV_ACTIVE_TEXT};border-radius:4px;"
+            f"background:{Theme.BG_HEADER};color:{color};border:1px solid {color};border-radius:4px;"
             "padding:2px 7px;font-size:11px;font-weight:bold;"
         )
         header_row.addWidget(type_badge)
 
         risk_lbl = QLabel(_RISK_LABELS.get(item.risk_level, item.risk_level))
+        risk_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         risk_lbl.setStyleSheet(
-            f"background:{_risk_color.name(QColor.NameFormat.HexArgb)};color:{risk_color};"
+            f"background:{Theme.BG_HEADER};color:{risk_color};border:1px solid {Theme.BORDER};"
             "border-radius:4px;padding:2px 7px;font-size:11px;"
         )
         header_row.addWidget(risk_lbl)
@@ -862,40 +888,42 @@ class ComparePage(QWidget):
 
         # Section path
         section_lbl = QLabel(f"章节：{item.section_path}")
+        section_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         section_lbl.setStyleSheet(Theme.label_secondary())
         section_lbl.setWordWrap(True)
         card_layout.addWidget(section_lbl)
 
-        _bg0 = QColor(Theme.DIFF_DELETED)
-        _bg0.setAlpha(20)
         # Baseline text (truncated)
         if item.baseline_text:
             b_text = _strip_markdown_formatting(item.baseline_text)
             display = b_text[:120] + ("…" if len(b_text) > 120 else "")
             b_lbl = QLabel(f"基准：{display}")
+            b_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             b_lbl.setStyleSheet(
                 f"color:{Theme.TEXT_PRIMARY};font-size:12px;"
-                f"background:{_bg0.name(QColor.NameFormat.HexArgb)};border-radius:3px;padding:3px 5px;"
+                f"background:{Theme.BG_HEADER};border:1px solid {Theme.BORDER};"
+                "border-radius:3px;padding:3px 5px;"
             )
             b_lbl.setWordWrap(True)
             card_layout.addWidget(b_lbl)
 
-        _bg1 = QColor(Theme.DIFF_ADDED)
-        _bg1.setAlpha(20)
         # Target text (truncated)
         if item.target_text:
             t_text = _strip_markdown_formatting(item.target_text)
             display = t_text[:120] + ("…" if len(t_text) > 120 else "")
             t_lbl = QLabel(f"目标：{display}")
+            t_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             t_lbl.setStyleSheet(
                 f"color:{Theme.TEXT_PRIMARY};font-size:12px;"
-                f"background:{_bg1.name(QColor.NameFormat.HexArgb)};border-radius:3px;padding:3px 5px;"
+                f"background:{Theme.BG_HEADER};border:1px solid {Theme.BORDER};"
+                "border-radius:3px;padding:3px 5px;"
             )
             t_lbl.setWordWrap(True)
             card_layout.addWidget(t_lbl)
 
         # Similarity score
         sim_lbl = QLabel(f"相似度：{item.similarity_score:.3f}")
+        sim_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         sim_lbl.setStyleSheet(Theme.label_secondary())
         card_layout.addWidget(sim_lbl)
 
@@ -904,11 +932,15 @@ class ComparePage(QWidget):
             exp_text = item.explanation
             display = exp_text[:200] + ("…" if len(exp_text) > 200 else "")
             exp_lbl = QLabel(f"解释：{display}")
+            exp_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             exp_lbl.setStyleSheet(f"color:{Theme.TEXT_SECONDARY};font-size:12px;")
             exp_lbl.setWordWrap(True)
             card_layout.addWidget(exp_lbl)
 
         return card
+
+    def _card_surface_color(self) -> str:
+        return Theme.BG_CARD
 
     # ── Theme handling ─────────────────────────────────────────────────────────
 

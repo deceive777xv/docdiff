@@ -89,7 +89,8 @@ def list_recent_task_summaries(
             COUNT(di.id) AS diff_count,
             COALESCE(SUM(CASE WHEN di.risk_level = 'high' THEN 1 ELSE 0 END), 0) AS high_count,
             COALESCE(SUM(CASE WHEN di.risk_level = 'medium' THEN 1 ELSE 0 END), 0) AS medium_count,
-            COALESCE(SUM(CASE WHEN di.risk_level = 'low' THEN 1 ELSE 0 END), 0) AS low_count
+            COALESCE(SUM(CASE WHEN di.risk_level = 'low' THEN 1 ELSE 0 END), 0) AS low_count,
+            COALESCE(SUM(CASE WHEN di.risk_level = 'none' THEN 1 ELSE 0 END), 0) AS none_count
         FROM compare_tasks t
         LEFT JOIN document_versions bv ON bv.id = t.baseline_version_id
         LEFT JOIN documents bd ON bd.id = bv.document_id

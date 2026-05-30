@@ -147,6 +147,7 @@ def test_list_recent_task_summaries_includes_versions_and_result_counts(db_conn)
             make_diff_item(diff_type="新增", risk_level="high"),
             make_diff_item(diff_type="删减", risk_level="medium"),
             make_diff_item(diff_type="微调", risk_level="low"),
+            make_diff_item(diff_type="格式变化", risk_level="none"),
         ],
     )
     compare_repo.update_task_status(db_conn, task_id, "completed", "/tmp/result.json")
@@ -159,10 +160,11 @@ def test_list_recent_task_summaries_includes_versions_and_result_counts(db_conn)
     assert summaries[0]["baseline_version_label"] == "初稿"
     assert summaries[0]["target_version_no"] == 2
     assert summaries[0]["target_version_label"] == "终稿"
-    assert summaries[0]["diff_count"] == 3
+    assert summaries[0]["diff_count"] == 4
     assert summaries[0]["high_count"] == 1
     assert summaries[0]["medium_count"] == 1
     assert summaries[0]["low_count"] == 1
+    assert summaries[0]["none_count"] == 1
 
 
 def test_get_task_result_builds_diff_result(db_conn):

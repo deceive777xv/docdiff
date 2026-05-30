@@ -75,7 +75,7 @@ class RetrievalScope(Enum):
 # ── Diff ───────────────────────────────────────────────────────────────────────
 
 DiffType  = Literal["新增", "删减", "微调", "实质修改", "重写", "格式变化"]
-RiskLevel = Literal["high", "medium", "low"]
+RiskLevel = Literal["high", "medium", "low", "none"]
 
 
 @dataclass

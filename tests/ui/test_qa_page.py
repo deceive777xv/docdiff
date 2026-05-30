@@ -15,6 +15,60 @@ from app.ui.app_context import AppContext
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
 
+class _FakeSignal:
+    def __init__(self):
+        self.connections = []
+
+    def connect(self, slot):
+        self.connections.append(slot)
+
+    def emit(self, *args):
+        for slot in list(self.connections):
+            slot(*args)
+
+
+class _FakeQThread:
+    instances = []
+
+    def __init__(self):
+        self.started = _FakeSignal()
+        self.finished = _FakeSignal()
+        self.started_called = False
+        self.quit_called = False
+        self.deleted = False
+        _FakeQThread.instances.append(self)
+
+    def start(self):
+        self.started_called = True
+
+    def quit(self):
+        self.quit_called = True
+
+    def deleteLater(self):
+        self.deleted = True
+
+
+class _FakeQaWorker:
+    instances = []
+
+    def __init__(self, **_kwargs):
+        self.token_received = _FakeSignal()
+        self.citations_ready = _FakeSignal()
+        self.error = _FakeSignal()
+        self.done = _FakeSignal()
+        self.thread = None
+        self.deleted = False
+        _FakeQaWorker.instances.append(self)
+
+    def moveToThread(self, thread):
+        self.thread = thread
+
+    def run(self):
+        pass
+
+    def deleteLater(self):
+        self.deleted = True
+
 @pytest.fixture()
 def mem_conn():
     """In-memory SQLite connection with schema applied."""
@@ -75,6 +129,27 @@ def test_send_question_no_provider(qtbot, qa_page):
 
     # one assistant error message widget must have been inserted
     assert qa_page._chat_layout.count() > initial_count
+
+
+def test_send_question_connects_worker_to_created_thread(qtbot, qa_page):
+    """Sending a question must use the created QThread, not QWidget.thread()."""
+    _FakeQThread.instances.clear()
+    _FakeQaWorker.instances.clear()
+    qa_page.ctx.embedder = object()
+    qa_page.ctx.lc_model = object()
+    qa_page._input.setPlainText("什么是安全规范？")
+
+    with patch("app.ui.pages.qa_page.QThread", _FakeQThread):
+        with patch("app.ui.pages.qa_page._QaWorker", _FakeQaWorker):
+            qa_page.send_question()
+
+    thread = _FakeQThread.instances[-1]
+    worker = _FakeQaWorker.instances[-1]
+
+    assert worker.thread is thread
+    assert thread.started.connections[0].__self__ is worker
+    assert thread.started.connections[0].__name__ == "run"
+    assert thread.started_called
 
 
 def test_add_message_user(qtbot, qa_page):

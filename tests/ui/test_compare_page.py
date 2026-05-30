@@ -5,6 +5,7 @@ import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QWidget
 
 from app.config.settings import AppSettings
@@ -119,6 +120,7 @@ def test_compare_page_instantiates(qtbot, ctx):
     assert page._target_combo is not None
     assert page._run_btn is not None
     assert page._tree is not None
+    assert "无风险" in [page._filter_risk_combo.itemText(i) for i in range(page._filter_risk_combo.count())]
 
 
 def test_refresh_versions_populates_combos(qtbot, ctx, mem_conn):
@@ -230,6 +232,74 @@ def test_show_diff_list_renders_cards(qtbot, ctx, mem_conn, compare_page):
     assert compare_page._detail_layout.count() == len(items) + 1
 
 
+def test_on_diff_clicked_syncs_filter_dropdowns(compare_page):
+    """Clicking a middle-pane diff syncs the right-panel filter controls."""
+    from app.core.types import DiffItem
+
+    item = DiffItem(
+        diff_id="d-sync",
+        section_path="1.概述",
+        diff_type="实质修改",
+        risk_level="high",
+        baseline_text="原文",
+        target_text="新文",
+        similarity_score=0.5,
+        explanation="说明",
+    )
+    compare_page._diff_items_by_id = {item.diff_id: item}
+
+    compare_page._on_diff_clicked(item.diff_id)
+
+    assert compare_page._filter_type_combo.currentData() == "实质修改"
+    assert compare_page._filter_risk_combo.currentData() == "high"
+    assert compare_page._detail_layout.count() == 2
+
+
+def test_diff_card_click_focuses_middle_panes(qtbot, compare_page):
+    """Clicking a diff card scrolls the middle panes to the matching diff block."""
+    from app.core.types import DiffItem
+
+    item = DiffItem(
+        diff_id="d-card",
+        section_path="1.概述",
+        diff_type="新增",
+        risk_level="low",
+        baseline_text="",
+        target_text="新增内容",
+        similarity_score=0.0,
+        explanation="",
+    )
+    card = compare_page._make_diff_card(item)
+    qtbot.addWidget(card)
+
+    qtbot.mouseClick(card, Qt.MouseButton.LeftButton)
+
+    js = compare_page._web_view.page().runJavaScript.call_args.args[0]
+    assert 'focusDiff("d-card")' in js
+
+
+def test_diff_card_uses_neutral_surface_with_accent_border(compare_page):
+    """Cards should use a calm surface background with diff color as an accent border."""
+    from app.core.types import DiffItem
+
+    item = DiffItem(
+        diff_id="d-style",
+        section_path="1.概述",
+        diff_type="重写",
+        risk_level="medium",
+        baseline_text="旧内容",
+        target_text="新内容",
+        similarity_score=0.2,
+        explanation="",
+    )
+
+    card = compare_page._make_diff_card(item)
+
+    assert f"background:{compare_page._card_surface_color()}" in card.styleSheet()
+    assert "border-left:4px solid" in card.styleSheet()
+    assert "HexArgb" not in card.styleSheet()
+
+
 def test_render_diff_injects_markdown_html_into_middle_panes(compare_page):
     """The center panes should receive rendered Markdown inside clickable diff blocks."""
     from app.core.types import DiffItem, DiffResult
@@ -260,6 +330,16 @@ def test_render_diff_injects_markdown_html_into_middle_panes(compare_page):
     assert "<h4>新条款</h4>" in js
     assert "<li>付款周期调整为60天</li>" in js
     assert "diff-item diff-block added" in js
+
+
+def test_diff_template_exposes_focus_diff_function():
+    """The WebView template exposes a JS function used by card clicks."""
+    from pathlib import Path
+
+    html = Path("assets/diff_template.html").read_text(encoding="utf-8")
+
+    assert "function focusDiff(diffId)" in html
+    assert "scrollIntoView" in html
 
 
 def test_load_task_result_populates_compare_page(qtbot, ctx, mem_conn):

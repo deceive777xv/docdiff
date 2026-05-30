@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal, QObject
+from PySide6.QtCore import Qt, QThread, Signal, QObject, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFileDialog,
@@ -28,7 +28,7 @@ class _IngestWorker(QObject):
     """Run ingest in a background thread."""
     finished = Signal()   
     error = Signal(str)
-    refresh_needed = Signal()
+    refresh_needed = Signal(str)
 
     def __init__(self, ctx: AppContext, file_path: str, document_id: str | None = None):
         super().__init__()
@@ -59,8 +59,8 @@ class _IngestWorker(QObject):
             if result.get("error"):
                 self.error.emit(result["error"])
             else:
+                self.refresh_needed.emit(self.file_path)
                 self.finished.emit()
-                self.refresh_needed.emit()
                 
         except Exception as e:
             logger.exception("Ingest worker failed")
@@ -179,24 +179,31 @@ class LibraryPage(QWidget):
             self._run_ingest(path)
 
     def _run_ingest(self, file_path: str, document_id: str | None = None) -> None:
-        self._thread = QThread()
-        self.worker = _IngestWorker(self.ctx, file_path, document_id=document_id)
-        self.worker.moveToThread(self._thread)
-        self._thread.started.connect(self.worker.run)
-        self.worker.refresh_needed.connect(lambda: self._on_ingest_done(file_path))
-        self.worker.finished.connect(self._thread.quit)
-        self.worker.error.connect(lambda msg: QMessageBox.warning(self, "导入错误", msg))
-        self.worker.error.connect(self._thread.quit)
-        self._thread.finished.connect(self.worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.finished.connect(lambda: self._threads.discard(self._thread))
-        self._threads.add(self._thread)
-        self._thread.start()
+        thread = QThread()
+        worker = _IngestWorker(self.ctx, file_path, document_id=document_id)
+        self._thread = thread
+        self.worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.refresh_needed.connect(self._on_ingest_done)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(self._on_ingest_error)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda th=thread: self._threads.discard(th))
+        self._threads.add(thread)
+        thread.start()
 
+    @Slot(str)
     def _on_ingest_done(self, file_path: str) -> None:
         name = Path(file_path).name
         QMessageBox.information(self, "导入成功", f"《{name}》已成功导入文档库。")
         self.refresh()
+
+    @Slot(str)
+    def _on_ingest_error(self, msg: str) -> None:
+        QMessageBox.warning(self, "导入错误", msg)
 
     def _on_selection_changed(self) -> None:
         has_selection = len(self._table.selectedItems()) > 0

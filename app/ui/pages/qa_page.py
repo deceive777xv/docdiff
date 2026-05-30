@@ -329,8 +329,8 @@ class QaPage(QWidget):
         self._current_bubble = bubble_label
         self._accumulated = ""
 
-        self._thread = QThread()
-        self.worker = _QaWorker(
+        thread = QThread()
+        worker = _QaWorker(
             data_dir=self.ctx.data_dir,
             question=question,
             embedder=self.ctx.embedder,
@@ -339,18 +339,20 @@ class QaPage(QWidget):
             current_version_ids=current_version_ids,
             thread_id=self._thread_id,
         )
-        self.worker.moveToThread(self._thread)
-        self.thread.started.connect(self.worker.run)
-        self.worker.token_received.connect(self._on_token)
-        self.worker.citations_ready.connect(self._on_citations)
-        self.worker.error.connect(self._on_error)
-        self.worker.done.connect(self._on_done)
-        self.worker.done.connect(self._thread.quit)
-        self._thread.finished.connect(self.worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.finished.connect(lambda: self._threads.discard(self._thread))
-        self._threads.add(self._thread)
-        self._thread.start()
+        self._thread = thread
+        self.worker = worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.token_received.connect(self._on_token)
+        worker.citations_ready.connect(self._on_citations)
+        worker.error.connect(self._on_error)
+        worker.done.connect(self._on_done)
+        worker.done.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda th=thread: self._threads.discard(th))
+        self._threads.add(thread)
+        thread.start()
 
     # ── Slots ──────────────────────────────────────────────────────────────────
 

@@ -232,7 +232,8 @@ class HomePage(QWidget):
             return "暂无结果"
         return (
             f"{int(task['diff_count'])}处差异 / "
-            f"高{int(task['high_count'])} 中{int(task['medium_count'])} 低{int(task['low_count'])}"
+            f"高{int(task['high_count'])} 中{int(task['medium_count'])} "
+            f"低{int(task['low_count'])} 无{int(task['none_count'])}"
         )
 
     def _make_task_action_button(self, task) -> QPushButton:

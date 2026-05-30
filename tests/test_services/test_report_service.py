@@ -40,6 +40,16 @@ def _make_result() -> DiffResult:
             similarity_score=0.12,
             explanation="文本结构大幅调整",
         ),
+        DiffItem(
+            diff_id=str(uuid.uuid4()),
+            section_path="第4条",
+            diff_type="格式变化",
+            risk_level="none",
+            baseline_text="甲方应付款。",
+            target_text="甲方应付款。 ",
+            similarity_score=0.99,
+            explanation="仅格式变化",
+        ),
     ]
     return DiffResult(
         task_id="test-task-001",
@@ -94,6 +104,7 @@ def test_export_html_contains_required_content(tmp_path):
     assert "实质修改" in content
     assert "新增" in content
     assert "重写" in content
+    assert "无风险" in content
     assert "第1条" in content
     assert "<!DOCTYPE html>" in content
 

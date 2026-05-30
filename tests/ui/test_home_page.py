@@ -85,7 +85,7 @@ def test_home_page_refresh_shows_versions_result_summary_and_open_action(home_pa
     compare_repo.insert_diff_items(
         mem_conn,
         task_id,
-        [_diff_item("d1", "high"), _diff_item("d2", "medium")],
+        [_diff_item("d1", "high"), _diff_item("d2", "medium"), _diff_item("d3", "none")],
     )
     compare_repo.update_task_status(mem_conn, task_id, "completed", "/tmp/result.json")
 
@@ -93,7 +93,7 @@ def test_home_page_refresh_shows_versions_result_summary_and_open_action(home_pa
 
     assert home_page._tasks_table.columnCount() == 6
     assert home_page._tasks_table.item(0, 1).text() == "合同 v1(初稿) → 合同 v2(终稿)"
-    assert home_page._tasks_table.item(0, 3).text() == "2处差异 / 高1 中1 低0"
+    assert home_page._tasks_table.item(0, 3).text() == "3处差异 / 高1 中1 低0 无1"
     action = home_page._tasks_table.cellWidget(0, 5)
     assert isinstance(action, QPushButton)
     assert action.text() == "打开"

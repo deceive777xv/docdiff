@@ -83,6 +83,10 @@
       padding: 10px 12px;
       line-height: 1.7;
       overflow-wrap: anywhere;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-left: 4px solid #9ca3af;
+      border-radius: 6px;
     }
 
     .diff-item:hover {
@@ -96,38 +100,32 @@
 
     /* 新增 — green */
     .added {
-      background: #4a9e7220;
-      border-left: 3px solid #4a9e72;
+      border-left-color: #4a9e72;
     }
 
     /* 删减 — red */
     .deleted {
-      background: #c0505020;
-      border-left: 3px solid #c05050;
+      border-left-color: #c05050;
     }
 
     /* 微调 — yellow */
     .minor {
-      background: #b0983020;
-      border-left: 3px solid #b09830;
+      border-left-color: #b09830;
     }
 
     /* 实质修改 — orange */
     .major {
-      background: #c0784020;
-      border-left: 3px solid #c07840;
+      border-left-color: #c07840;
     }
 
     /* 重写 — purple */
     .rewrite {
-      background: #7a58c020;
-      border-left: 3px solid #7a58c0;
+      border-left-color: #7a58c0;
     }
 
     /* 格式变化 — gray */
     .format {
-      background: #9ca3af20;
-      border-left: 3px solid #9ca3af;
+      border-left-color: #9ca3af;
     }
 
     .diff-block p {
@@ -259,12 +257,17 @@
       color: #cdd6f4;
     }
 
-    body.dark .added    { background: #74c7ec20; border-left-color: #74c7ec; }
-    body.dark .deleted  { background: #f38ba820; border-left-color: #f38ba8; }
-    body.dark .minor    { background: #f9e2af20; border-left-color: #f9e2af; }
-    body.dark .major    { background: #fab38720; border-left-color: #fab387; }
-    body.dark .rewrite  { background: #cba6f720; border-left-color: #cba6f7; }
-    body.dark .format   { background: #a6adc820; border-left-color: #a6adc8; }
+    body.dark .diff-block {
+      background: #363a4f;
+      border-color: #585b70;
+    }
+
+    body.dark .added    { border-left-color: #74c7ec; }
+    body.dark .deleted  { border-left-color: #f38ba8; }
+    body.dark .minor    { border-left-color: #f9e2af; }
+    body.dark .major    { border-left-color: #fab387; }
+    body.dark .rewrite  { border-left-color: #cba6f7; }
+    body.dark .format   { border-left-color: #a6adc8; }
 
     body.dark .diff-block h4,
     body.dark .diff-block h5,
@@ -328,6 +331,44 @@
     (function () {
       'use strict';
 
+      function matchingDiffElements(diffId) {
+        var matches = [];
+        document.querySelectorAll('.diff-item').forEach(function (el) {
+          if (el.getAttribute('data-diff-id') === diffId) {
+            matches.push(el);
+          }
+        });
+        return matches;
+      }
+
+      function selectDiff(diffId) {
+        document.querySelectorAll('.diff-item.selected').forEach(function (s) {
+          s.classList.remove('selected');
+        });
+
+        var matches = matchingDiffElements(diffId);
+        matches.forEach(function (s) {
+          s.classList.add('selected');
+        });
+        return matches;
+      }
+
+      function focusDiff(diffId) {
+        var matches = selectDiff(diffId);
+        ['baseline-pane', 'target-pane'].forEach(function (paneId) {
+          var pane = document.getElementById(paneId);
+          var target = null;
+          matches.forEach(function (el) {
+            if (!target && pane && pane.contains(el)) {
+              target = el;
+            }
+          });
+          if (target) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+        });
+      }
+
       /**
        * Attach click handlers to all .diff-item elements.
        * Called from Python via page.runJavaScript() after injecting HTML.
@@ -344,14 +385,7 @@
               window.bridge.onDiffClick(diffId);
             }
 
-            // Visual selection highlight
-            document.querySelectorAll('.diff-item.selected').forEach(function (s) {
-              s.classList.remove('selected');
-            });
-            // Highlight both baseline and target spans with same diff-id
-            document.querySelectorAll('.diff-item[data-diff-id="' + diffId + '"]').forEach(function (s) {
-              s.classList.add('selected');
-            });
+            selectDiff(diffId);
           };
           el.addEventListener('click', el._diffClickHandler);
         });
@@ -359,6 +393,8 @@
 
       // Expose globally so Python runJavaScript can call it
       window.attachDiffHandlers = attachDiffHandlers;
+      window.focusDiff = focusDiff;
+      window.selectDiff = selectDiff;
 
       // Initialize QWebChannel bridge when the transport is available
       if (typeof qt !== 'undefined' && qt.webChannelTransport) {

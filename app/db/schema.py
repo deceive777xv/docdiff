@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS diff_items (
     compare_task_id   TEXT NOT NULL REFERENCES compare_tasks(id),
     section_path      TEXT,
     diff_type         TEXT NOT NULL,
-    risk_level        TEXT NOT NULL CHECK(risk_level IN ('high','medium','low')),
+    risk_level        TEXT NOT NULL CHECK(risk_level IN ('high','medium','low','none')),
     baseline_text     TEXT,
     target_text       TEXT,
     similarity_score  REAL,
@@ -65,6 +65,56 @@ CREATE TABLE IF NOT EXISTS diff_items (
     target_page       INTEGER
 );
 """
+
+_DIFF_ITEM_COLUMNS = """
+    id,
+    compare_task_id,
+    section_path,
+    diff_type,
+    risk_level,
+    baseline_text,
+    target_text,
+    similarity_score,
+    explanation,
+    baseline_page,
+    target_page
+"""
+
+_CREATE_DIFF_ITEMS_SQL = """
+CREATE TABLE diff_items (
+    id                TEXT PRIMARY KEY,
+    compare_task_id   TEXT NOT NULL REFERENCES compare_tasks(id),
+    section_path      TEXT,
+    diff_type         TEXT NOT NULL,
+    risk_level        TEXT NOT NULL CHECK(risk_level IN ('high','medium','low','none')),
+    baseline_text     TEXT,
+    target_text       TEXT,
+    similarity_score  REAL,
+    explanation       TEXT,
+    baseline_page     INTEGER,
+    target_page       INTEGER
+);
+"""
+
+
+def _migrate_diff_items_risk_level(conn: sqlite3.Connection) -> None:
+    """Rebuild legacy diff_items tables whose risk CHECK lacks 'none'."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='diff_items'"
+    ).fetchone()
+    if row is None or row["sql"] is None or "'none'" in row["sql"]:
+        return
+
+    conn.execute("PRAGMA foreign_keys=OFF;")
+    conn.execute("ALTER TABLE diff_items RENAME TO diff_items_legacy;")
+    conn.executescript(_CREATE_DIFF_ITEMS_SQL)
+    conn.execute(
+        f"""INSERT INTO diff_items ({_DIFF_ITEM_COLUMNS})
+            SELECT {_DIFF_ITEM_COLUMNS} FROM diff_items_legacy"""
+    )
+    conn.execute("DROP TABLE diff_items_legacy;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.commit()
 
 
 def get_db_path(data_dir: str) -> Path:
@@ -88,5 +138,6 @@ def init_db(data_dir: str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(DDL)
+    _migrate_diff_items_risk_level(conn)
     conn.commit()
     return conn

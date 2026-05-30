@@ -24,22 +24,47 @@ _CLASSIFY_PROMPT = """你是一个专业的文档差异分析助手。请分析�
 请以JSON格式回答，只输出JSON，不要有任何其他内容：
 {{
   "diff_type": "微调|实质修改|重写|格式变化",
-  "risk_level": "high|medium|low",
+  "risk_level": "high|medium|low|none",
   "explanation": "简短的差异说明（30字以内）"
 }}
 
 判断规则：
-- 格式变化：仅排版、标点、序号变化，语义完全相同
-- 微调：措辞调整，核心意思不变（相似度通常 > 0.8）
-- 实质修改：金额、日期、责任主体、权利义务等核心内容变化（相似度通常 0.3~0.8）
-- 重写：段落大幅改写，原结构基本不保留（相似度通常 < 0.4）
+- 无风险（none）：仅格式、顺序、表达方式变化，语义和义务完全一致
+- 低风险（low）：措辞调整，核心意思不变，业务影响很小
+- 中风险（medium）：表达或范围有变化，但未触及关键金额、日期、责任主体、权利义务
+- 高风险（high）：金额、日期、责任主体、权利义务、否定词、禁止/必须等关键内容变化
+- 相似度只能作为参考；如果你判断语义一致，应给 low 或 none，不要仅因相似度低给 high
 """
+
+_VALID_RISK_LEVELS = {"high", "medium", "low", "none"}
+_RISK_ALIASES = {
+    "高风险": "high",
+    "high": "high",
+    "中风险": "medium",
+    "medium": "medium",
+    "低风险": "low",
+    "low": "low",
+    "无风险": "none",
+    "none": "none",
+    "no": "none",
+    "no_risk": "none",
+    "norisk": "none",
+}
+
+
+def _normalize_risk_level(value: str | None) -> str:
+    if value is None:
+        return "medium"
+    normalized = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized in _VALID_RISK_LEVELS:
+        return normalized
+    return _RISK_ALIASES.get(normalized, "medium")
 
 
 def _rule_classify(baseline: str, target: str, similarity: float = 1.0) -> tuple[str, str, str]:
     """Quick rule-based classification as fallback or supplement."""
     if re.sub(r'\s+', '', baseline) == re.sub(r'\s+', '', target):
-        return "格式变化", "low", "仅格式变化"
+        return "格式变化", "none", "仅格式变化"
 
     if similarity < 0.3:
         return "重写", "high", "文本结构大幅调整"
@@ -54,7 +79,9 @@ def _rule_classify(baseline: str, target: str, similarity: float = 1.0) -> tuple
     if numbers_b != numbers_t or neg_b != neg_t or oblig_b != oblig_t:
         return "实质修改", "high", "关键数值或义务条款发生变化"
 
-    return "微调", "medium", "措辞有所调整"
+    if similarity < 0.75:
+        return "微调", "medium", "措辞有所调整"
+    return "微调", "low", "措辞有所调整"
 
 
 def _llm_classify(
@@ -75,7 +102,7 @@ def _llm_classify(
             data = json.loads(match.group())
             return (
                 data.get("diff_type", "微调"),
-                data.get("risk_level", "medium"),
+                _normalize_risk_level(data.get("risk_level")),
                 data.get("explanation", ""),
             )
     except Exception as e:
@@ -116,6 +143,7 @@ def classify(
                 explanation="基准文档段落被删除",
             ))
         elif pp.baseline_para is not None and pp.target_para is not None:
+            used_llm = policy.use_llm_classify and provider is not None
             if policy.use_llm_classify and provider is not None:
                 diff_type, risk_level, explanation = _llm_classify(
                     pp.baseline_para.text, pp.target_para.text, provider, pp.similarity
@@ -124,7 +152,7 @@ def classify(
                 diff_type, risk_level, explanation = _rule_classify(
                     pp.baseline_para.text, pp.target_para.text, pp.similarity
                 )
-            if policy.rule_strengthen:
+            if policy.rule_strengthen and not used_llm:
                 _, rule_risk, _ = _rule_classify(
                     pp.baseline_para.text, pp.target_para.text, pp.similarity
                 )

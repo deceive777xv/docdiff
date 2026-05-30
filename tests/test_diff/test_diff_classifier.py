@@ -64,7 +64,7 @@ def test_classifies_deletion():
 
 
 def test_rule_classify_format_change():
-    """Identical texts with only whitespace difference → diff_type='格式变化'."""
+    """Identical texts with only whitespace difference → diff_type='格式变化', risk='none'."""
     from app.core.diff.diff_classifier import classify
 
     b_para = make_para("本合同自签署之日起生效。")
@@ -82,6 +82,7 @@ def test_rule_classify_format_change():
 
     assert len(result.items) == 1
     assert result.items[0].diff_type == "格式变化"
+    assert result.items[0].risk_level == "none"
 
 
 def test_rule_classify_substantial():
@@ -163,3 +164,84 @@ def test_classify_passes_similarity_to_rule_classifier():
 
     assert result.items[0].diff_type == "重写"
     assert result.items[0].risk_level == "high"
+
+
+def test_llm_none_risk_is_not_strengthened_by_low_similarity():
+    """LLM semantic judgment can mark a low-similarity rewrite as no risk."""
+    from app.core.diff.diff_classifier import classify
+
+    provider = type(
+        "Provider",
+        (),
+        {
+            "chat": lambda self, messages: (
+                '{"diff_type": "格式变化", "risk_level": "none", '
+                '"explanation": "语义一致，仅表达顺序调整"}'
+            )
+        },
+    )()
+    b_para = make_para("甲方应在收到发票后三十日内完成付款。")
+    t_para = make_para("收到发票后，甲方付款期限为三十日。")
+    pp = ParagraphPair(baseline_para=b_para, target_para=t_para, similarity=0.12)
+
+    result = classify(
+        para_pairs=[pp],
+        policy=ComparePolicy(use_llm_classify=True, rule_strengthen=True),
+        provider=provider,  # type: ignore[arg-type]
+        task_id="t3",
+        baseline_version_id="b3",
+        target_version_id="v3",
+    )
+
+    assert result.items[0].diff_type == "格式变化"
+    assert result.items[0].risk_level == "none"
+
+
+def test_llm_low_risk_is_not_strengthened_to_high_by_low_similarity():
+    """LLM low-risk judgment should survive the similarity fallback rule."""
+    from app.core.diff.diff_classifier import classify
+
+    provider = type(
+        "Provider",
+        (),
+        {
+            "chat": lambda self, messages: (
+                '{"diff_type": "微调", "risk_level": "low", '
+                '"explanation": "核心义务未变化"}'
+            )
+        },
+    )()
+    b_para = make_para("乙方负责交付前的质量检查并提交证明。")
+    t_para = make_para("交付前质量检查及证明文件由乙方负责。")
+    pp = ParagraphPair(baseline_para=b_para, target_para=t_para, similarity=0.18)
+
+    result = classify(
+        para_pairs=[pp],
+        policy=ComparePolicy(use_llm_classify=True, rule_strengthen=True),
+        provider=provider,  # type: ignore[arg-type]
+        task_id="t4",
+        baseline_version_id="b4",
+        target_version_id="v4",
+    )
+
+    assert result.items[0].risk_level == "low"
+
+
+def test_llm_chinese_risk_label_is_normalized_to_none():
+    """LLM may answer with Chinese risk labels; normalize them before persistence."""
+    from app.core.diff.diff_classifier import _llm_classify
+
+    provider = type(
+        "Provider",
+        (),
+        {
+            "chat": lambda self, messages: (
+                '{"diff_type": "格式变化", "risk_level": "无风险", '
+                '"explanation": "语义完全一致"}'
+            )
+        },
+    )()
+
+    _, risk, _ = _llm_classify("甲方付款。", "甲方应付款。", provider, similarity=0.4)  # type: ignore[arg-type]
+
+    assert risk == "none"

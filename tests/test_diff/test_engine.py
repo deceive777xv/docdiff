@@ -144,5 +144,5 @@ class TestCompare:
         for item in result.items:
             assert item.diff_id
             assert item.diff_type in ("新增", "删减", "微调", "实质修改", "重写", "格式变化")
-            assert item.risk_level in ("high", "medium", "low")
+            assert item.risk_level in ("high", "medium", "low", "none")
             assert isinstance(item.similarity_score, float)

@@ -11,7 +11,7 @@ from docx.shared import Pt, RGBColor
 
 from app.core.types import DiffResult
 
-_RISK_LABELS = {"high": "高风险", "medium": "中风险", "low": "低风险"}
+_RISK_LABELS = {"high": "高风险", "medium": "中风险", "low": "低风险", "none": "无风险"}
 
 _DIFF_COLORS_HEX: dict[str, str] = {
     "新增":     "22c55e",
