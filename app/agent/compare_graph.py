@@ -59,12 +59,19 @@ def _load_ir(version_id: str, conn) -> DocumentIR:
 def create_task(state: CompareState) -> dict:
     """Insert compare_tasks record and mark as running."""
     try:
-        task_id = compare_repo.create_compare_task(
-            state["conn"],
-            baseline_version_id=state["baseline_version_id"],
-            target_version_id=state["target_version_id"],
-        )
-        compare_repo.update_task_status(state["conn"], task_id, "running")
+        task_id = state.get("task_id")
+        if task_id:
+            task = compare_repo.get_task_by_id(state["conn"], task_id)
+            if task is None:
+                raise ValueError(f"Compare task not found: {task_id}")
+            compare_repo.prepare_task_for_rerun(state["conn"], task_id)
+        else:
+            task_id = compare_repo.create_compare_task(
+                state["conn"],
+                baseline_version_id=state["baseline_version_id"],
+                target_version_id=state["target_version_id"],
+            )
+            compare_repo.update_task_status(state["conn"], task_id, "running")
         return {"task_id": task_id, "status": "task_created"}
     except Exception as e:
         logger.exception("create_task failed")

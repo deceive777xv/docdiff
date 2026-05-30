@@ -41,6 +41,7 @@ class CompareState(TypedDict, total=False):
     provider: Any
     embedder: Any
     conn: Any
+    task_id: str                 # optional input when recovering an existing task
 
     # ── Node-internal ────────────────────────────────────────────────────────
     _baseline_ir: Any          # DocumentIR
@@ -49,7 +50,6 @@ class CompareState(TypedDict, total=False):
     _para_pairs: list
 
     # ── Node outputs ────────────────────────────────────────────────────────
-    task_id: str
     result: Any                # DiffResult
 
     # ── Status ──────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Optional
@@ -61,6 +62,197 @@ _RISK_LABELS: dict[str, str] = {
     "low":    "低风险",
 }
 
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
+_ORDERED_LIST_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
+_UNORDERED_LIST_RE = re.compile(r"^\s*[-*+]\s+(.+)$")
+_BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    if "|" not in line:
+        return False
+    cells = _split_markdown_table_row(line)
+    return bool(cells) and all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell) for cell in cells)
+
+
+def _is_markdown_table_start(lines: list[str], index: int) -> bool:
+    return (
+        index + 1 < len(lines)
+        and "|" in lines[index]
+        and _is_markdown_table_separator(lines[index + 1])
+    )
+
+
+def _render_inline_markdown(text: str) -> str:
+    """Render a small, escaped inline Markdown subset."""
+    rendered = html.escape(text, quote=False)
+    rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
+    rendered = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", rendered)
+    rendered = re.sub(r"__([^_\n]+)__", r"<strong>\1</strong>", rendered)
+    rendered = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", rendered)
+    rendered = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"<em>\1</em>", rendered)
+    return rendered
+
+
+def _render_markdown_table(rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+
+    header_cells = "".join(f"<th>{_render_inline_markdown(cell)}</th>" for cell in rows[0])
+    body_rows = []
+    for row in rows[1:]:
+        cells = "".join(f"<td>{_render_inline_markdown(cell)}</td>" for cell in row)
+        body_rows.append(f"<tr>{cells}</tr>")
+
+    body_html = "".join(body_rows)
+    return (
+        '<div class="markdown-table-wrap"><table>'
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{body_html}</tbody>"
+        "</table></div>"
+    )
+
+
+def _render_markdown_fragment(markdown_text: str) -> str:
+    """Convert stored Markdown text into safe, readable HTML for the diff panes."""
+    lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if not stripped:
+            i += 1
+            continue
+
+        if stripped.startswith("```"):
+            i += 1
+            code_lines: list[str] = []
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                i += 1
+            code = html.escape("\n".join(code_lines), quote=False)
+            blocks.append(f"<pre><code>{code}</code></pre>")
+            continue
+
+        if _is_markdown_table_start(lines, i):
+            table_rows = [_split_markdown_table_row(lines[i])]
+            i += 2  # skip header and separator
+            while i < len(lines) and lines[i].strip() and "|" in lines[i]:
+                if not _is_markdown_table_separator(lines[i]):
+                    table_rows.append(_split_markdown_table_row(lines[i]))
+                i += 1
+            blocks.append(_render_markdown_table(table_rows))
+            continue
+
+        heading = _HEADING_RE.match(stripped)
+        if heading:
+            level = min(6, len(heading.group(1)) + 3)
+            blocks.append(f"<h{level}>{_render_inline_markdown(heading.group(2).strip())}</h{level}>")
+            i += 1
+            continue
+
+        unordered = _UNORDERED_LIST_RE.match(line)
+        if unordered:
+            items: list[str] = []
+            while i < len(lines):
+                match = _UNORDERED_LIST_RE.match(lines[i])
+                if not match:
+                    break
+                items.append(f"<li>{_render_inline_markdown(match.group(1).strip())}</li>")
+                i += 1
+            blocks.append(f"<ul>{''.join(items)}</ul>")
+            continue
+
+        ordered = _ORDERED_LIST_RE.match(line)
+        if ordered:
+            items = []
+            while i < len(lines):
+                match = _ORDERED_LIST_RE.match(lines[i])
+                if not match:
+                    break
+                items.append(f"<li>{_render_inline_markdown(match.group(1).strip())}</li>")
+                i += 1
+            blocks.append(f"<ol>{''.join(items)}</ol>")
+            continue
+
+        quote = _BLOCKQUOTE_RE.match(line)
+        if quote:
+            quote_lines: list[str] = []
+            while i < len(lines):
+                match = _BLOCKQUOTE_RE.match(lines[i])
+                if not match:
+                    break
+                quote_lines.append(match.group(1).strip())
+                i += 1
+            quote_html = "<br>".join(_render_inline_markdown(q) for q in quote_lines)
+            blocks.append(f"<blockquote>{quote_html}</blockquote>")
+            continue
+
+        paragraph_lines: list[str] = []
+        while i < len(lines) and lines[i].strip():
+            current = lines[i].strip()
+            starts_new_block = (
+                _is_markdown_table_start(lines, i)
+                or _HEADING_RE.match(current)
+                or _UNORDERED_LIST_RE.match(lines[i])
+                or _ORDERED_LIST_RE.match(lines[i])
+                or _BLOCKQUOTE_RE.match(lines[i])
+                or current.startswith("```")
+            )
+            if paragraph_lines and starts_new_block:
+                break
+            paragraph_lines.append(current)
+            i += 1
+        paragraph = "<br>".join(_render_inline_markdown(p) for p in paragraph_lines)
+        blocks.append(f"<p>{paragraph}</p>")
+
+    return "".join(block for block in blocks if block)
+
+
+def _strip_markdown_formatting(markdown_text: str) -> str:
+    """Remove common Markdown markers for compact QLabel summaries."""
+    cleaned_lines: list[str] = []
+    in_code_block = False
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_code_block = not in_code_block
+            continue
+        if not line:
+            continue
+        if _is_markdown_table_separator(line):
+            continue
+        if line.startswith("|") and line.endswith("|"):
+            line = " ".join(cell for cell in _split_markdown_table_row(line) if cell)
+        elif not in_code_block:
+            line = re.sub(r"^#{1,6}\s+", "", line)
+            line = re.sub(r"^>\s?", "", line)
+            line = re.sub(r"^[-*+]\s+", "", line)
+            line = re.sub(r"^\d+[.)]\s+", "", line)
+        cleaned_lines.append(line)
+
+    stripped = " ".join(cleaned_lines)
+    stripped = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", stripped)
+    stripped = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", stripped)
+    stripped = re.sub(r"`([^`]*)`", r"\1", stripped)
+    stripped = re.sub(r"[*_~]+", "", stripped)
+    return re.sub(r"\s+", " ", stripped).strip()
+
 
 # ── Background worker ──────────────────────────────────────────────────────────
 
@@ -78,6 +270,7 @@ class _CompareWorker(QObject):
         embedder,
         provider,
         policy: ComparePolicy,
+        task_id: str | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -87,6 +280,7 @@ class _CompareWorker(QObject):
         self._embedder = embedder
         self._provider = provider
         self._policy = policy
+        self._task_id = task_id
 
     def run(self) -> None:
         try:
@@ -95,14 +289,17 @@ class _CompareWorker(QObject):
 
             conn = open_db(self._data_dir)
             try:
-                result = compare_graph.invoke({
+                state = {
                     "data_dir": self._data_dir,
                     "baseline_version_id": self._baseline_version_id,
                     "target_version_id": self._target_version_id,
                     "provider": self._provider,
                     "embedder": self._embedder,
                     "conn": conn,
-                })
+                }
+                if self._task_id:
+                    state["task_id"] = self._task_id
+                result = compare_graph.invoke(state)
             finally:
                 conn.close()
 
@@ -141,6 +338,7 @@ class ComparePage(QWidget):
         self.ctx = ctx
         self._current_result: Optional[DiffResult] = None
         self._diff_items_by_id: dict[str, DiffItem] = {}
+        self._recover_task_id: str | None = None
         self._thread: QThread | None = None
         self._threads: set[QThread] = set()
         self._build_ui()
@@ -307,6 +505,72 @@ class ComparePage(QWidget):
     # ── Public API ─────────────────────────────────────────────────────────────
     def refresh(self) -> None:
         self.refresh_versions()
+
+    def load_task(self, task_id: str) -> None:
+        """Load an existing compare task into the page."""
+        from app.db import compare_repo
+
+        task = compare_repo.get_task_by_id(self.ctx.conn, task_id)
+        if task is None:
+            QMessageBox.warning(self, "任务不存在", f"未找到对比任务：{task_id}")
+            return
+
+        self.refresh_versions()
+        self._select_combo_value(self._baseline_combo, task["baseline_version_id"])
+        self._select_combo_value(self._target_combo, task["target_version_id"])
+
+        if task["status"] == "completed":
+            result = compare_repo.get_task_result(self.ctx.conn, task_id)
+            self._recover_task_id = None
+            self._run_btn.setText("▶ 开始对比")
+            self._display_result(result, f"已加载任务结果：{len(result.items)} 处差异。")
+            return
+
+        status_text = {
+            "pending": "等待中",
+            "running": "进行中",
+            "failed": "失败",
+        }.get(task["status"], task["status"])
+        self._current_result = None
+        self._diff_items_by_id = {}
+        self._export_btn.setEnabled(False)
+        self._tree.clear()
+        self._show_diff_list([])
+        self._update_overview(DiffResult(task_id, task["baseline_version_id"], task["target_version_id"], []))
+        if task_id in self.ctx.active_compare_task_ids:
+            self._recover_task_id = None
+            self._run_btn.setText("对比中…")
+            self._run_btn.setEnabled(False)
+            self._loading_label.setText(f"任务正在运行（{status_text}），完成后会自动展示结果。")
+            return
+
+        self._recover_task_id = task_id
+        self._run_btn.setText("恢复对比")
+        self._run_btn.setEnabled(True)
+        self._loading_label.setText(
+            f"任务未完成（{status_text}）。点击“恢复对比”将重新执行该任务。"
+        )
+
+    def recover_task(self, task_id: str) -> None:
+        """Recover an unfinished task by re-running it with the same task id."""
+        from app.db import compare_repo
+
+        task = compare_repo.get_task_by_id(self.ctx.conn, task_id)
+        if task is None:
+            QMessageBox.warning(self, "任务不存在", f"未找到对比任务：{task_id}")
+            return
+        if self.ctx.provider is None or self.ctx.embedder is None:
+            QMessageBox.warning(
+                self,
+                "配置缺失",
+                "请先在设置页面配置模型 API 和 Embedding。",
+            )
+            return
+        self.refresh_versions()
+        self._select_combo_value(self._baseline_combo, task["baseline_version_id"])
+        self._select_combo_value(self._target_combo, task["target_version_id"])
+        self._recover_task_id = task_id
+        self._start_compare(task["baseline_version_id"], task["target_version_id"], task_id)
         
     def refresh_versions(self) -> None:
         """Repopulate baseline/target combos from the database."""
@@ -330,6 +594,11 @@ class ComparePage(QWidget):
             self._baseline_combo.blockSignals(False)
             self._target_combo.blockSignals(False)
         self._update_run_btn_state()
+
+    def _select_combo_value(self, combo: QComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
     # ── Slot helpers ───────────────────────────────────────────────────────────
 
@@ -356,8 +625,27 @@ class ComparePage(QWidget):
         if not baseline_version_id or not target_version_id:
             return
 
+        task_id = self._recover_task_id
+        if task_id is None:
+            from app.db import compare_repo
+            task_id = compare_repo.create_compare_task(
+                self.ctx.conn,
+                baseline_version_id=baseline_version_id,
+                target_version_id=target_version_id,
+            )
+        self._start_compare(baseline_version_id, target_version_id, task_id)
+
+    def _start_compare(
+        self,
+        baseline_version_id: str,
+        target_version_id: str,
+        task_id: str,
+    ) -> None:
+        """Start or recover a compare task in a background thread."""
         self._run_btn.setEnabled(False)
         self._loading_label.setText("对比中，请稍候…")
+        self._recover_task_id = task_id
+        self.ctx.active_compare_task_ids.add(task_id)
 
         self._thread = QThread()
         self._worker = _CompareWorker(
@@ -367,23 +655,32 @@ class ComparePage(QWidget):
             self.ctx.embedder,
             self.ctx.provider,
             ComparePolicy(),
+            task_id=task_id,
         )
-        self.worker.moveToThread(self._thread)
-        self._thread.started.connect(self.worker.run)
-        self.worker.result_ready.connect(self._on_compare_done)
-        self.worker.result_ready.connect(self._thread.quit)
-        self.worker.error.connect(self._on_compare_error)
-        self.worker.error.connect(self._thread.quit)
-        self._thread.finished.connect(self.worker.deleteLater)
-        self._thread.finished.connect(self._thread.deleteLater)
-        self._thread.finished.connect(lambda: self._threads.discard(self._thread))
-        self._threads.add(self._thread)
-        self._thread.start()
+        worker = self._worker
+        thread = self._thread
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result_ready.connect(self._on_compare_done)
+        worker.result_ready.connect(thread.quit)
+        worker.error.connect(self._on_compare_error)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda tid=task_id: self.ctx.active_compare_task_ids.discard(tid))
+        thread.finished.connect(lambda th=thread: self._threads.discard(th))
+        self._threads.add(thread)
+        thread.start()
 
     def _on_compare_done(self, result: DiffResult) -> None:
+        self._display_result(result, f"完成！发现 {len(result.items)} 处差异。")
+        self._recover_task_id = None
+        self._run_btn.setText("▶ 开始对比")
+
+    def _display_result(self, result: DiffResult, message: str) -> None:
         self._current_result = result
         self._diff_items_by_id = {item.diff_id: item for item in result.items}
-        self._loading_label.setText(f"完成！发现 {len(result.items)} 处差异。")
+        self._loading_label.setText(message)
         self._run_btn.setEnabled(True)
         self._export_btn.setEnabled(True)
         self._update_overview(result)
@@ -394,6 +691,7 @@ class ComparePage(QWidget):
     def _on_compare_error(self, msg: str) -> None:
         self._loading_label.setText("")
         self._run_btn.setEnabled(True)
+        self._run_btn.setText("恢复对比" if self._recover_task_id else "▶ 开始对比")
         QMessageBox.critical(self, "对比失败", msg)
 
     def _export_report(self) -> None:
@@ -484,18 +782,20 @@ class ComparePage(QWidget):
 
             for item in items:
                 css_cls, _ = _diff_css().get(item.diff_type, ("format", Theme.DIFF_FORMAT))
-                did = html.escape(item.diff_id)
+                did = html.escape(item.diff_id, quote=True)
 
                 if item.baseline_text:
+                    rendered = _render_markdown_fragment(item.baseline_text)
                     baseline_parts.append(
-                        f'<span class="diff-item {css_cls}" data-diff-id="{did}">'
-                        f"{html.escape(item.baseline_text)}</span>"
+                        f'<div class="diff-item diff-block {css_cls}" data-diff-id="{did}">'
+                        f"{rendered}</div>"
                     )
 
                 if item.target_text:
+                    rendered = _render_markdown_fragment(item.target_text)
                     target_parts.append(
-                        f'<span class="diff-item {css_cls}" data-diff-id="{did}">'
-                        f"{html.escape(item.target_text)}</span>"
+                        f'<div class="diff-item diff-block {css_cls}" data-diff-id="{did}">'
+                        f"{rendered}</div>"
                     )
 
         baseline_html = "".join(baseline_parts)
@@ -503,9 +803,9 @@ class ComparePage(QWidget):
 
         js = (
             f"document.getElementById('baseline-content').innerHTML = "
-            f"{json.dumps(baseline_html)};\n"
+            f"{json.dumps(baseline_html, ensure_ascii=False)};\n"
             f"document.getElementById('target-content').innerHTML = "
-            f"{json.dumps(target_html)};\n"
+            f"{json.dumps(target_html, ensure_ascii=False)};\n"
             "attachDiffHandlers();"
         )
         self._web_view.page().runJavaScript(js)
@@ -570,7 +870,7 @@ class ComparePage(QWidget):
         _bg0.setAlpha(20)
         # Baseline text (truncated)
         if item.baseline_text:
-            b_text = item.baseline_text
+            b_text = _strip_markdown_formatting(item.baseline_text)
             display = b_text[:120] + ("…" if len(b_text) > 120 else "")
             b_lbl = QLabel(f"基准：{display}")
             b_lbl.setStyleSheet(
@@ -584,7 +884,7 @@ class ComparePage(QWidget):
         _bg1.setAlpha(20)
         # Target text (truncated)
         if item.target_text:
-            t_text = item.target_text
+            t_text = _strip_markdown_formatting(item.target_text)
             display = t_text[:120] + ("…" if len(t_text) > 120 else "")
             t_lbl = QLabel(f"目标：{display}")
             t_lbl.setStyleSheet(

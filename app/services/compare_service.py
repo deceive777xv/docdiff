@@ -59,6 +59,7 @@ def run_compare(
     embedder: BaseProvider,
     provider: BaseProvider,
     policy: ComparePolicy | None = None,
+    task_id: str | None = None,
 ) -> DiffResult:
     """
     Full compare pipeline:
@@ -72,12 +73,15 @@ def run_compare(
     if policy is None:
         policy = ComparePolicy()
 
-    task_id = compare_repo.create_compare_task(
-        conn,
-        baseline_version_id=baseline_version_id,
-        target_version_id=target_version_id,
-    )
-    compare_repo.update_task_status(conn, task_id, "running")
+    if task_id:
+        compare_repo.prepare_task_for_rerun(conn, task_id)
+    else:
+        task_id = compare_repo.create_compare_task(
+            conn,
+            baseline_version_id=baseline_version_id,
+            target_version_id=target_version_id,
+        )
+        compare_repo.update_task_status(conn, task_id, "running")
 
     try:
         baseline_ir = _load_ir(baseline_version_id, conn)

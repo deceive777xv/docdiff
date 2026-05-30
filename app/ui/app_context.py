@@ -1,7 +1,7 @@
 """Application context — shared state for all UI pages."""
 from __future__ import annotations
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.config.settings import AppSettings
 from app.core.model.base_provider import BaseProvider
@@ -17,3 +17,4 @@ class AppContext:
     lc_model: object | None = None  # BaseChatModel, typed as object to avoid hard dep
     openai_client: object | None = None  # openai.OpenAI, for markitdown-ocr
     openai_model: str = ""
+    active_compare_task_ids: set[str] = field(default_factory=set)

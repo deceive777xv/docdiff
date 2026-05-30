@@ -8,10 +8,10 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.db import compare_repo
 from app.ui.app_context import AppContext
 from app.ui.theme import Theme
 
@@ -68,6 +69,8 @@ class HomePage(QWidget):
     """Dashboard home page."""
 
     navigate_requested = Signal(int)   # page index to navigate to
+    compare_task_open_requested = Signal(str)
+    compare_task_recover_requested = Signal(str)
 
     def __init__(self, ctx: AppContext, parent=None):
         super().__init__(parent)
@@ -132,13 +135,18 @@ class HomePage(QWidget):
         recent_group = QGroupBox("最近对比任务")
         recent_layout = QVBoxLayout(recent_group)
 
-        self._tasks_table = QTableWidget(0, 4)
-        self._tasks_table.setHorizontalHeaderLabels(["任务ID", "状态", "创建时间", "完成时间"])
-        self._tasks_table.horizontalHeader().setStretchLastSection(True)
+        self._tasks_table = QTableWidget(0, 6)
+        self._tasks_table.setHorizontalHeaderLabels(
+            ["任务ID", "版本", "状态", "结果", "创建时间", "操作"]
+        )
+        self._tasks_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self._tasks_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self._tasks_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self._tasks_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._tasks_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tasks_table.setAlternatingRowColors(True)
-        self._tasks_table.setMaximumHeight(200)
+        self._tasks_table.setMaximumHeight(240)
+        self._tasks_table.itemDoubleClicked.connect(self._on_task_row_activated)
         recent_layout.addWidget(self._tasks_table)
 
         layout.addWidget(recent_group)
@@ -176,27 +184,91 @@ class HomePage(QWidget):
             self._card_tasks.update_value(str(tasks))
             self._card_done.update_value(str(done))
 
-            recent = self.ctx.conn.execute(
-                "SELECT * FROM compare_tasks ORDER BY created_at DESC LIMIT 10"
-            ).fetchall()
+            recent = compare_repo.list_recent_task_summaries(self.ctx.conn, limit=10)
             self._tasks_table.setRowCount(len(recent))
             for row, task in enumerate(recent):
-                self._tasks_table.setItem(row, 0, QTableWidgetItem(task["id"][:8] + "…"))
-                status_map = {
-                    "pending": "等待中",
-                    "running": "进行中",
-                    "completed": "已完成",
-                    "failed": "失败",
-                }
-                self._tasks_table.setItem(
-                    row, 1,
-                    QTableWidgetItem(status_map.get(task["status"], task["status"]))
-                )
-                self._tasks_table.setItem(
-                    row, 2, QTableWidgetItem(str(task["created_at"])[:16])
-                )
-                self._tasks_table.setItem(
-                    row, 3, QTableWidgetItem(str(task["finished_at"] or "")[:16])
-                )
+                self._populate_task_row(row, task)
         except Exception as e:
             logger.warning("Home page refresh failed: %s", e)
+
+    def _populate_task_row(self, row: int, task) -> None:
+        task_id = task["id"]
+        values = [
+            task_id[:8] + "…",
+            self._format_version_pair(task),
+            self._format_status(task),
+            self._format_result_summary(task),
+            str(task["created_at"])[:16],
+        ]
+        for col, value in enumerate(values):
+            item = QTableWidgetItem(value)
+            item.setData(Qt.ItemDataRole.UserRole, task_id)
+            self._tasks_table.setItem(row, col, item)
+
+        action = self._make_task_action_button(task)
+        self._tasks_table.setCellWidget(row, 5, action)
+
+    def _format_version_pair(self, task) -> str:
+        return f"{self._format_version(task, 'baseline')} → {self._format_version(task, 'target')}"
+
+    def _format_version(self, task, prefix: str) -> str:
+        doc_name = task[f"{prefix}_doc_name"] or "未知文档"
+        version_no = task[f"{prefix}_version_no"]
+        version = f"v{version_no}" if version_no is not None else "未知版本"
+        label = task[f"{prefix}_version_label"] or ""
+        return f"{doc_name} {version}({label})" if label else f"{doc_name} {version}"
+
+    def _format_status(self, task) -> str:
+        status_map = {
+            "pending": "等待中",
+            "running": "进行中",
+            "completed": "已完成",
+            "failed": "失败",
+        }
+        return status_map.get(task["status"], task["status"])
+
+    def _format_result_summary(self, task) -> str:
+        if task["status"] != "completed":
+            return "暂无结果"
+        return (
+            f"{int(task['diff_count'])}处差异 / "
+            f"高{int(task['high_count'])} 中{int(task['medium_count'])} 低{int(task['low_count'])}"
+        )
+
+    def _make_task_action_button(self, task) -> QPushButton:
+        task_id = task["id"]
+        is_active = task_id in self.ctx.active_compare_task_ids
+        if task["status"] == "completed":
+            label = "打开"
+            callback = self.compare_task_open_requested.emit
+            enabled = True
+        elif is_active:
+            label = "进行中"
+            callback = self.compare_task_open_requested.emit
+            enabled = False
+        else:
+            label = "恢复"
+            callback = self.compare_task_recover_requested.emit
+            enabled = True
+
+        btn = QPushButton(label)
+        btn.setEnabled(enabled)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(
+            f"background-color:{Theme.COLOR_PRIMARY};color:{Theme.NAV_ACTIVE_TEXT};"
+            "border:none;border-radius:4px;padding:4px 10px;font-size:12px;"
+        )
+        btn.clicked.connect(lambda checked=False, tid=task_id, cb=callback: cb(tid))
+        return btn
+
+    def _on_task_row_activated(self, item: QTableWidgetItem) -> None:
+        task_id = item.data(Qt.ItemDataRole.UserRole)
+        if not task_id:
+            return
+        task = compare_repo.get_task_by_id(self.ctx.conn, task_id)
+        if task is None:
+            return
+        if task["status"] == "completed" or task_id in self.ctx.active_compare_task_ids:
+            self.compare_task_open_requested.emit(task_id)
+        else:
+            self.compare_task_recover_requested.emit(task_id)

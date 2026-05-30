@@ -32,6 +32,24 @@ def test_create_task_node(base_state):
     assert result.get("error") is None
 
 
+def test_create_task_node_reuses_existing_task(base_state):
+    """Recovery runs reuse the provided task id and prepare it for rerun."""
+    from app.agent.compare_graph import create_task
+
+    base_state["task_id"] = "task-existing"
+    with (
+        patch("app.agent.compare_graph.compare_repo.get_task_by_id", return_value={"id": "task-existing"}),
+        patch("app.agent.compare_graph.compare_repo.prepare_task_for_rerun") as prepare,
+        patch("app.agent.compare_graph.compare_repo.create_compare_task") as create,
+    ):
+        result = create_task(base_state)
+
+    assert result["task_id"] == "task-existing"
+    prepare.assert_called_once_with(base_state["conn"], "task-existing")
+    create.assert_not_called()
+    assert result.get("error") is None
+
+
 def test_graph_sets_error_on_missing_version(base_state):
     """Graph sets error when a version's IR file is missing."""
     from app.agent.compare_graph import compare_graph

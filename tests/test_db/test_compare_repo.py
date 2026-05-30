@@ -8,7 +8,7 @@ import pytest
 
 from app.core.types import DiffItem
 from app.db.schema import init_db
-from app.db import compare_repo
+from app.db import compare_repo, document_repo
 
 
 @pytest.fixture
@@ -111,3 +111,92 @@ def test_get_diff_items_filtered(db_conn):
     rows = compare_repo.get_diff_items(db_conn, task_id, diff_type="新增")
     assert len(rows) == 2
     assert all(row["diff_type"] == "新增" for row in rows)
+
+
+def test_list_recent_task_summaries_includes_versions_and_result_counts(db_conn):
+    """Recent task summaries include version labels and diff/risk counts."""
+    doc_id = document_repo.insert_document(
+        db_conn,
+        doc_name="合同",
+        doc_type="docx",
+        file_path="/docs/contract.docx",
+        file_hash="hash-contract",
+        source_type="standard",
+    )
+    baseline_id = document_repo.insert_version(
+        db_conn,
+        document_id=doc_id,
+        version_no=1,
+        version_label="初稿",
+    )
+    target_id = document_repo.insert_version(
+        db_conn,
+        document_id=doc_id,
+        version_no=2,
+        version_label="终稿",
+    )
+    task_id = compare_repo.create_compare_task(
+        db_conn,
+        baseline_version_id=baseline_id,
+        target_version_id=target_id,
+    )
+    compare_repo.insert_diff_items(
+        db_conn,
+        task_id,
+        [
+            make_diff_item(diff_type="新增", risk_level="high"),
+            make_diff_item(diff_type="删减", risk_level="medium"),
+            make_diff_item(diff_type="微调", risk_level="low"),
+        ],
+    )
+    compare_repo.update_task_status(db_conn, task_id, "completed", "/tmp/result.json")
+
+    summaries = compare_repo.list_recent_task_summaries(db_conn, limit=5)
+
+    assert summaries[0]["id"] == task_id
+    assert summaries[0]["baseline_doc_name"] == "合同"
+    assert summaries[0]["baseline_version_no"] == 1
+    assert summaries[0]["baseline_version_label"] == "初稿"
+    assert summaries[0]["target_version_no"] == 2
+    assert summaries[0]["target_version_label"] == "终稿"
+    assert summaries[0]["diff_count"] == 3
+    assert summaries[0]["high_count"] == 1
+    assert summaries[0]["medium_count"] == 1
+    assert summaries[0]["low_count"] == 1
+
+
+def test_get_task_result_builds_diff_result(db_conn):
+    """get_task_result rebuilds a DiffResult from compare_tasks and diff_items."""
+    task_id = compare_repo.create_compare_task(
+        db_conn,
+        baseline_version_id="bv-007",
+        target_version_id="tv-007",
+    )
+    compare_repo.insert_diff_items(db_conn, task_id, [make_diff_item()])
+
+    result = compare_repo.get_task_result(db_conn, task_id)
+
+    assert result.task_id == task_id
+    assert result.baseline_version_id == "bv-007"
+    assert result.target_version_id == "tv-007"
+    assert len(result.items) == 1
+    assert result.items[0].baseline_text == "原文"
+
+
+def test_prepare_task_for_rerun_clears_old_items_and_marks_running(db_conn):
+    """Recovering an interrupted task clears stale items and sets status to running."""
+    task_id = compare_repo.create_compare_task(
+        db_conn,
+        baseline_version_id="bv-008",
+        target_version_id="tv-008",
+    )
+    compare_repo.insert_diff_items(db_conn, task_id, [make_diff_item()])
+    compare_repo.update_task_status(db_conn, task_id, "failed")
+
+    compare_repo.prepare_task_for_rerun(db_conn, task_id)
+
+    row = compare_repo.get_task_by_id(db_conn, task_id)
+    assert row["status"] == "running"
+    assert row["finished_at"] is None
+    assert row["result_json_path"] == ""
+    assert compare_repo.get_diff_items(db_conn, task_id) == []
