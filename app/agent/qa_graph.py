@@ -19,6 +19,12 @@ from app.core.types import Chunk, ChunkHit
 serde = JsonPlusSerializer(allowed_msgpack_modules=[Chunk, ChunkHit])
 _checkpointer = SQLiteCheckpointSaver(serde=serde)
 
+_DEFAULT_CONTEXT_CHAR_BUDGET = 12000
+_DEFAULT_HISTORY_CHAR_BUDGET = 4000
+_DEFAULT_HISTORY_MESSAGE_CHAR_LIMIT = 1200
+_MAX_HISTORY_MESSAGES = 6
+_CLIP_NOTICE = "\n...[已截断，已优先保留最相关内容]"
+
 _QA_SYSTEM_PROMPT = """你是一个专业的文档问答助手。请根据以下参考资料回答用户问题。
 
 参考资料：
@@ -32,6 +38,7 @@ _QA_SYSTEM_PROMPT = """你是一个专业的文档问答助手。请根据以下
 """
 
 _RISK_LABELS = {"high": "高风险", "medium": "中风险", "low": "低风险", "none": "无风险"}
+_RISK_PRIORITY = {"high": 0, "medium": 1, "low": 2, "none": 3}
 
 
 def _route(state: QAState) -> str:
@@ -57,6 +64,79 @@ def _clip_text(text: str, limit: int = 300) -> str:
     return text[:limit] + ("..." if len(text) > limit else "")
 
 
+def _clip_for_budget(text: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit <= len(_CLIP_NOTICE):
+        return text[:limit]
+    return text[: limit - len(_CLIP_NOTICE)] + _CLIP_NOTICE
+
+
+def _config_int(configurable: dict, key: str, default: int) -> int:
+    try:
+        value = int(configurable.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _copy_message_with_content(message, content: str):
+    if hasattr(message, "model_copy"):
+        return message.model_copy(update={"content": content})
+    if hasattr(message, "copy"):
+        return message.copy(update={"content": content})
+    return message
+
+
+def _trim_history_messages(
+    messages: list,
+    *,
+    max_messages: int = _MAX_HISTORY_MESSAGES,
+    total_budget: int = _DEFAULT_HISTORY_CHAR_BUDGET,
+    per_message_limit: int = _DEFAULT_HISTORY_MESSAGE_CHAR_LIMIT,
+) -> list:
+    """Keep recent messages while bounding persisted QA memory sent to the model."""
+    recent = list(messages)[-max_messages:]
+    trimmed_reversed = []
+    remaining = total_budget
+
+    for message in reversed(recent):
+        if remaining <= 0:
+            break
+        content = message.content
+        if not isinstance(content, str):
+            content = str(content)
+        limit = min(per_message_limit, remaining)
+        clipped = _clip_for_budget(content, limit)
+        if not clipped:
+            break
+        trimmed_reversed.append(_copy_message_with_content(message, clipped))
+        remaining -= len(clipped)
+
+    return list(reversed(trimmed_reversed))
+
+
+def _fit_context_sections(sections: list[str], budget: int) -> str:
+    sections = [section for section in sections if section]
+    if not sections:
+        return ""
+
+    joined = "\n\n".join(sections)
+    if len(joined) <= budget:
+        return joined
+
+    separator_budget = 2 * (len(sections) - 1)
+    available = max(1, budget - separator_budget)
+    per_section = max(1, available // len(sections))
+    return "\n\n".join(
+        section
+        for section in (_clip_for_budget(section, per_section) for section in sections)
+        if section
+    )
+
+
 def _format_compare_context(result, limit: int = 20) -> str:
     """Format persisted diff items as direct QA context for compare questions."""
     counts = Counter(item.diff_type for item in result.items)
@@ -66,7 +146,16 @@ def _format_compare_context(result, limit: int = 20) -> str:
         f"差异总数：{len(result.items)}" + (f"（{count_text}）" if count_text else ""),
     ]
 
-    for index, item in enumerate(result.items[:limit], 1):
+    ranked_items = sorted(
+        result.items,
+        key=lambda item: (
+            _RISK_PRIORITY.get(item.risk_level, 99),
+            item.section_path or "",
+            item.diff_id,
+        ),
+    )
+
+    for index, item in enumerate(ranked_items[:limit], 1):
         risk = _RISK_LABELS.get(item.risk_level, item.risk_level)
         item_parts = [
             f"[{index}] 章节：{item.section_path or '未命名章节'}",
@@ -169,15 +258,37 @@ async def generate_answer(state: QAState, config: RunnableConfig) -> dict:
         if not lc_model:
             return {"answer": "请先在设置页面配置模型", "status": "answered"}
 
+        configurable = config.get("configurable", {})
+        context_budget = _config_int(
+            configurable,
+            "qa_context_char_budget",
+            _DEFAULT_CONTEXT_CHAR_BUDGET,
+        )
+        history_budget = _config_int(
+            configurable,
+            "qa_history_char_budget",
+            _DEFAULT_HISTORY_CHAR_BUDGET,
+        )
+        history_message_limit = _config_int(
+            configurable,
+            "qa_history_message_char_limit",
+            _DEFAULT_HISTORY_MESSAGE_CHAR_LIMIT,
+        )
+
         context_parts = []
         if compare_context:
             context_parts.append(compare_context)
         if hits:
             context_parts.append("检索片段：\n" + _format_context(hits))
-        context = "\n\n".join(context_parts)
+        context = _fit_context_sections(context_parts, context_budget)
         system_msg = SystemMessage(content=_QA_SYSTEM_PROMPT.format(context=context))
 
-        history = list(state.get("messages", []))[-6:]
+        history = _trim_history_messages(
+            list(state.get("messages", [])),
+            max_messages=_MAX_HISTORY_MESSAGES,
+            total_budget=history_budget,
+            per_message_limit=history_message_limit,
+        )
         messages_to_send = [system_msg] + history
 
         chunks: list[BaseMessageChunk] = []

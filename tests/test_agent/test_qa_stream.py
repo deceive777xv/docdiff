@@ -149,6 +149,74 @@ def test_generate_answer_truncates_history_to_6_messages():
     assert len(sent_messages) == 7
 
 
+def test_generate_answer_applies_context_budget_before_streaming():
+    """Very large compare/retrieval context should be clipped before calling the model."""
+    from app.agent.qa_graph import generate_answer
+
+    sent_messages = []
+
+    async def capture_astream(messages):
+        sent_messages.extend(messages)
+        yield AIMessageChunk(content="ok")
+
+    model = MagicMock()
+    model.astream = capture_astream
+
+    mock_hit = MagicMock()
+    mock_hit.chunk.text = "检索片段" * 600
+    mock_hit.chunk.section_path = "超长章节"
+    mock_hit.chunk.page_no = 0
+
+    state = {
+        "_hits": [mock_hit],
+        "_compare_context": "对比结果：" + ("差异内容" * 600),
+        "messages": [HumanMessage(content="总结差异")],
+    }
+    config = _make_config(lc_model=model)
+    config["configurable"]["qa_context_char_budget"] = 500
+
+    result = asyncio.run(generate_answer(state, config))
+
+    assert result["answer"] == "ok"
+    system_content = sent_messages[0].content
+    assert len(system_content) < 1200
+    assert "已截断" in system_content
+    assert "检索片段" in system_content
+
+
+def test_generate_answer_trims_history_content_by_budget():
+    """Long persisted history should not crowd out the latest question."""
+    from app.agent.qa_graph import generate_answer
+
+    sent_messages = []
+
+    async def capture_astream(messages):
+        sent_messages.extend(messages)
+        yield AIMessageChunk(content="ok")
+
+    model = MagicMock()
+    model.astream = capture_astream
+
+    mock_hit = MagicMock()
+    mock_hit.chunk.text = "资料"
+    mock_hit.chunk.section_path = ""
+    mock_hit.chunk.page_no = 0
+
+    history = [HumanMessage(content=f"旧问题{i}" + "旧" * 500) for i in range(5)]
+    history.append(HumanMessage(content="当前问题：" + "新" * 500))
+    state = {"_hits": [mock_hit], "messages": history}
+    config = _make_config(lc_model=model)
+    config["configurable"]["qa_history_char_budget"] = 180
+    config["configurable"]["qa_history_message_char_limit"] = 80
+
+    asyncio.run(generate_answer(state, config))
+
+    sent_history = sent_messages[1:]
+    assert sent_history[-1].content.startswith("当前问题")
+    assert len(sent_history[-1].content) <= 90
+    assert sum(len(message.content) for message in sent_history) <= 220
+
+
 # ── resolve_scope with new config signature ────────────────────────────────────
 
 def test_resolve_scope_reads_conn_from_config():
