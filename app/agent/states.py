@@ -63,6 +63,7 @@ class QAState(TypedDict, total=False):
     question: str
     scope: str                 # "current_doc" | "standard_lib" | "all"
     current_version_ids: list  # version IDs in scope for "current_doc"
+    compare_task_id: str
 
     # ── Session memory (accumulated via add_messages reducer) ────────────────
     messages: Annotated[list[BaseMessage], add_messages]
@@ -70,6 +71,7 @@ class QAState(TypedDict, total=False):
     # ── Node-internal ────────────────────────────────────────────────────────
     _version_ids: list
     _hits: list                # list[ChunkHit]
+    _compare_context: str
 
     # ── Node outputs ────────────────────────────────────────────────────────
     answer: str

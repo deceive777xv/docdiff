@@ -139,9 +139,14 @@ class HomePage(QWidget):
         self._tasks_table.setHorizontalHeaderLabels(
             ["任务ID", "版本", "状态", "结果", "创建时间", "操作"]
         )
-        self._tasks_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self._tasks_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self._tasks_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        tasks_header = self._tasks_table.horizontalHeader()
+        tasks_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        tasks_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        tasks_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        tasks_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        tasks_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        tasks_header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self._tasks_table.setColumnWidth(1, 260)
         self._tasks_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._tasks_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tasks_table.setAlternatingRowColors(True)

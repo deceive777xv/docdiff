@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-from PySide6.QtWidgets import QPushButton
+from PySide6.QtWidgets import QHeaderView, QPushButton
 
 from app.config.settings import AppSettings
 from app.core.types import DiffItem
@@ -97,6 +97,15 @@ def test_home_page_refresh_shows_versions_result_summary_and_open_action(home_pa
     action = home_page._tasks_table.cellWidget(0, 5)
     assert isinstance(action, QPushButton)
     assert action.text() == "打开"
+
+
+def test_home_page_version_column_does_not_take_stretch_space(home_page):
+    """Recent-task version column should stay compact instead of owning free width."""
+    header = home_page._tasks_table.horizontalHeader()
+
+    assert header.sectionResizeMode(1) != QHeaderView.ResizeMode.Stretch
+    assert header.sectionResizeMode(3) == QHeaderView.ResizeMode.Stretch
+    assert home_page._tasks_table.columnWidth(1) <= 320
 
 
 def test_home_page_open_button_emits_task_id(home_page, mem_conn, qtbot):

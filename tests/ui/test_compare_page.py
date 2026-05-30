@@ -300,6 +300,100 @@ def test_diff_card_uses_neutral_surface_with_accent_border(compare_page):
     assert "HexArgb" not in card.styleSheet()
 
 
+def test_theme_change_restyles_visible_diff_cards(compare_page, monkeypatch):
+    """Existing diff cards should immediately pick up current Theme colors."""
+    from app.core.types import DiffItem
+    from app.ui.theme import Theme
+
+    item = DiffItem(
+        diff_id="d-theme",
+        section_path="1.概述",
+        diff_type="新增",
+        risk_level="low",
+        baseline_text="旧内容",
+        target_text="新内容",
+        similarity_score=0.8,
+        explanation="说明",
+    )
+    compare_page._show_diff_list([item])
+
+    monkeypatch.setattr(Theme, "BG_CARD", "#123456")
+    monkeypatch.setattr(Theme, "BG_HEADER", "#654321")
+    compare_page._apply_theme()
+
+    card = compare_page._detail_layout.itemAt(0).widget()
+    assert "background:#123456" in card.styleSheet()
+
+
+def test_tree_has_all_diffs_node_and_can_restore_full_list(compare_page):
+    """The chapter tree should offer a way back to all file diffs."""
+    from app.core.types import DiffItem, DiffResult
+
+    items = [
+        DiffItem(
+            diff_id="d1",
+            section_path="第一章",
+            diff_type="新增",
+            risk_level="low",
+            baseline_text="",
+            target_text="新增内容",
+            similarity_score=0.0,
+            explanation="",
+        ),
+        DiffItem(
+            diff_id="d2",
+            section_path="第二章",
+            diff_type="删减",
+            risk_level="high",
+            baseline_text="删除内容",
+            target_text="",
+            similarity_score=0.0,
+            explanation="",
+        ),
+    ]
+    result = DiffResult("task-1", "b", "t", items)
+    compare_page._current_result = result
+    compare_page._populate_tree(result)
+
+    all_node = compare_page._tree.topLevelItem(0)
+    section_node = compare_page._tree.topLevelItem(1)
+
+    assert all_node.text(0) == "全部差异"
+    assert all_node.text(1) == "2"
+
+    compare_page._on_tree_item_clicked(section_node, 0)
+    assert compare_page._detail_layout.count() == 2
+
+    compare_page._on_tree_item_clicked(all_node, 0)
+    assert compare_page._detail_layout.count() == 3
+
+
+def test_tree_selection_clears_filter_dropdowns(compare_page):
+    """Tree navigation should not leave stale type/risk filters visible."""
+    from app.core.types import DiffItem, DiffResult
+
+    item = DiffItem(
+        diff_id="d1",
+        section_path="第一章",
+        diff_type="新增",
+        risk_level="low",
+        baseline_text="",
+        target_text="新增内容",
+        similarity_score=0.0,
+        explanation="",
+    )
+    result = DiffResult("task-1", "b", "t", [item])
+    compare_page._current_result = result
+    compare_page._populate_tree(result)
+    compare_page._select_combo_value(compare_page._filter_type_combo, "新增")
+    compare_page._select_combo_value(compare_page._filter_risk_combo, "low")
+
+    compare_page._on_tree_item_clicked(compare_page._tree.topLevelItem(1), 0)
+
+    assert compare_page._filter_type_combo.currentData() is None
+    assert compare_page._filter_risk_combo.currentData() is None
+
+
 def test_render_diff_injects_markdown_html_into_middle_panes(compare_page):
     """The center panes should receive rendered Markdown inside clickable diff blocks."""
     from app.core.types import DiffItem, DiffResult

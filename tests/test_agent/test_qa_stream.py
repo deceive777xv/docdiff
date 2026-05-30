@@ -97,6 +97,30 @@ def test_generate_answer_no_hits_returns_not_found():
     assert result["status"] == "answered"
 
 
+def test_generate_answer_uses_compare_context_without_chunk_hits():
+    """Compare-result context should be enough to answer difference questions."""
+    from app.agent.qa_graph import generate_answer
+
+    sent_messages = []
+
+    async def capture_astream(messages):
+        sent_messages.extend(messages)
+        yield AIMessageChunk(content="两者差异包括付款周期变化。")
+
+    model = MagicMock()
+    model.astream = capture_astream
+    state = {
+        "_hits": [],
+        "_compare_context": "对比结果：差异总数：1\n[1] 章节：付款条款，类型：实质修改，目标：付款周期60天。",
+        "messages": [HumanMessage(content="两者有什么差异？")],
+    }
+
+    result = asyncio.run(generate_answer(state, _make_config(lc_model=model)))
+
+    assert result["answer"] == "两者差异包括付款周期变化。"
+    assert "付款周期60天" in sent_messages[0].content
+
+
 def test_generate_answer_truncates_history_to_6_messages():
     """Only last 6 messages are sent to model, not the full history."""
     from app.agent.qa_graph import generate_answer

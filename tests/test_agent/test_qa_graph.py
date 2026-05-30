@@ -9,7 +9,7 @@ import pytest
 
 from langchain_core.messages import AIMessageChunk
 
-from app.core.types import Chunk, ChunkHit
+from app.core.types import Chunk, ChunkHit, DiffItem
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -108,6 +108,57 @@ def test_resolve_scope_current_doc_unchanged():
     config = {"configurable": {"conn": conn}}
     result = resolve_scope(state, config)
     assert result["_version_ids"] == ["v-abc"]
+    conn.close()
+
+
+def test_retrieve_chunks_adds_compare_result_context():
+    """Compare QA should include persisted diff results in addition to chunk hits."""
+    from unittest.mock import patch
+
+    from app.agent.qa_graph import retrieve_chunks
+    from app.db import compare_repo
+    from app.db.schema import DDL
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(DDL)
+    task_id = compare_repo.create_compare_task(
+        conn,
+        baseline_version_id="baseline-v1",
+        target_version_id="target-v1",
+    )
+    compare_repo.insert_diff_items(
+        conn,
+        task_id,
+        [
+            DiffItem(
+                diff_id="diff-1",
+                section_path="付款条款",
+                diff_type="实质修改",
+                risk_level="medium",
+                baseline_text="付款周期30天",
+                target_text="付款周期60天",
+                similarity_score=0.71,
+                explanation="付款周期延长。",
+            )
+        ],
+    )
+    state = {
+        "data_dir": "/tmp",
+        "question": "两者有什么差异？",
+        "scope": "compare",
+        "_version_ids": ["baseline-v1", "target-v1"],
+        "compare_task_id": task_id,
+    }
+    config = {"configurable": {"conn": conn, "embedder": MagicMock()}}
+
+    with patch("app.agent.qa_graph.search", return_value=[]):
+        result = retrieve_chunks(state, config)
+
+    assert result["_hits"] == []
+    assert "付款条款" in result["_compare_context"]
+    assert "付款周期60天" in result["_compare_context"]
+    assert result["status"] == "retrieved"
     conn.close()
 
 

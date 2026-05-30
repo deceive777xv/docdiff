@@ -64,6 +64,8 @@ _RISK_LABELS: dict[str, str] = {
     "none":   "无风险",
 }
 
+_ALL_SECTIONS_KEY = "__all_sections__"
+
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 _ORDERED_LIST_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
 _UNORDERED_LIST_RE = re.compile(r"^\s*[-*+]\s+(.+)$")
@@ -340,6 +342,7 @@ class ComparePage(QWidget):
         self.ctx = ctx
         self._current_result: Optional[DiffResult] = None
         self._diff_items_by_id: dict[str, DiffItem] = {}
+        self._visible_diff_items: list[DiffItem] = []
         self._recover_task_id: str | None = None
         self._thread: QThread | None = None
         self._threads: set[QThread] = set()
@@ -748,6 +751,17 @@ class ComparePage(QWidget):
             self._filter_type_combo.blockSignals(False)
             self._filter_risk_combo.blockSignals(False)
 
+    def _clear_filter_controls(self) -> None:
+        """Reset filter combos without rebuilding the current card list."""
+        self._filter_type_combo.blockSignals(True)
+        self._filter_risk_combo.blockSignals(True)
+        try:
+            self._filter_type_combo.setCurrentIndex(0)
+            self._filter_risk_combo.setCurrentIndex(0)
+        finally:
+            self._filter_type_combo.blockSignals(False)
+            self._filter_risk_combo.blockSignals(False)
+
     def _focus_diff_in_webview(self, diff_id: str) -> None:
         js = f"focusDiff({json.dumps(diff_id, ensure_ascii=False)});"
         self._web_view.page().runJavaScript(js)
@@ -755,10 +769,15 @@ class ComparePage(QWidget):
     def _on_tree_item_clicked(self, tree_item: QTreeWidgetItem, _column: int) -> None:
         if self._current_result is None:
             return
+        if tree_item is None:
+            return
         section_path = tree_item.data(0, Qt.UserRole)
-        if section_path:
-            items = [i for i in self._current_result.items if i.section_path == section_path]
-            self._show_diff_list(items)
+        self._clear_filter_controls()
+        if section_path == _ALL_SECTIONS_KEY:
+            self._show_diff_list(self._current_result.items)
+            return
+        items = [i for i in self._current_result.items if i.section_path == section_path]
+        self._show_diff_list(items)
 
     def _apply_filters(self) -> None:
         if self._current_result is None:
@@ -781,6 +800,10 @@ class ComparePage(QWidget):
 
     def _populate_tree(self, result: DiffResult) -> None:
         self._tree.clear()
+        all_node = QTreeWidgetItem(["全部差异", str(len(result.items))])
+        all_node.setData(0, Qt.UserRole, _ALL_SECTIONS_KEY)
+        self._tree.addTopLevelItem(all_node)
+
         sections: dict[str, list[DiffItem]] = defaultdict(list)
         for item in result.items:
             sections[item.section_path].append(item)
@@ -837,6 +860,7 @@ class ComparePage(QWidget):
 
     def _show_diff_list(self, items: list[DiffItem]) -> None:
         """Rebuild right-panel cards for the given diff items."""
+        self._visible_diff_items = list(items)
         # Remove all cards (keep the stretch at the end)
         while self._detail_layout.count() > 1:
             child = self._detail_layout.takeAt(0)
@@ -962,6 +986,7 @@ class ComparePage(QWidget):
                 f"background:{_c.name(QColor.NameFormat.HexArgb)};border:1px solid {color};"
                 f"color:{Theme.TEXT_PRIMARY};border-radius:4px;padding:3px 8px;font-size:12px;"
             )
+        self._show_diff_list(self._visible_diff_items)
         self._apply_webview_theme()
 
     def _apply_webview_theme(self) -> None:

@@ -85,6 +85,7 @@ class _QaWorker(QObject):
         scope: RetrievalScope,
         current_version_ids: list[str],
         thread_id: str,
+        compare_task_id: str | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -95,6 +96,7 @@ class _QaWorker(QObject):
         self._scope = scope
         self._current_version_ids = current_version_ids
         self._thread_id = thread_id
+        self._compare_task_id = compare_task_id
 
     def run(self) -> None:
         asyncio.run(self._run_async())
@@ -119,6 +121,7 @@ class _QaWorker(QObject):
                 "question": self._question,
                 "scope": self._scope.value,
                 "current_version_ids": self._current_version_ids,
+                "compare_task_id": self._compare_task_id,
                 "data_dir": self._data_dir,
             }
             try:
@@ -246,6 +249,7 @@ class QaPage(QWidget):
         self.setStyleSheet(f"background-color:{Theme.BG_CARD};")
         self._new_session_btn.setStyleSheet(Theme.btn_primary())
         self._send_btn.setStyleSheet(Theme.btn_primary())
+        self._restyle_chat_bubbles()
 
     # ── Public API ─────────────────────────────────────────────────────────────
     def refresh(self) -> None:
@@ -275,6 +279,7 @@ class QaPage(QWidget):
             self._compare_task_combo.clear()
             rows = self.ctx.conn.execute("""
                 SELECT ct.baseline_version_id, ct.target_version_id,
+                       ct.id AS task_id,
                        bd.doc_name AS b_name, bv.version_no AS b_ver,
                        td.doc_name AS t_name, tv.version_no AS t_ver
                 FROM compare_tasks ct
@@ -293,7 +298,13 @@ class QaPage(QWidget):
                 )
                 self._compare_task_combo.addItem(
                     label,
-                    (row["baseline_version_id"], row["target_version_id"]),
+                    {
+                        "task_id": row["task_id"],
+                        "version_ids": (
+                            row["baseline_version_id"],
+                            row["target_version_id"],
+                        ),
+                    },
                 )
         except Exception as exc:
             logger.warning("refresh_compare_tasks failed: %s", exc)
@@ -316,14 +327,23 @@ class QaPage(QWidget):
         scope = _SCOPE_MAP.get(scope_text, RetrievalScope.ALL)
 
         current_version_ids: list[str] = []
+        compare_task_id: str | None = None
         if scope == RetrievalScope.CURRENT_DOC:
             vid = self._doc_combo.currentData()
             if vid:
                 current_version_ids = [vid]
         elif scope == RetrievalScope.COMPARE:
             task_data = self._compare_task_combo.currentData()
-            if task_data:
-                current_version_ids = list(task_data)
+            if isinstance(task_data, dict):
+                compare_task_id = task_data.get("task_id")
+                current_version_ids = list(task_data.get("version_ids") or [])
+            elif task_data:
+                values = list(task_data)
+                if len(values) >= 3:
+                    compare_task_id = values[0]
+                    current_version_ids = values[1:3]
+                else:
+                    current_version_ids = values
 
         bubble_label, _ = self._add_message("assistant", "")
         self._current_bubble = bubble_label
@@ -338,6 +358,7 @@ class QaPage(QWidget):
             scope=scope,
             current_version_ids=current_version_ids,
             thread_id=self._thread_id,
+            compare_task_id=compare_task_id,
         )
         self._thread = thread
         self.worker = worker
@@ -430,8 +451,9 @@ class QaPage(QWidget):
         outer_layout.setContentsMargins(0, 0, 0, 0)
 
         bubble = QLabel(text)
+        bubble.setProperty("qa_role", role)
         bubble.setWordWrap(True)
-        bubble.setStyleSheet(_user_bubble_style() if is_user else _asst_bubble_style())
+        self._apply_bubble_style(bubble)
         bubble.setMaximumWidth(600)
 
         if is_user:
@@ -447,3 +469,14 @@ class QaPage(QWidget):
         )
 
         return bubble, outer
+
+    def _apply_bubble_style(self, bubble: QLabel) -> None:
+        role = bubble.property("qa_role")
+        bubble.setStyleSheet(_user_bubble_style() if role == "user" else _asst_bubble_style())
+
+    def _restyle_chat_bubbles(self) -> None:
+        if not hasattr(self, "_chat_content"):
+            return
+        for bubble in self._chat_content.findChildren(QLabel):
+            if bubble.property("qa_role") in ("user", "assistant"):
+                self._apply_bubble_style(bubble)
