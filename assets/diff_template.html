@@ -89,6 +89,57 @@
       border-radius: 6px;
     }
 
+    .doc-block {
+      margin: 8px 0 12px;
+      line-height: 1.7;
+      overflow-wrap: anywhere;
+    }
+
+    .doc-line {
+      margin: 4px 0;
+      padding: 4px 6px;
+      line-height: 1.7;
+      overflow-wrap: anywhere;
+    }
+
+    .doc-table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      margin: 8px 0 14px;
+    }
+
+    .doc-table-wrap table {
+      width: 100%;
+      border-collapse: collapse;
+      background: rgba(255, 255, 255, 0.55);
+      font-size: 13px;
+    }
+
+    .doc-table-wrap th,
+    .doc-table-wrap td {
+      border: 1px solid #d1d5db;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: top;
+      line-height: 1.6;
+    }
+
+    .doc-table-wrap th {
+      background: rgba(243, 244, 246, 0.9);
+      font-weight: 600;
+    }
+
+    .diff-row {
+      border-left: 4px solid #9ca3af;
+    }
+
+    .diff-token {
+      background: #fde68a;
+      color: #78350f;
+      border-radius: 3px;
+      padding: 0 2px;
+    }
+
     .diff-item:hover {
       filter: brightness(0.88);
     }
@@ -260,6 +311,24 @@
     body.dark .diff-block {
       background: #363a4f;
       border-color: #585b70;
+    }
+
+    body.dark .doc-table-wrap table {
+      background: rgba(30, 30, 46, 0.35);
+    }
+
+    body.dark .doc-table-wrap th,
+    body.dark .doc-table-wrap td {
+      border-color: #585b70;
+    }
+
+    body.dark .doc-table-wrap th {
+      background: rgba(35, 38, 52, 0.75);
+    }
+
+    body.dark .diff-token {
+      background: #f9e2af;
+      color: #11111b;
     }
 
     body.dark .added    { border-left-color: #74c7ec; }

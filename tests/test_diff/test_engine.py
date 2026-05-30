@@ -37,6 +37,22 @@ def _make_ir(
     return DocumentIR(doc_id=str(uuid.uuid4()), title="测试文档", file_hash="abc", sections=sections, plain_text=plain)
 
 
+def _make_table_ir(rows: list[str]) -> DocumentIR:
+    para = Paragraph(
+        paragraph_id="table-1",
+        text="\n".join(rows),
+        sentences=[Sentence(text=row) for row in rows],
+    )
+    section = Section(section_id="s1", title="费用表", level=1, paragraphs=[para])
+    return DocumentIR(
+        doc_id=str(uuid.uuid4()),
+        title="表格文档",
+        file_hash=str(uuid.uuid4()),
+        sections=[section],
+        plain_text=para.text,
+    )
+
+
 # ── evaluate_quality tests ─────────────────────────────────────────────────────
 
 class TestEvaluateQuality:
@@ -146,3 +162,34 @@ class TestCompare:
             assert item.diff_type in ("新增", "删减", "微调", "实质修改", "重写", "格式变化")
             assert item.risk_level in ("high", "medium", "low", "none")
             assert isinstance(item.similarity_score, float)
+
+    def test_compare_large_table_reports_changed_row_not_whole_table(self):
+        """Large table diffs should point at changed rows and hide unchanged rows."""
+        from app.core.diff import compare
+
+        unchanged_rows = [f"| 服务项{i} | 保持不变{i} |" for i in range(40)]
+        b_rows = [
+            "| 项目 | 取值 |",
+            "| --- | --- |",
+            "| 付款周期 | 30天 |",
+            "| 违约金 | 按日万分之三 |",
+            *unchanged_rows,
+        ]
+        t_rows = [
+            "| 项目 | 取值 |",
+            "| --- | --- |",
+            "| 付款周期 | 60天 |",
+            "| 违约金 | 按日万分之三 |",
+            *unchanged_rows,
+        ]
+
+        result = compare(
+            _make_table_ir(b_rows),
+            _make_table_ir(t_rows),
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        )
+
+        assert any("付款周期" in item.baseline_text and "60天" in item.target_text for item in result.items)
+        assert all("\n" not in item.baseline_text for item in result.items if item.baseline_text)
+        assert all("\n" not in item.target_text for item in result.items if item.target_text)
+        assert not any("违约金" in item.baseline_text or "违约金" in item.target_text for item in result.items)

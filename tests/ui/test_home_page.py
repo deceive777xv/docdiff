@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
-from PySide6.QtWidgets import QHeaderView, QPushButton
+from PySide6.QtWidgets import QMessageBox, QHeaderView, QPushButton
 
 from app.config.settings import AppSettings
 from app.core.types import DiffItem
@@ -74,6 +74,12 @@ def home_page(qtbot, ctx):
     yield page
 
 
+def _action_button(page, row: int, text: str) -> QPushButton:
+    action = page._tasks_table.cellWidget(row, 5)
+    buttons = action.findChildren(QPushButton)
+    return next(button for button in buttons if button.text() == text)
+
+
 def test_home_page_refresh_shows_versions_result_summary_and_open_action(home_page, mem_conn):
     """Recent completed tasks show version names, result counts, and an open button."""
     baseline_id, target_id = _insert_versions(mem_conn)
@@ -95,8 +101,7 @@ def test_home_page_refresh_shows_versions_result_summary_and_open_action(home_pa
     assert home_page._tasks_table.item(0, 1).text() == "合同 v1(初稿) → 合同 v2(终稿)"
     assert home_page._tasks_table.item(0, 3).text() == "3处差异 / 高1 中1 低0 无1"
     action = home_page._tasks_table.cellWidget(0, 5)
-    assert isinstance(action, QPushButton)
-    assert action.text() == "打开"
+    assert [button.text() for button in action.findChildren(QPushButton)] == ["打开", "删除"]
 
 
 def test_home_page_version_column_does_not_take_stretch_space(home_page):
@@ -120,7 +125,7 @@ def test_home_page_open_button_emits_task_id(home_page, mem_conn, qtbot):
     home_page.refresh()
 
     with qtbot.waitSignal(home_page.compare_task_open_requested) as blocker:
-        home_page._tasks_table.cellWidget(0, 5).click()
+        _action_button(home_page, 0, "打开").click()
 
     assert blocker.args == [task_id]
 
@@ -137,9 +142,7 @@ def test_home_page_running_task_offers_recovery_when_not_active(home_page, mem_c
 
     home_page.refresh()
 
-    action = home_page._tasks_table.cellWidget(0, 5)
-    assert isinstance(action, QPushButton)
-    assert action.text() == "恢复"
+    action = _action_button(home_page, 0, "恢复")
     with qtbot.waitSignal(home_page.compare_task_recover_requested) as blocker:
         action.click()
     assert blocker.args == [task_id]
@@ -158,7 +161,32 @@ def test_home_page_active_running_task_disables_recovery(home_page, mem_conn):
 
     home_page.refresh()
 
-    action = home_page._tasks_table.cellWidget(0, 5)
-    assert isinstance(action, QPushButton)
-    assert action.text() == "进行中"
+    action = _action_button(home_page, 0, "进行中")
+    delete_action = _action_button(home_page, 0, "删除")
     assert not action.isEnabled()
+    assert not delete_action.isEnabled()
+
+
+def test_home_page_delete_button_removes_task_after_confirmation(
+    home_page, mem_conn, qtbot, monkeypatch
+):
+    """Clicking delete removes the task record and refreshes recent tasks."""
+    baseline_id, target_id = _insert_versions(mem_conn)
+    task_id = compare_repo.create_compare_task(
+        mem_conn,
+        baseline_version_id=baseline_id,
+        target_version_id=target_id,
+    )
+    compare_repo.insert_diff_items(mem_conn, task_id, [_diff_item("d-delete")])
+    compare_repo.update_task_status(mem_conn, task_id, "completed", "/tmp/result.json")
+    monkeypatch.setattr(
+        "app.ui.pages.home_page.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    home_page.refresh()
+    _action_button(home_page, 0, "删除").click()
+    qtbot.waitUntil(lambda: home_page._tasks_table.rowCount() == 0)
+
+    assert compare_repo.get_task_by_id(mem_conn, task_id) is None
+    assert compare_repo.get_diff_items(mem_conn, task_id) == []

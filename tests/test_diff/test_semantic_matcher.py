@@ -49,6 +49,14 @@ def make_para(text: str) -> Paragraph:
     )
 
 
+def make_para_with_sentences(sentences: list[str]) -> Paragraph:
+    return Paragraph(
+        paragraph_id=str(uuid.uuid4()),
+        text="\n".join(sentences),
+        sentences=[Sentence(text=text) for text in sentences],
+    )
+
+
 def make_section(title: str, paras: list[Paragraph]) -> Section:
     sec = Section(section_id=str(uuid.uuid4()), title=title, level=1)
     sec.paragraphs = paras
@@ -118,3 +126,38 @@ def test_section_with_only_target_paras():
         assert p.baseline_para is None
         assert p.target_para is not None
         assert p.similarity == 0.0
+
+
+def test_large_table_paragraph_is_matched_by_table_rows():
+    """Large table paragraphs should be compared row-by-row, not as one blob."""
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    unchanged_rows = [f"| 项目{i} | 内容{i} |" for i in range(40)]
+    b_rows = [
+        "| 项目 | 取值 |",
+        "| --- | --- |",
+        "| 付款周期 | 30天 |",
+        *unchanged_rows,
+    ]
+    t_rows = [
+        "| 项目 | 取值 |",
+        "| --- | --- |",
+        "| 付款周期 | 60天 |",
+        *unchanged_rows,
+    ]
+    b_sec = make_section("付款表", [make_para_with_sentences(b_rows)])
+    t_sec = make_section("付款表", [make_para_with_sentences(t_rows)])
+    sp = SectionPair(baseline_section=b_sec, target_section=t_sec, title_similarity=1.0)
+
+    pairs = match_paragraphs([sp], MockEmbedder(), similarity_threshold=0.75)
+
+    changed = [
+        pair for pair in pairs
+        if pair.baseline_para is not None
+        and pair.target_para is not None
+        and "付款周期" in pair.baseline_para.text
+    ]
+    assert len(changed) == 1
+    assert changed[0].baseline_para.text == "| 付款周期 | 30天 |"
+    assert changed[0].target_para.text == "| 付款周期 | 60天 |"
+    assert "\n" not in changed[0].baseline_para.text

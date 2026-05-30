@@ -59,6 +59,13 @@ def prepare_task_for_rerun(conn: sqlite3.Connection, task_id: str) -> None:
     conn.commit()
 
 
+def delete_compare_task(conn: sqlite3.Connection, task_id: str) -> None:
+    """Delete a compare task and its persisted diff items."""
+    conn.execute("DELETE FROM diff_items WHERE compare_task_id = ?", (task_id,))
+    conn.execute("DELETE FROM compare_tasks WHERE id = ?", (task_id,))
+    conn.commit()
+
+
 def get_task_by_id(conn: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM compare_tasks WHERE id = ?", (task_id,)

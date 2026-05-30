@@ -202,3 +202,18 @@ def test_prepare_task_for_rerun_clears_old_items_and_marks_running(db_conn):
     assert row["finished_at"] is None
     assert row["result_json_path"] == ""
     assert compare_repo.get_diff_items(db_conn, task_id) == []
+
+
+def test_delete_compare_task_removes_task_and_diff_items(db_conn):
+    """Deleting a compare task removes its row and persisted diff details."""
+    task_id = compare_repo.create_compare_task(
+        db_conn,
+        baseline_version_id="bv-009",
+        target_version_id="tv-009",
+    )
+    compare_repo.insert_diff_items(db_conn, task_id, [make_diff_item(), make_diff_item()])
+
+    compare_repo.delete_compare_task(db_conn, task_id)
+
+    assert compare_repo.get_task_by_id(db_conn, task_id) is None
+    assert compare_repo.get_diff_items(db_conn, task_id) == []

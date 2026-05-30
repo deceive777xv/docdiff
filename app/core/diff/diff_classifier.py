@@ -110,6 +110,10 @@ def _llm_classify(
     return _rule_classify(baseline, target, similarity)
 
 
+def _same_text_ignoring_whitespace(baseline: str, target: str) -> bool:
+    return re.sub(r"\s+", "", baseline) == re.sub(r"\s+", "", target)
+
+
 def classify(
     para_pairs: list[ParagraphPair],
     policy: ComparePolicy,
@@ -143,6 +147,8 @@ def classify(
                 explanation="基准文档段落被删除",
             ))
         elif pp.baseline_para is not None and pp.target_para is not None:
+            if pp.split_unit and _same_text_ignoring_whitespace(pp.baseline_para.text, pp.target_para.text):
+                continue
             used_llm = policy.use_llm_classify and provider is not None
             if policy.use_llm_classify and provider is not None:
                 diff_type, risk_level, explanation = _llm_classify(

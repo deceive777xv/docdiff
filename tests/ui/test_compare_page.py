@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import sqlite3
+import json
+from dataclasses import asdict
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -424,6 +426,91 @@ def test_render_diff_injects_markdown_html_into_middle_panes(compare_page):
     assert "<h4>新条款</h4>" in js
     assert "<li>付款周期调整为60天</li>" in js
     assert "diff-item diff-block added" in js
+
+
+def test_render_diff_uses_full_document_with_row_and_token_marks(
+    compare_page,
+    mem_conn,
+    tmp_path,
+):
+    """When parsed JSON exists, middle panes show full docs and mark the changed row/cell."""
+    from app.core.types import DiffItem, DiffResult, DocumentIR, Paragraph, Section, Sentence
+
+    def write_ir(name: str, rows: list[str]) -> str:
+        para = Paragraph(
+            paragraph_id=f"{name}-p1",
+            text="\n".join(rows),
+            sentences=[Sentence(text=row) for row in rows],
+        )
+        ir = DocumentIR(
+            doc_id=name,
+            title=name,
+            file_hash=name,
+            sections=[Section(section_id=f"{name}-s1", title="费用表", level=1, paragraphs=[para])],
+            plain_text=para.text,
+        )
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(asdict(ir), ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    baseline_rows = [
+        "| 项目 | 取值 |",
+        "| --- | --- |",
+        "| 付款周期 | 30天 |",
+        "| 保留条款 | 内容不变 |",
+    ]
+    target_rows = [
+        "| 项目 | 取值 |",
+        "| --- | --- |",
+        "| 付款周期 | 60天 |",
+        "| 保留条款 | 内容不变 |",
+    ]
+    doc_id = document_repo.insert_document(
+        mem_conn,
+        doc_name="合同",
+        doc_type="docx",
+        file_path="/docs/contract.docx",
+        file_hash="full-doc-contract",
+        source_type="standard",
+    )
+    baseline_id = document_repo.insert_version(
+        mem_conn,
+        document_id=doc_id,
+        version_no=1,
+        parsed_json_path=write_ir("baseline", baseline_rows),
+    )
+    target_id = document_repo.insert_version(
+        mem_conn,
+        document_id=doc_id,
+        version_no=2,
+        parsed_json_path=write_ir("target", target_rows),
+    )
+    result = DiffResult(
+        task_id="task-full-doc",
+        baseline_version_id=baseline_id,
+        target_version_id=target_id,
+        items=[
+            DiffItem(
+                diff_id="diff-row",
+                section_path="费用表",
+                diff_type="实质修改",
+                risk_level="high",
+                baseline_text="| 付款周期 | 30天 |",
+                target_text="| 付款周期 | 60天 |",
+                similarity_score=0.8,
+                explanation="付款周期变化",
+            )
+        ],
+    )
+
+    compare_page._render_diff(result)
+
+    js = compare_page._web_view.page().runJavaScript.call_args.args[0]
+    assert "保留条款" in js
+    assert 'data-diff-id=\\"diff-row\\"' in js or 'data-diff-id="diff-row"' in js
+    assert "diff-token" in js
+    assert "30天" in js
+    assert "60天" in js
 
 
 def test_diff_template_exposes_focus_diff_function():

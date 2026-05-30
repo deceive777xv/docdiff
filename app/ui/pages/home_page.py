@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QTableWidget,
@@ -171,6 +172,7 @@ class HomePage(QWidget):
                 f"background-color:{color};color:{Theme.NAV_ACTIVE_TEXT};padding:10px 20px;"
                 f"border:none;border-radius:{Theme.CARD_RADIUS}px;font-size:16px;"
             )
+        self._restyle_task_action_buttons()
 
     def refresh(self) -> None:
         """Reload stats and recent tasks from DB."""
@@ -241,7 +243,7 @@ class HomePage(QWidget):
             f"低{int(task['low_count'])} 无{int(task['none_count'])}"
         )
 
-    def _make_task_action_button(self, task) -> QPushButton:
+    def _make_task_action_button(self, task) -> QWidget:
         task_id = task["id"]
         is_active = task_id in self.ctx.active_compare_task_ids
         if task["status"] == "completed":
@@ -257,15 +259,68 @@ class HomePage(QWidget):
             callback = self.compare_task_recover_requested.emit
             enabled = True
 
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
         btn = QPushButton(label)
         btn.setEnabled(enabled)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setProperty("taskActionRole", "primary")
+        btn.clicked.connect(lambda checked=False, tid=task_id, cb=callback: cb(tid))
+
+        delete_btn = QPushButton("删除")
+        delete_btn.setEnabled(not is_active)
+        delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        delete_btn.setProperty("taskActionRole", "danger")
+        delete_btn.clicked.connect(lambda checked=False, tid=task_id: self._delete_task(tid))
+
+        self._style_task_action_button(btn, danger=False)
+        self._style_task_action_button(delete_btn, danger=True)
+        layout.addWidget(btn)
+        layout.addWidget(delete_btn)
+        return widget
+
+    def _style_task_action_button(self, btn: QPushButton, *, danger: bool) -> None:
+        color = Theme.COLOR_DANGER if danger else Theme.COLOR_PRIMARY
+        bg = color if btn.isEnabled() else Theme.BORDER
+        fg = Theme.NAV_ACTIVE_TEXT if btn.isEnabled() else Theme.TEXT_PLACEHOLDER
         btn.setStyleSheet(
-            f"background-color:{Theme.COLOR_PRIMARY};color:{Theme.NAV_ACTIVE_TEXT};"
+            f"background-color:{bg};color:{fg};"
             "border:none;border-radius:4px;padding:4px 10px;font-size:12px;"
         )
-        btn.clicked.connect(lambda checked=False, tid=task_id, cb=callback: cb(tid))
-        return btn
+
+    def _restyle_task_action_buttons(self) -> None:
+        for row in range(self._tasks_table.rowCount()):
+            action = self._tasks_table.cellWidget(row, 5)
+            if action is None:
+                continue
+            for btn in action.findChildren(QPushButton):
+                self._style_task_action_button(
+                    btn,
+                    danger=btn.property("taskActionRole") == "danger",
+                )
+
+    def _delete_task(self, task_id: str) -> None:
+        if task_id in self.ctx.active_compare_task_ids:
+            QMessageBox.warning(self, "无法删除", "该对比任务正在运行，请等待完成后再删除。")
+            return
+        answer = QMessageBox.question(
+            self,
+            "确认删除",
+            "删除该对比任务将移除任务记录和差异结果，不会删除文档版本。\n\n是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            compare_repo.delete_compare_task(self.ctx.conn, task_id)
+            self.refresh()
+        except Exception as exc:
+            logger.exception("Delete compare task failed: %s", exc)
+            QMessageBox.critical(self, "删除失败", f"删除对比任务失败：{exc}")
 
     def _on_task_row_activated(self, item: QTableWidgetItem) -> None:
         task_id = item.data(Qt.ItemDataRole.UserRole)

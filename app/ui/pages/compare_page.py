@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections import Counter, defaultdict
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.core.types import ComparePolicy, DiffItem, DiffResult
+from app.core.types import ComparePolicy, DiffItem, DiffResult, DocumentIR, Paragraph, Section, Sentence
 from app.db import document_repo
 from app.ui.app_context import AppContext
 from app.ui.theme import Theme
@@ -256,6 +257,62 @@ def _strip_markdown_formatting(markdown_text: str) -> str:
     stripped = re.sub(r"`([^`]*)`", r"\1", stripped)
     stripped = re.sub(r"[*_~]+", "", stripped)
     return re.sub(r"\s+", " ", stripped).strip()
+
+
+def _normalize_diff_text(text: str) -> str:
+    return re.sub(r"\s+", "", text or "")
+
+
+def _ir_from_dict(data: dict) -> DocumentIR:
+    sections: list[Section] = []
+    for sec in data.get("sections", []):
+        paragraphs: list[Paragraph] = []
+        for para in sec.get("paragraphs", []):
+            sentences = [
+                Sentence(text=sent.get("text", ""))
+                for sent in para.get("sentences", [])
+                if sent.get("text", "")
+            ]
+            paragraphs.append(
+                Paragraph(
+                    paragraph_id=para.get("paragraph_id", ""),
+                    text=para.get("text", ""),
+                    sentences=sentences,
+                )
+            )
+        sections.append(
+            Section(
+                section_id=sec.get("section_id", ""),
+                title=sec.get("title", ""),
+                level=int(sec.get("level", 1) or 1),
+                paragraphs=paragraphs,
+            )
+        )
+    return DocumentIR(
+        doc_id=data.get("doc_id", ""),
+        title=data.get("title", ""),
+        file_hash=data.get("file_hash", ""),
+        sections=sections,
+        plain_text=data.get("plain_text", ""),
+    )
+
+
+def _render_changed_inline(text: str, other_text: str) -> str:
+    """Escape text and wrap changed character spans for fine-grained visual focus."""
+    if not other_text:
+        return html.escape(text, quote=False)
+
+    parts: list[str] = []
+    matcher = SequenceMatcher(None, text, other_text)
+    for tag, start, end, _other_start, _other_end in matcher.get_opcodes():
+        piece = html.escape(text[start:end], quote=False)
+        if not piece:
+            continue
+        if tag == "equal":
+            parts.append(piece)
+        else:
+            parts.append(f'<mark class="diff-token">{piece}</mark>')
+    return "".join(parts)
 
 
 # ── Background worker ──────────────────────────────────────────────────────────
@@ -813,8 +870,142 @@ class ComparePage(QWidget):
             self._tree.addTopLevelItem(node)
         self._tree.expandAll()
 
+    def _load_version_ir(self, version_id: str) -> DocumentIR | None:
+        """Load parsed DocumentIR for a version when available."""
+        try:
+            version = document_repo.get_version_by_id(self.ctx.conn, version_id)
+            if version is None or not version["parsed_json_path"]:
+                return None
+            path = Path(version["parsed_json_path"])
+            if not path.is_absolute():
+                path = Path(self.ctx.data_dir) / path
+            if not path.exists():
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return _ir_from_dict(data)
+        except Exception as exc:
+            logger.warning("load parsed IR failed for version %s: %s", version_id, exc)
+            return None
+
+    def _build_diff_lookup(self, result: DiffResult, side: str) -> dict[str, DiffItem]:
+        lookup: dict[str, DiffItem] = {}
+        for item in result.items:
+            text = item.baseline_text if side == "baseline" else item.target_text
+            key = _normalize_diff_text(text)
+            if key:
+                lookup[key] = item
+        return lookup
+
+    def _render_full_document(self, ir: DocumentIR, lookup: dict[str, DiffItem], side: str) -> str:
+        parts: list[str] = []
+        for section in ir.sections:
+            title = section.title or "正文"
+            parts.append(f"<h3>{html.escape(title)}</h3>")
+            for para in section.paragraphs:
+                if self._paragraph_looks_like_table(para):
+                    parts.append(self._render_table_paragraph(para, lookup, side))
+                elif len(para.text) > 500 and len(para.sentences) > 1:
+                    for sent in para.sentences:
+                        if sent.text.strip():
+                            parts.append(self._render_text_unit(sent.text.strip(), lookup, side, line=True))
+                else:
+                    parts.append(self._render_text_unit(para.text, lookup, side, line=False))
+        return "".join(parts)
+
+    def _paragraph_looks_like_table(self, para: Paragraph) -> bool:
+        rows = para.sentences or [Sentence(text=line) for line in para.text.splitlines()]
+        return sum(1 for row in rows if "|" in row.text) >= 2
+
+    def _render_text_unit(
+        self,
+        text: str,
+        lookup: dict[str, DiffItem],
+        side: str,
+        *,
+        line: bool,
+    ) -> str:
+        key = _normalize_diff_text(text)
+        item = lookup.get(key)
+        if item is not None:
+            css_cls, _ = _diff_css().get(item.diff_type, ("format", Theme.DIFF_FORMAT))
+            other_text = item.target_text if side == "baseline" else item.baseline_text
+            content = _render_changed_inline(text, other_text)
+            return (
+                f'<div class="doc-line diff-item diff-block {css_cls}" '
+                f'data-diff-id="{html.escape(item.diff_id, quote=True)}">{content}</div>'
+            )
+        if line:
+            return f'<div class="doc-line">{html.escape(text, quote=False)}</div>'
+        return f'<div class="doc-block">{_render_markdown_fragment(text)}</div>'
+
+    def _render_table_paragraph(self, para: Paragraph, lookup: dict[str, DiffItem], side: str) -> str:
+        rows = [sent.text.strip() for sent in para.sentences if sent.text.strip()]
+        if not rows:
+            rows = [line.strip() for line in para.text.splitlines() if line.strip()]
+
+        rendered_rows: list[str] = []
+        for index, row in enumerate(rows):
+            if _is_markdown_table_separator(row):
+                continue
+
+            is_header = index + 1 < len(rows) and _is_markdown_table_separator(rows[index + 1])
+            cells = _split_markdown_table_row(row) if "|" in row else [row]
+            item = lookup.get(_normalize_diff_text(row))
+            row_attrs = 'class="doc-row"'
+            other_cells: list[str] = []
+
+            if item is not None:
+                css_cls, _ = _diff_css().get(item.diff_type, ("format", Theme.DIFF_FORMAT))
+                other_text = item.target_text if side == "baseline" else item.baseline_text
+                other_cells = _split_markdown_table_row(other_text) if "|" in other_text else [other_text]
+                row_attrs = (
+                    f'class="doc-row diff-item diff-row {css_cls}" '
+                    f'data-diff-id="{html.escape(item.diff_id, quote=True)}"'
+                )
+
+            cell_tag = "th" if is_header else "td"
+            cell_html: list[str] = []
+            for cell_index, cell in enumerate(cells):
+                if item is not None:
+                    other_cell = other_cells[cell_index] if cell_index < len(other_cells) else ""
+                    if _normalize_diff_text(cell) == _normalize_diff_text(other_cell):
+                        content = html.escape(cell, quote=False)
+                    else:
+                        content = f'<mark class="diff-token">{html.escape(cell, quote=False)}</mark>'
+                else:
+                    content = html.escape(cell, quote=False)
+                cell_html.append(f"<{cell_tag}>{content}</{cell_tag}>")
+            rendered_rows.append(f"<tr {row_attrs}>{''.join(cell_html)}</tr>")
+
+        if not rendered_rows:
+            return ""
+        return f'<div class="doc-table-wrap"><table>{"".join(rendered_rows)}</table></div>'
+
     def _render_diff(self, result: DiffResult) -> None:
         """Build highlighted HTML and inject it into the WebEngineView via JS."""
+        baseline_ir = self._load_version_ir(result.baseline_version_id)
+        target_ir = self._load_version_ir(result.target_version_id)
+        if baseline_ir is not None and target_ir is not None:
+            baseline_html = self._render_full_document(
+                baseline_ir,
+                self._build_diff_lookup(result, "baseline"),
+                "baseline",
+            )
+            target_html = self._render_full_document(
+                target_ir,
+                self._build_diff_lookup(result, "target"),
+                "target",
+            )
+            js = (
+                f"document.getElementById('baseline-content').innerHTML = "
+                f"{json.dumps(baseline_html, ensure_ascii=False)};\n"
+                f"document.getElementById('target-content').innerHTML = "
+                f"{json.dumps(target_html, ensure_ascii=False)};\n"
+                "attachDiffHandlers();"
+            )
+            self._web_view.page().runJavaScript(js)
+            return
+
         sections: dict[str, list[DiffItem]] = defaultdict(list)
         for item in result.items:
             sections[item.section_path].append(item)
