@@ -314,7 +314,7 @@ class HomePage(QWidget):
         )
 
     def _style_task_action_button(self, btn: QPushButton, *, danger: bool) -> None:
-        color = Theme.COLOR_DANGER if danger else Theme.COLOR_PRIMARY
+        color = Theme.COLOR_DANGER if danger else Theme.COLOR_SUCCESS
         bg = color if btn.isEnabled() else Theme.BORDER
         fg = Theme.NAV_ACTIVE_TEXT if btn.isEnabled() else Theme.TEXT_PLACEHOLDER
         btn.setStyleSheet(
