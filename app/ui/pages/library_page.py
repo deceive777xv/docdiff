@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from app.ui.app_context import AppContext
 from app.ui.theme import Theme
+from app.db import document_repo
 
 logger = logging.getLogger(__name__)
 
@@ -115,12 +116,13 @@ class LibraryPage(QWidget):
         layout.addLayout(header)
         layout.addSpacing(12)
 
-        # Table — 3 columns: name, type, import date
-        self._table = QTableWidget(0, 3)
-        self._table.setHorizontalHeaderLabels(["文档名称", "类型", "导入时间"])
+        # Table — one document per row, with latest version surfaced.
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["文档名称", "类型", "版本", "导入时间"])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setAlternatingRowColors(True)
@@ -154,17 +156,30 @@ class LibraryPage(QWidget):
                 "SELECT * FROM documents ORDER BY created_at DESC"
             ).fetchall()
             self._table.setRowCount(len(docs))
+            version_total = 0
             for row, doc in enumerate(docs):
+                versions = document_repo.list_versions(self.ctx.conn, doc["id"])
+                version_total += len(versions)
                 item0 = QTableWidgetItem(doc["doc_name"])
                 item0.setData(Qt.UserRole, doc["id"])
                 self._table.setItem(row, 0, item0)
                 self._table.setItem(row, 1, QTableWidgetItem(doc["doc_type"].upper()))
+                self._table.setItem(row, 2, QTableWidgetItem(self._format_version_summary(versions)))
                 created = str(doc["created_at"])[:10]
-                self._table.setItem(row, 2, QTableWidgetItem(created))
-            self._status.setText(f"共 {len(docs)} 份文档")
+                self._table.setItem(row, 3, QTableWidgetItem(created))
+            self._status.setText(f"共 {len(docs)} 份文档，{version_total} 个版本")
         except Exception as e:
             logger.exception("Failed to refresh library")
             self._status.setText(f"加载失败：{e}")
+
+    def _format_version_summary(self, versions) -> str:
+        if not versions:
+            return "暂无版本"
+        latest = versions[0]
+        version = f"v{latest['version_no']}"
+        label = latest["version_label"] or ""
+        latest_text = f"{version}（{label}）" if label else version
+        return f"{latest_text} · 共 {len(versions)} 版"
 
     def _import_document(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(

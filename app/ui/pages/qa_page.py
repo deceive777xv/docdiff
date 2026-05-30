@@ -209,9 +209,9 @@ class QaPage(QWidget):
         self._scope_combo.currentTextChanged.connect(self._on_scope_changed)
         top_layout.addWidget(self._scope_combo)
 
-        tmp_label = QLabel("文档：")
-        tmp_label.setStyleSheet(Theme.form_label_large())
-        top_layout.addWidget(tmp_label)
+        self._doc_label = QLabel("文档：")
+        self._doc_label.setStyleSheet(Theme.form_label_large())
+        top_layout.addWidget(self._doc_label)
         self._doc_combo = QComboBox()
         self._doc_combo.setMinimumWidth(200)
         self._doc_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -274,6 +274,8 @@ class QaPage(QWidget):
         self._new_session_btn.setStyleSheet(Theme.btn_primary())
         self._delete_session_btn.setStyleSheet(Theme.btn_danger())
         self._send_btn.setStyleSheet(Theme.btn_primary())
+        self._doc_label.setStyleSheet(Theme.form_label_large())
+        self._compare_task_label.setStyleSheet(Theme.form_label_large())
         self._restyle_chat_bubbles()
 
     # ── Public API ─────────────────────────────────────────────────────────────
@@ -526,9 +528,12 @@ class QaPage(QWidget):
     # ── Slots ──────────────────────────────────────────────────────────────────
 
     def _on_scope_changed(self, text: str) -> None:
-        self._doc_combo.setVisible(text == "当前文档")
-        self._compare_task_label.setVisible(text == "对比文档")
-        self._compare_task_combo.setVisible(text == "对比文档")
+        is_current_doc = text == "当前文档"
+        is_compare = text == "对比文档"
+        self._doc_label.setVisible(is_current_doc)
+        self._doc_combo.setVisible(is_current_doc)
+        self._compare_task_label.setVisible(is_compare)
+        self._compare_task_combo.setVisible(is_compare)
         if text == "对比文档" and self._compare_task_combo.count() == 0:
             self.refresh_compare_tasks()
         if not self._loading_session:

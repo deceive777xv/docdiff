@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from app.config.settings import AppSettings
+from app.db import document_repo
 from app.db.schema import DDL
 from app.ui.app_context import AppContext
 
@@ -134,3 +135,34 @@ def test_run_ingest_finished_discards_the_finished_thread(library_page):
 
     assert first_thread not in library_page._threads
     assert second_thread in library_page._threads
+
+
+def test_refresh_shows_latest_version_and_version_count(library_page, mem_conn):
+    """The library table should make newly added versions visible to users."""
+    doc_id = document_repo.insert_document(
+        mem_conn,
+        doc_name="合同",
+        doc_type="docx",
+        file_path="/docs/contract.docx",
+        file_hash="library-version-hash",
+        source_type="standard",
+    )
+    document_repo.insert_version(
+        mem_conn,
+        document_id=doc_id,
+        version_no=1,
+        version_label="初稿",
+    )
+    document_repo.insert_version(
+        mem_conn,
+        document_id=doc_id,
+        version_no=2,
+        version_label="终稿",
+    )
+
+    library_page.refresh()
+
+    assert library_page._table.columnCount() == 4
+    assert library_page._table.horizontalHeaderItem(2).text() == "版本"
+    assert library_page._table.item(0, 2).text() == "v2（终稿） · 共 2 版"
+    assert library_page._status.text() == "共 1 份文档，2 个版本"

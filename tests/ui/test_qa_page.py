@@ -301,6 +301,35 @@ def test_refresh_documents(qtbot, qa_page, mem_conn):
     assert isinstance(ver_id, str) and len(ver_id) > 0
 
 
+def test_scope_change_syncs_selector_labels(qtbot, qa_page):
+    """Scope changes should keep the following selector label in sync."""
+    qa_page._scope_combo.setCurrentText("当前文档")
+    assert not qa_page._doc_label.isHidden()
+    assert qa_page._doc_label.text() == "文档："
+    assert not qa_page._doc_combo.isHidden()
+    assert qa_page._compare_task_label.isHidden()
+    assert qa_page._compare_task_combo.isHidden()
+
+    qa_page._scope_combo.setCurrentText("对比文档")
+    assert qa_page._doc_label.isHidden()
+    assert qa_page._doc_combo.isHidden()
+    assert not qa_page._compare_task_label.isHidden()
+    assert qa_page._compare_task_label.text() == "对比任务："
+    assert not qa_page._compare_task_combo.isHidden()
+
+    qa_page._scope_combo.setCurrentText("文档库")
+    assert qa_page._doc_label.isHidden()
+    assert qa_page._doc_combo.isHidden()
+    assert qa_page._compare_task_label.isHidden()
+    assert qa_page._compare_task_combo.isHidden()
+
+    qa_page._scope_combo.setCurrentText("全部")
+    assert qa_page._doc_label.isHidden()
+    assert qa_page._doc_combo.isHidden()
+    assert qa_page._compare_task_label.isHidden()
+    assert qa_page._compare_task_combo.isHidden()
+
+
 def test_send_question_passes_compare_task_id_to_worker(qtbot, qa_page):
     """Compare-scope questions need the task id so QA can include diff results."""
     _FakeQThread.instances.clear()
