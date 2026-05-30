@@ -26,6 +26,10 @@ from app.ui.theme import Theme
 
 logger = logging.getLogger(__name__)
 
+_TASK_ACTION_BUTTON_WIDTH = 54
+_TASK_ACTION_BUTTON_HEIGHT = 26
+_TASK_ACTION_COLUMN_WIDTH = 132
+
 
 class _StatCard(QWidget):
     """A small statistic card widget."""
@@ -105,11 +109,13 @@ class HomePage(QWidget):
 
         self._card_docs = _StatCard("文档", "0", Theme.COLOR_PRIMARY)
         self._card_tasks = _StatCard("对比任务", "0", Theme.COLOR_SUCCESS)
-        self._card_done = _StatCard("已完成", "0", Theme.COLOR_COMPLETED)
+        self._card_done = _StatCard("已完成对比", "0", Theme.COLOR_COMPLETED)
+        self._card_qa_done = _StatCard("已完成问答", "0", Theme.COLOR_QA)
 
         cards_layout.addWidget(self._card_docs, 0, 0)
         cards_layout.addWidget(self._card_tasks, 0, 1)
         cards_layout.addWidget(self._card_done, 0, 2)
+        cards_layout.addWidget(self._card_qa_done, 0, 3)
         layout.addLayout(cards_layout)
 
         # Quick actions
@@ -120,7 +126,7 @@ class HomePage(QWidget):
         actions = [
             ("导入文档", 2, "COLOR_PRIMARY"),
             ("开始文档对比", 1, "COLOR_SUCCESS"),
-            ("智能问答",      3, "COLOR_COMPLETED"),
+            ("智能问答",      3, "COLOR_QA"),
         ]
         self._action_buttons = []
         for label, page_idx, color_attr in actions:
@@ -146,8 +152,9 @@ class HomePage(QWidget):
         tasks_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         tasks_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         tasks_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        tasks_header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        tasks_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         self._tasks_table.setColumnWidth(1, 260)
+        self._tasks_table.setColumnWidth(5, _TASK_ACTION_COLUMN_WIDTH)
         self._tasks_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._tasks_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tasks_table.setAlternatingRowColors(True)
@@ -165,6 +172,7 @@ class HomePage(QWidget):
         self._card_docs._apply_color(Theme.COLOR_PRIMARY)
         self._card_tasks._apply_color(Theme.COLOR_SUCCESS)
         self._card_done._apply_color(Theme.COLOR_COMPLETED)
+        self._card_qa_done._apply_color(Theme.COLOR_QA)
         
         for btn, color_attr in self._action_buttons:
             color = getattr(Theme, color_attr)
@@ -186,10 +194,19 @@ class HomePage(QWidget):
             done = self.ctx.conn.execute(
                 "SELECT COUNT(*) FROM compare_tasks WHERE status='completed'"
             ).fetchone()[0]
+            qa_done = self.ctx.conn.execute(
+                """SELECT COUNT(*)
+                   FROM qa_sessions s
+                   WHERE EXISTS (
+                       SELECT 1 FROM qa_messages m
+                       WHERE m.session_id = s.id AND m.role = 'assistant'
+                   )"""
+            ).fetchone()[0]
 
             self._card_docs.update_value(str(docs))
             self._card_tasks.update_value(str(tasks))
             self._card_done.update_value(str(done))
+            self._card_qa_done.update_value(str(qa_done))
 
             recent = compare_repo.list_recent_task_summaries(self.ctx.conn, limit=10)
             self._tasks_table.setRowCount(len(recent))
@@ -260,17 +277,22 @@ class HomePage(QWidget):
             enabled = True
 
         widget = QWidget()
+        widget.setObjectName("task_action_cell")
+        widget.setFixedWidth(_TASK_ACTION_COLUMN_WIDTH)
+        widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(4, 0, 4, 0)
         layout.setSpacing(6)
 
         btn = QPushButton(label)
+        btn.setFixedSize(_TASK_ACTION_BUTTON_WIDTH, _TASK_ACTION_BUTTON_HEIGHT)
         btn.setEnabled(enabled)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setProperty("taskActionRole", "primary")
         btn.clicked.connect(lambda checked=False, tid=task_id, cb=callback: cb(tid))
 
         delete_btn = QPushButton("删除")
+        delete_btn.setFixedSize(_TASK_ACTION_BUTTON_WIDTH, _TASK_ACTION_BUTTON_HEIGHT)
         delete_btn.setEnabled(not is_active)
         delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         delete_btn.setProperty("taskActionRole", "danger")
@@ -278,9 +300,18 @@ class HomePage(QWidget):
 
         self._style_task_action_button(btn, danger=False)
         self._style_task_action_button(delete_btn, danger=True)
+        self._style_task_action_cell(widget)
         layout.addWidget(btn)
         layout.addWidget(delete_btn)
         return widget
+
+    def _style_task_action_cell(self, widget: QWidget) -> None:
+        widget.setStyleSheet(
+            "QWidget#task_action_cell {"
+            "background:transparent;"
+            f"border-right:1px solid {Theme.BORDER};"
+            "}"
+        )
 
     def _style_task_action_button(self, btn: QPushButton, *, danger: bool) -> None:
         color = Theme.COLOR_DANGER if danger else Theme.COLOR_PRIMARY
@@ -296,6 +327,7 @@ class HomePage(QWidget):
             action = self._tasks_table.cellWidget(row, 5)
             if action is None:
                 continue
+            self._style_task_action_cell(action)
             for btn in action.findChildren(QPushButton):
                 self._style_task_action_button(
                     btn,

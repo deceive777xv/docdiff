@@ -64,6 +64,60 @@ CREATE TABLE IF NOT EXISTS diff_items (
     baseline_page     INTEGER,
     target_page       INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS qa_sessions (
+    id                         TEXT PRIMARY KEY,
+    title                      TEXT NOT NULL,
+    scope                      TEXT NOT NULL,
+    current_version_ids_json   TEXT NOT NULL DEFAULT '[]',
+    compare_task_id            TEXT,
+    created_at                 TEXT NOT NULL,
+    updated_at                 TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS qa_messages (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL REFERENCES qa_sessions(id) ON DELETE CASCADE,
+    role            TEXT NOT NULL CHECK(role IN ('user','assistant')),
+    content         TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS qa_checkpoints (
+    thread_id               TEXT NOT NULL,
+    checkpoint_ns           TEXT NOT NULL DEFAULT '',
+    checkpoint_id           TEXT NOT NULL,
+    checkpoint_type         TEXT NOT NULL,
+    checkpoint_blob         BLOB NOT NULL,
+    metadata_type           TEXT NOT NULL,
+    metadata_blob           BLOB NOT NULL,
+    parent_checkpoint_id    TEXT,
+    created_at              TEXT NOT NULL,
+    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+);
+
+CREATE TABLE IF NOT EXISTS qa_checkpoint_writes (
+    thread_id        TEXT NOT NULL,
+    checkpoint_ns    TEXT NOT NULL DEFAULT '',
+    checkpoint_id    TEXT NOT NULL,
+    task_id          TEXT NOT NULL,
+    idx              INTEGER NOT NULL,
+    channel          TEXT NOT NULL,
+    value_type       TEXT NOT NULL,
+    value_blob       BLOB NOT NULL,
+    task_path        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)
+);
+
+CREATE TABLE IF NOT EXISTS qa_checkpoint_blobs (
+    thread_id        TEXT NOT NULL,
+    checkpoint_ns    TEXT NOT NULL DEFAULT '',
+    channel          TEXT NOT NULL,
+    version          TEXT NOT NULL,
+    value_type       TEXT NOT NULL,
+    value_blob       BLOB NOT NULL,
+    PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
+);
 """
 
 _DIFF_ITEM_COLUMNS = """

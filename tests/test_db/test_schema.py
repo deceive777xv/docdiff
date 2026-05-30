@@ -16,14 +16,25 @@ def test_init_db_creates_file(tmp_path):
 
 
 def test_all_tables_created(tmp_path):
-    """After init_db, all 5 expected tables are present in sqlite_master."""
+    """After init_db, all expected tables are present in sqlite_master."""
     conn = init_db(str(tmp_path))
     rows = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()
     conn.close()
     table_names = {row["name"] for row in rows}
-    expected = {"documents", "document_versions", "chunks", "compare_tasks", "diff_items"}
+    expected = {
+        "documents",
+        "document_versions",
+        "chunks",
+        "compare_tasks",
+        "diff_items",
+        "qa_sessions",
+        "qa_messages",
+        "qa_checkpoints",
+        "qa_checkpoint_writes",
+        "qa_checkpoint_blobs",
+    }
     assert expected == table_names
 
 

@@ -141,6 +141,7 @@ def main() -> None:
     settings_dialog.provider_changed.connect(
         lambda: _rebuild_providers(ctx, compare, qa)
     )
+    qa.sessions_changed.connect(home.refresh)
 
     window.navigate_to(0)
 

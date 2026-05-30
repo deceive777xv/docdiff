@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QMessageBox, QHeaderView, QPushButton
 
 from app.config.settings import AppSettings
 from app.core.types import DiffItem
-from app.db import compare_repo, document_repo
+from app.db import compare_repo, document_repo, qa_repo
 from app.db.schema import DDL
 from app.ui.app_context import AppContext
 
@@ -190,3 +190,80 @@ def test_home_page_delete_button_removes_task_after_confirmation(
 
     assert compare_repo.get_task_by_id(mem_conn, task_id) is None
     assert compare_repo.get_diff_items(mem_conn, task_id) == []
+
+
+def test_home_page_refresh_updates_completed_qa_after_session_delete(home_page, mem_conn):
+    """Completed QA count should reflect persisted sessions after a session is deleted."""
+    session_id = qa_repo.create_session(mem_conn, title="问答", scope="all")
+    qa_repo.add_message(mem_conn, session_id, "user", "问题")
+    qa_repo.add_message(mem_conn, session_id, "assistant", "回答")
+
+    home_page.refresh()
+
+    assert home_page._card_qa_done._val_lbl.text() == "1"
+
+    qa_repo.delete_session(mem_conn, session_id)
+    home_page.refresh()
+
+    assert home_page._card_qa_done._val_lbl.text() == "0"
+
+
+def test_home_page_qa_button_and_card_share_distinct_cool_color(home_page):
+    """QA quick action and completed-QA card use one cool color distinct from compare."""
+    from app.ui.theme import LATTE, MOCHA, Theme
+
+    qa_button = next(btn for btn, _color_attr in home_page._action_buttons if btn.text() == "智能问答")
+
+    for palette in (LATTE, MOCHA):
+        qa_rgb = tuple(int(palette["COLOR_QA"][i:i + 2], 16) for i in (1, 3, 5))
+        assert palette["COLOR_QA"] != palette["COLOR_SUCCESS"]
+        assert qa_rgb[2] > qa_rgb[0]
+        assert qa_rgb[2] >= qa_rgb[1]
+    assert Theme.COLOR_QA != Theme.COLOR_SUCCESS
+    assert f"background-color:{Theme.COLOR_QA}" in qa_button.styleSheet()
+    assert home_page._card_qa_done._color_hex == Theme.COLOR_QA
+    assert home_page._card_qa_done._color_hex != home_page._card_tasks._color_hex
+
+
+def test_home_page_task_action_buttons_keep_stable_size_on_resize(home_page, mem_conn):
+    """Open/delete buttons should not shrink when the task table is resized."""
+    baseline_id, target_id = _insert_versions(mem_conn)
+    task_id = compare_repo.create_compare_task(
+        mem_conn,
+        baseline_version_id=baseline_id,
+        target_version_id=target_id,
+    )
+    compare_repo.update_task_status(mem_conn, task_id, "completed", "/tmp/result.json")
+
+    home_page.refresh()
+
+    header = home_page._tasks_table.horizontalHeader()
+    open_button = _action_button(home_page, 0, "打开")
+    delete_button = _action_button(home_page, 0, "删除")
+
+    assert header.sectionResizeMode(5) == QHeaderView.ResizeMode.Fixed
+    assert home_page._tasks_table.columnWidth(5) >= 120
+    for button in (open_button, delete_button):
+        assert button.minimumWidth() >= 52
+        assert button.maximumWidth() == button.minimumWidth()
+        assert button.minimumHeight() >= 26
+        assert button.maximumHeight() == button.minimumHeight()
+
+
+def test_home_page_task_action_cell_draws_right_border(home_page, mem_conn):
+    """The cell widget in the action column should redraw the grid right border it covers."""
+    from app.ui.theme import Theme
+
+    baseline_id, target_id = _insert_versions(mem_conn)
+    task_id = compare_repo.create_compare_task(
+        mem_conn,
+        baseline_version_id=baseline_id,
+        target_version_id=target_id,
+    )
+    compare_repo.update_task_status(mem_conn, task_id, "completed", "/tmp/result.json")
+
+    home_page.refresh()
+
+    action = home_page._tasks_table.cellWidget(0, 5)
+    assert action.objectName() == "task_action_cell"
+    assert f"border-right:1px solid {Theme.BORDER}" in action.styleSheet()

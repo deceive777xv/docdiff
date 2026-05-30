@@ -6,9 +6,9 @@ from collections import Counter
 
 from langchain_core.messages import AIMessage, BaseMessageChunk, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
+from app.agent.sqlite_checkpointer import SQLiteCheckpointSaver
 from app.agent.states import QAState
 from app.core.retrieval.searcher import search
 from app.db import compare_repo, document_repo
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from app.core.types import Chunk, ChunkHit
 serde = JsonPlusSerializer(allowed_msgpack_modules=[Chunk, ChunkHit])
-_checkpointer = MemorySaver(serde=serde)
+_checkpointer = SQLiteCheckpointSaver(serde=serde)
 
 _QA_SYSTEM_PROMPT = """你是一个专业的文档问答助手。请根据以下参考资料回答用户问题。
 

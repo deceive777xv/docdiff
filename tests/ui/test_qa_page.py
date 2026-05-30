@@ -5,6 +5,7 @@ import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PySide6.QtWidgets import QLabel, QMessageBox
 
 from app.config.settings import AppSettings
 from app.core.types import Chunk, ChunkHit
@@ -117,6 +118,7 @@ def test_qa_page_instantiates(qtbot, ctx):
     assert page._doc_combo is not None
     assert page._input is not None
     assert page._chat_layout is not None
+    assert page._session_combo is not None
 
 
 def test_send_question_no_provider(qtbot, qa_page):
@@ -151,6 +153,85 @@ def test_send_question_connects_worker_to_created_thread(qtbot, qa_page):
     assert thread.started.connections[0].__self__ is worker
     assert thread.started.connections[0].__name__ == "run"
     assert thread.started_called
+
+
+def test_send_question_creates_persisted_session_and_user_message(qtbot, qa_page):
+    """Sending the first question stores a QA session and the user message."""
+    from app.db import qa_repo
+
+    _FakeQThread.instances.clear()
+    _FakeQaWorker.instances.clear()
+    qa_page.ctx.embedder = object()
+    qa_page.ctx.lc_model = object()
+    qa_page._input.setPlainText("两份合同有什么差异？")
+
+    with patch("app.ui.pages.qa_page.QThread", _FakeQThread):
+        with patch("app.ui.pages.qa_page._QaWorker", _FakeQaWorker):
+            qa_page.send_question()
+
+    sessions = qa_repo.list_sessions(qa_page.ctx.conn)
+    messages = qa_repo.list_messages(qa_page.ctx.conn, sessions[0]["id"])
+    worker = _FakeQaWorker.instances[-1]
+
+    assert sessions[0]["title"] == "两份合同有什么差异？"
+    assert messages[0]["role"] == "user"
+    assert messages[0]["content"] == "两份合同有什么差异？"
+    assert worker.kwargs["thread_id"] == sessions[0]["id"]
+
+
+def test_qa_page_loads_existing_session_messages(qtbot, ctx, mem_conn):
+    """Selecting a previous session restores its messages in the chat pane."""
+    from app.db import qa_repo
+    from app.ui.pages.qa_page import QaPage
+
+    session_id = qa_repo.create_session(mem_conn, title="历史会话", scope="all")
+    qa_repo.add_message(mem_conn, session_id, "user", "第一问")
+    qa_repo.add_message(mem_conn, session_id, "assistant", "第一答")
+
+    page = QaPage(ctx)
+    qtbot.addWidget(page)
+
+    labels = [
+        label.text()
+        for label in page._chat_content.findChildren(QLabel)
+        if label.property("qa_role") in ("user", "assistant")
+    ]
+    assert page._session_combo.currentData() == session_id
+    assert labels == ["第一问", "第一答"]
+
+
+def test_qa_page_deletes_selected_session(qtbot, qa_page, monkeypatch):
+    """The session delete action removes the selected persisted conversation."""
+    from app.db import qa_repo
+
+    session_id = qa_repo.create_session(qa_page.ctx.conn, title="待删除", scope="all")
+    qa_repo.add_message(qa_page.ctx.conn, session_id, "user", "旧问题")
+    qa_page.refresh_sessions(select_session_id=session_id)
+    monkeypatch.setattr(
+        "app.ui.pages.qa_page.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    qa_page._delete_session()
+
+    assert qa_repo.get_session(qa_page.ctx.conn, session_id) is None
+    assert qa_repo.list_messages(qa_page.ctx.conn, session_id) == []
+
+
+def test_on_done_persists_streamed_assistant_reply(qtbot, qa_page):
+    """A completed streamed answer is stored in the current QA session."""
+    from app.db import qa_repo
+
+    session_id = qa_repo.create_session(qa_page.ctx.conn, title="问答", scope="all")
+    qa_page._thread_id = session_id
+    qa_page._session_persisted = True
+    qa_page._accumulated = "这是模型回答。"
+
+    qa_page._on_done()
+
+    messages = qa_repo.list_messages(qa_page.ctx.conn, session_id)
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["content"] == "这是模型回答。"
 
 
 def test_add_message_user(qtbot, qa_page):

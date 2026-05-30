@@ -36,6 +36,7 @@ LATTE: dict[str, str] = {
     "COLOR_DANGER":    "#e64553",   # Red
     "COLOR_WARNING":   "#df8e1d",   # Yellow
     "COLOR_COMPLETED": "#179299",
+    "COLOR_QA":        "#6571b3",   # Lavender
     # diff
     "DIFF_ADDED":      "#209fb5",
     "DIFF_DELETED":    "#dd7878",
@@ -69,6 +70,7 @@ MOCHA: dict[str, str] = {
     "COLOR_DANGER":    "#f38ba8",   # Red
     "COLOR_WARNING":   "#f9e2af",   # Yellow
     "COLOR_COMPLETED": "#94e2d5",
+    "COLOR_QA":        "#b4befe",   # Lavender
     # diff
     "DIFF_ADDED":      "#74c7ec",
     "DIFF_DELETED":    "#f2cdcd",
