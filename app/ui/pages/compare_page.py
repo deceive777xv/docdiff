@@ -235,6 +235,7 @@ def _strip_markdown_formatting(markdown_text: str) -> str:
 
     for raw_line in markdown_text.splitlines():
         line = raw_line.strip()
+        line = re.sub(r"<br\s*/?>", "", line)
         if line.startswith("```"):
             in_code_block = not in_code_block
             continue
