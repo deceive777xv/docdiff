@@ -45,9 +45,11 @@ def ctx(mem_conn):
 class _FakeWebView(QWidget):
     """Minimal QWidget stand-in for QWebEngineView (no display required)."""
 
+    auto_finish_load = True
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.loadFinished = MagicMock()
+        self.loadFinished = _FakeSignal()
 
     def page(self):
         if not hasattr(self, "_mock_page"):
@@ -55,7 +57,24 @@ class _FakeWebView(QWidget):
         return self._mock_page
 
     def load(self, *_args):
-        pass
+        if self.auto_finish_load:
+            self.loadFinished.emit(True)
+
+
+class _DelayedFakeWebView(_FakeWebView):
+    auto_finish_load = False
+
+
+class _FakeSignal:
+    def __init__(self):
+        self.connections = []
+
+    def connect(self, slot):
+        self.connections.append(slot)
+
+    def emit(self, *args):
+        for slot in list(self.connections):
+            slot(*args)
 
 
 def test_render_markdown_fragment_formats_tables_and_escapes_html():
@@ -495,6 +514,45 @@ def test_render_diff_injects_markdown_html_into_middle_panes(compare_page):
     assert "<h4>新条款</h4>" in js
     assert "<li>付款周期调整为60天</li>" in js
     assert "diff-item diff-block added" in js
+
+
+def test_render_diff_waits_for_web_template_load(qtbot, ctx):
+    """Compare results should be injected after the WebEngine template is ready."""
+    from app.core.types import DiffItem, DiffResult
+    from app.ui.pages.compare_page import ComparePage
+
+    with patch("app.ui.pages.compare_page.QWebEngineView", _DelayedFakeWebView):
+        page = ComparePage(ctx)
+        qtbot.addWidget(page)
+
+    result = DiffResult(
+        task_id="task-delayed-web",
+        baseline_version_id="b",
+        target_version_id="t",
+        items=[
+            DiffItem(
+                diff_id="d-delayed",
+                section_path="第一章",
+                diff_type="新增",
+                risk_level="low",
+                baseline_text="",
+                target_text="新增内容",
+                similarity_score=0.0,
+                explanation="",
+            )
+        ],
+    )
+
+    page._render_diff(result)
+
+    assert not page._web_view.page().runJavaScript.called
+
+    page._web_view.loadFinished.emit(True)
+
+    assert page._web_view.page().runJavaScript.called
+    js = page._web_view.page().runJavaScript.call_args.args[0]
+    assert "新增内容" in js
+    assert "target-content" in js
 
 
 def test_render_diff_uses_full_document_with_row_and_token_marks(

@@ -275,6 +275,8 @@ class ComparePage(QWidget):
         self._recover_task_id: str | None = None
         self._thread: QThread | None = None
         self._threads: set[QThread] = set()
+        self._web_view_ready = False
+        self._pending_diff_js: str | None = None
         self._build_ui()
         from app.ui.theme_manager import ThemeManager
         ThemeManager.instance().theme_changed.connect(self._apply_theme)
@@ -372,8 +374,8 @@ class ComparePage(QWidget):
         template_path = (
             Path(__file__).parent.parent.parent.parent / "assets" / "diff_template.html"
         )
+        self._web_view.loadFinished.connect(self._on_webview_load_finished)
         self._web_view.load(QUrl.fromLocalFile(str(template_path)))
-        self._web_view.loadFinished.connect(lambda _: self._apply_webview_theme())
         splitter.addWidget(self._web_view)
         splitter.setStretchFactor(1, 1)
 
@@ -439,6 +441,18 @@ class ComparePage(QWidget):
     # ── Public API ─────────────────────────────────────────────────────────────
     def refresh(self) -> None:
         self.refresh_versions()
+
+    def _on_webview_load_finished(self, ok: bool) -> None:
+        self._web_view_ready = bool(ok)
+        if not ok:
+            logger.warning("diff web template failed to load")
+            return
+
+        self._apply_webview_theme()
+        if self._pending_diff_js:
+            js = self._pending_diff_js
+            self._pending_diff_js = None
+            self._run_diff_js(js)
 
     def load_task(self, task_id: str) -> None:
         """Load an existing compare task into the page."""
@@ -876,7 +890,7 @@ class ComparePage(QWidget):
                 f"{json.dumps(target_html, ensure_ascii=False)};\n"
                 "attachDiffHandlers();"
             )
-            self._web_view.page().runJavaScript(js)
+            self._run_diff_js(js)
             return
 
         sections: dict[str, list[DiffItem]] = defaultdict(list)
@@ -920,6 +934,13 @@ class ComparePage(QWidget):
             f"{json.dumps(target_html, ensure_ascii=False)};\n"
             "attachDiffHandlers();"
         )
+        self._run_diff_js(js)
+
+    def _run_diff_js(self, js: str) -> None:
+        """Run diff injection JS after the WebEngine template is loaded."""
+        if not self._web_view_ready:
+            self._pending_diff_js = js
+            return
         self._web_view.page().runJavaScript(js)
 
     def _show_diff_list(self, items: list[DiffItem]) -> None:
