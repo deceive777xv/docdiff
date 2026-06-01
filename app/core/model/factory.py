@@ -13,6 +13,8 @@ def build_provider(config: ProviderConfig) -> BaseProvider:
             api_key=config.api_key,
             base_url=config.base_url,
             chat_model=config.chat_model,
+            embed_api_key=config.embed_api_key,
+            embed_base_url=config.embed_base_url,
             embed_model=config.embed_model,
         )
     if config.type == "azure":

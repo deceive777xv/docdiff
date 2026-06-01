@@ -54,6 +54,34 @@ class TestEmbedReturnsListOfVectors(unittest.TestCase):
         self.assertIsInstance(result[0], list)
         self.assertIsInstance(result[1], list)
 
+    def test_embed_uses_dedicated_embedding_client(self):
+        provider = OpenAICompatibleProvider(
+            api_key="chat-key",
+            base_url="https://chat.example.com/v1",
+            chat_model="chat-model",
+            embed_model="embed-model",
+            embed_api_key="embed-key",
+            embed_base_url="https://embed.example.com/v1",
+        )
+        chat_client = MagicMock()
+        embed_client = MagicMock()
+        item = MagicMock()
+        item.embedding = [0.1, 0.2]
+        response = MagicMock()
+        response.data = [item]
+        embed_client.embeddings.create.return_value = response
+        provider._client = chat_client
+        provider._embed_client = embed_client
+
+        result = provider.embed(["hello"])
+
+        self.assertEqual(result, [[0.1, 0.2]])
+        embed_client.embeddings.create.assert_called_once_with(
+            model="embed-model",
+            input=["hello"],
+        )
+        chat_client.embeddings.create.assert_not_called()
+
 
 class TestHealthCheckTrue(unittest.TestCase):
     def test_health_check_true(self):
@@ -87,10 +115,14 @@ class TestBuildProviderOpenAICompatible(unittest.TestCase):
             api_key="k",
             base_url="",
             chat_model="m",
+            embed_api_key="embed-k",
+            embed_base_url="https://embed.example.com/v1",
             embed_model="e",
         )
         result = build_provider(config)
         self.assertIsInstance(result, OpenAICompatibleProvider)
+        self.assertEqual(result.embed_api_key, "embed-k")
+        self.assertEqual(result.embed_base_url, "https://embed.example.com/v1")
 
 
 if __name__ == "__main__":

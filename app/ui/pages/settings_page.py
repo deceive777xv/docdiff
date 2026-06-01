@@ -85,6 +85,15 @@ class SettingsDialog(QDialog):
         self._embed_model.setPlaceholderText("text-embedding-ada-002")
         provider_form.addRow("Embed 模型：", self._embed_model)
 
+        self._embed_base_url = QLineEdit()
+        self._embed_base_url.setPlaceholderText("留空则使用上方 Base URL")
+        provider_form.addRow("Embed Base URL：", self._embed_base_url)
+
+        self._embed_api_key = QLineEdit()
+        self._embed_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._embed_api_key.setPlaceholderText("留空则使用上方 API Key")
+        provider_form.addRow("Embed API Key：", self._embed_api_key)
+
         outer.addWidget(provider_group)
 
         # Local embedding group
@@ -191,6 +200,8 @@ class SettingsDialog(QDialog):
             self._api_key.setText(p.api_key)
             self._chat_model.setText(p.chat_model)
             self._embed_model.setText(p.embed_model)
+            self._embed_base_url.setText(p.embed_base_url)
+            self._embed_api_key.setText(p.embed_api_key)
 
         le = s.local_embedding
         self._local_embed_enabled.setChecked(le.enabled)
@@ -267,6 +278,8 @@ class SettingsDialog(QDialog):
             api_key=self._api_key.text().strip(),
             base_url=self._base_url.text().strip(),
             chat_model=self._chat_model.text().strip() or "deepseek-chat",
+            embed_api_key=self._embed_api_key.text().strip(),
+            embed_base_url=self._embed_base_url.text().strip(),
             embed_model=self._embed_model.text().strip() or "text-embedding-ada-002",
         )
         self.ctx.settings.providers = [provider]

@@ -25,6 +25,8 @@ class ProviderConfig:
     api_key: str = ""                 # stored encrypted in JSON
     base_url: str = ""
     chat_model: str = "deepseek-chat"
+    embed_api_key: str = ""           # optional; falls back to api_key
+    embed_base_url: str = ""          # optional; falls back to base_url
     embed_model: str = "text-embedding-ada-002"
 
 
@@ -65,6 +67,8 @@ def load() -> AppSettings:
             api_key=decrypt(p["api_key"]) if p.get("api_key") else "",
             base_url=p.get("base_url", ""),
             chat_model=p.get("chat_model", "deepseek-chat"),
+            embed_api_key=decrypt(p["embed_api_key"]) if p.get("embed_api_key") else "",
+            embed_base_url=p.get("embed_base_url", ""),
             embed_model=p.get("embed_model", "text-embedding-ada-002"),
         )
         providers.append(pc)
@@ -94,6 +98,8 @@ def save(settings: AppSettings) -> None:
             "api_key": encrypt(p.api_key) if p.api_key else "",
             "base_url": p.base_url,
             "chat_model": p.chat_model,
+            "embed_api_key": encrypt(p.embed_api_key) if p.embed_api_key else "",
+            "embed_base_url": p.embed_base_url,
             "embed_model": p.embed_model,
         })
     raw = {

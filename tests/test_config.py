@@ -56,6 +56,8 @@ def test_save_load_round_trip(tmp_path, monkeypatch):
         api_key="sk-round-trip-key-xyz",
         base_url="https://api.deepseek.com",
         chat_model="deepseek-chat",
+        embed_api_key="sk-embed-key-xyz",
+        embed_base_url="https://embed.example.com/v1",
         embed_model="text-embedding-ada-002",
     )
     original = AppSettings(
@@ -72,7 +74,14 @@ def test_save_load_round_trip(tmp_path, monkeypatch):
     assert p.name == "deepseek"
     assert p.api_key == "sk-round-trip-key-xyz"
     assert p.base_url == "https://api.deepseek.com"
+    assert p.embed_api_key == "sk-embed-key-xyz"
+    assert p.embed_base_url == "https://embed.example.com/v1"
     assert loaded.active_provider == "deepseek"
+
+    raw = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    saved_provider = raw["providers"][0]
+    assert saved_provider["embed_api_key"] != "sk-embed-key-xyz"
+    assert saved_provider["embed_base_url"] == "https://embed.example.com/v1"
 
 
 def test_get_active_provider_by_name():
