@@ -136,3 +136,72 @@ def test_export_html_escapes_html_characters(tmp_path):
     content = Path(out).read_text(encoding="utf-8")
     assert "<script>" not in content  # escaped
     assert "&lt;script&gt;" in content
+
+
+def test_export_html_strips_markdown_noise_from_diff_text(tmp_path):
+    """HTML reports should show readable text, not raw Markdown syntax."""
+    from app.services.report_service import export_html
+
+    result = DiffResult(
+        task_id="markdown-report",
+        baseline_version_id="b",
+        target_version_id="v",
+        items=[
+            DiffItem(
+                diff_id=str(uuid.uuid4()),
+                section_path="付款条款",
+                diff_type="微调",
+                risk_level="low",
+                baseline_text="**付款周期**<br>30天",
+                target_text="- **付款周期**：60天",
+                similarity_score=0.9,
+                explanation="LLM 判断语义一致，仅付款时间变化。",
+            )
+        ],
+    )
+    out = str(tmp_path / "report.html")
+
+    export_html(result, out)
+
+    content = Path(out).read_text(encoding="utf-8")
+    assert "付款周期" in content
+    assert "30天" in content
+    assert "60天" in content
+    assert "**" not in content
+    assert "&lt;br" not in content
+    assert "<br" not in content
+
+
+def test_export_docx_strips_markdown_noise_from_diff_text(tmp_path):
+    """Word reports should store clean paragraph text, not Markdown source."""
+    from docx import Document
+    from app.services.report_service import export_docx
+
+    result = DiffResult(
+        task_id="markdown-report",
+        baseline_version_id="b",
+        target_version_id="v",
+        items=[
+            DiffItem(
+                diff_id=str(uuid.uuid4()),
+                section_path="付款条款",
+                diff_type="微调",
+                risk_level="low",
+                baseline_text="**付款周期**<br>30天",
+                target_text="- **付款周期**：60天",
+                similarity_score=0.9,
+                explanation="LLM 判断语义一致，仅付款时间变化。",
+            )
+        ],
+    )
+    out = str(tmp_path / "report.docx")
+
+    export_docx(result, out)
+
+    doc = Document(out)
+    full_text = "\n".join(p.text for p in doc.paragraphs)
+    assert "付款周期" in full_text
+    assert "30天" in full_text
+    assert "60天" in full_text
+    assert "**" not in full_text
+    assert "<br" not in full_text

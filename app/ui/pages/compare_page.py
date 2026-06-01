@@ -30,6 +30,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.markdown_utils import (
+    render_inline_markdown as _core_render_inline_markdown,
+    render_markdown_fragment as _core_render_markdown_fragment,
+    strip_markdown_formatting as _core_strip_markdown_formatting,
+)
 from app.core.types import ComparePolicy, DiffItem, DiffResult, DocumentIR, Paragraph, Section, Sentence
 from app.db import document_repo
 from app.ui.app_context import AppContext
@@ -67,10 +72,6 @@ _RISK_LABELS: dict[str, str] = {
 
 _ALL_SECTIONS_KEY = "__all_sections__"
 
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
-_ORDERED_LIST_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
-_UNORDERED_LIST_RE = re.compile(r"^\s*[-*+]\s+(.+)$")
-_BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
 _TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
 
 
@@ -90,173 +91,19 @@ def _is_markdown_table_separator(line: str) -> bool:
     return bool(cells) and all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell) for cell in cells)
 
 
-def _is_markdown_table_start(lines: list[str], index: int) -> bool:
-    return (
-        index + 1 < len(lines)
-        and "|" in lines[index]
-        and _is_markdown_table_separator(lines[index + 1])
-    )
-
-
 def _render_inline_markdown(text: str) -> str:
     """Render a small, escaped inline Markdown subset."""
-    rendered = html.escape(text, quote=False)
-    rendered = re.sub(r"`([^`]+)`", r"<code>\1</code>", rendered)
-    rendered = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", rendered)
-    rendered = re.sub(r"__([^_\n]+)__", r"<strong>\1</strong>", rendered)
-    rendered = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", rendered)
-    rendered = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"<em>\1</em>", rendered)
-    return rendered
-
-
-def _render_markdown_table(rows: list[list[str]]) -> str:
-    if not rows:
-        return ""
-
-    header_cells = "".join(f"<th>{_render_inline_markdown(cell)}</th>" for cell in rows[0])
-    body_rows = []
-    for row in rows[1:]:
-        cells = "".join(f"<td>{_render_inline_markdown(cell)}</td>" for cell in row)
-        body_rows.append(f"<tr>{cells}</tr>")
-
-    body_html = "".join(body_rows)
-    return (
-        '<div class="markdown-table-wrap"><table>'
-        f"<thead><tr>{header_cells}</tr></thead>"
-        f"<tbody>{body_html}</tbody>"
-        "</table></div>"
-    )
+    return _core_render_inline_markdown(text)
 
 
 def _render_markdown_fragment(markdown_text: str) -> str:
     """Convert stored Markdown text into safe, readable HTML for the diff panes."""
-    lines = markdown_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    blocks: list[str] = []
-    i = 0
-
-    while i < len(lines):
-        line = lines[i]
-        stripped = line.strip()
-        if not stripped:
-            i += 1
-            continue
-
-        if stripped.startswith("```"):
-            i += 1
-            code_lines: list[str] = []
-            while i < len(lines) and not lines[i].strip().startswith("```"):
-                code_lines.append(lines[i])
-                i += 1
-            if i < len(lines):
-                i += 1
-            code = html.escape("\n".join(code_lines), quote=False)
-            blocks.append(f"<pre><code>{code}</code></pre>")
-            continue
-
-        if _is_markdown_table_start(lines, i):
-            table_rows = [_split_markdown_table_row(lines[i])]
-            i += 2  # skip header and separator
-            while i < len(lines) and lines[i].strip() and "|" in lines[i]:
-                if not _is_markdown_table_separator(lines[i]):
-                    table_rows.append(_split_markdown_table_row(lines[i]))
-                i += 1
-            blocks.append(_render_markdown_table(table_rows))
-            continue
-
-        heading = _HEADING_RE.match(stripped)
-        if heading:
-            level = min(6, len(heading.group(1)) + 3)
-            blocks.append(f"<h{level}>{_render_inline_markdown(heading.group(2).strip())}</h{level}>")
-            i += 1
-            continue
-
-        unordered = _UNORDERED_LIST_RE.match(line)
-        if unordered:
-            items: list[str] = []
-            while i < len(lines):
-                match = _UNORDERED_LIST_RE.match(lines[i])
-                if not match:
-                    break
-                items.append(f"<li>{_render_inline_markdown(match.group(1).strip())}</li>")
-                i += 1
-            blocks.append(f"<ul>{''.join(items)}</ul>")
-            continue
-
-        ordered = _ORDERED_LIST_RE.match(line)
-        if ordered:
-            items = []
-            while i < len(lines):
-                match = _ORDERED_LIST_RE.match(lines[i])
-                if not match:
-                    break
-                items.append(f"<li>{_render_inline_markdown(match.group(1).strip())}</li>")
-                i += 1
-            blocks.append(f"<ol>{''.join(items)}</ol>")
-            continue
-
-        quote = _BLOCKQUOTE_RE.match(line)
-        if quote:
-            quote_lines: list[str] = []
-            while i < len(lines):
-                match = _BLOCKQUOTE_RE.match(lines[i])
-                if not match:
-                    break
-                quote_lines.append(match.group(1).strip())
-                i += 1
-            quote_html = "<br>".join(_render_inline_markdown(q) for q in quote_lines)
-            blocks.append(f"<blockquote>{quote_html}</blockquote>")
-            continue
-
-        paragraph_lines: list[str] = []
-        while i < len(lines) and lines[i].strip():
-            current = lines[i].strip()
-            starts_new_block = (
-                _is_markdown_table_start(lines, i)
-                or _HEADING_RE.match(current)
-                or _UNORDERED_LIST_RE.match(lines[i])
-                or _ORDERED_LIST_RE.match(lines[i])
-                or _BLOCKQUOTE_RE.match(lines[i])
-                or current.startswith("```")
-            )
-            if paragraph_lines and starts_new_block:
-                break
-            paragraph_lines.append(current)
-            i += 1
-        paragraph = "<br>".join(_render_inline_markdown(p) for p in paragraph_lines)
-        blocks.append(f"<p>{paragraph}</p>")
-
-    return "".join(block for block in blocks if block)
+    return _core_render_markdown_fragment(markdown_text)
 
 
 def _strip_markdown_formatting(markdown_text: str) -> str:
     """Remove common Markdown markers for compact QLabel summaries."""
-    cleaned_lines: list[str] = []
-    in_code_block = False
-
-    for raw_line in markdown_text.splitlines():
-        line = raw_line.strip()
-        if line.startswith("```"):
-            in_code_block = not in_code_block
-            continue
-        if not line:
-            continue
-        if _is_markdown_table_separator(line):
-            continue
-        if line.startswith("|") and line.endswith("|"):
-            line = " ".join(cell for cell in _split_markdown_table_row(line) if cell)
-        elif not in_code_block:
-            line = re.sub(r"^#{1,6}\s+", "", line)
-            line = re.sub(r"^>\s?", "", line)
-            line = re.sub(r"^[-*+]\s+", "", line)
-            line = re.sub(r"^\d+[.)]\s+", "", line)
-        cleaned_lines.append(line)
-
-    stripped = " ".join(cleaned_lines)
-    stripped = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", stripped)
-    stripped = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", stripped)
-    stripped = re.sub(r"`([^`]*)`", r"\1", stripped)
-    stripped = re.sub(r"[*_~]+", "", stripped)
-    return re.sub(r"\s+", " ", stripped).strip()
+    return _core_strip_markdown_formatting(markdown_text)
 
 
 def _normalize_diff_text(text: str) -> str:
@@ -299,19 +146,44 @@ def _ir_from_dict(data: dict) -> DocumentIR:
 
 def _render_changed_inline(text: str, other_text: str) -> str:
     """Escape text and wrap changed character spans for fine-grained visual focus."""
+    text = _strip_markdown_formatting(text)
+    other_text = _strip_markdown_formatting(other_text)
     if not other_text:
         return html.escape(text, quote=False)
 
-    parts: list[str] = []
+    changed_ranges: list[tuple[int, int]] = []
     matcher = SequenceMatcher(None, text, other_text)
     for tag, start, end, _other_start, _other_end in matcher.get_opcodes():
-        piece = html.escape(text[start:end], quote=False)
-        if not piece:
+        if tag == "equal" or start == end:
             continue
-        if tag == "equal":
-            parts.append(piece)
+        while start > 0 and not text[start - 1].isspace():
+            start -= 1
+        while end < len(text) and not text[end].isspace():
+            end += 1
+        changed_ranges.append((start, end))
+
+    if not changed_ranges:
+        return html.escape(text, quote=False)
+
+    parts: list[str] = []
+    cursor = 0
+    merged_ranges: list[tuple[int, int]] = []
+    for start, end in sorted(changed_ranges):
+        if not merged_ranges or start > merged_ranges[-1][1]:
+            merged_ranges.append((start, end))
         else:
+            merged_start, merged_end = merged_ranges[-1]
+            merged_ranges[-1] = (merged_start, max(merged_end, end))
+
+    for start, end in merged_ranges:
+        if cursor < start:
+            parts.append(html.escape(text[cursor:start], quote=False))
+        piece = html.escape(text[start:end], quote=False)
+        if piece:
             parts.append(f'<mark class="diff-token">{piece}</mark>')
+        cursor = end
+    if cursor < len(text):
+        parts.append(html.escape(text[cursor:], quote=False))
     return "".join(parts)
 
 
@@ -865,7 +737,8 @@ class ComparePage(QWidget):
         for item in result.items:
             sections[item.section_path].append(item)
         for section_path, items in sorted(sections.items()):
-            node = QTreeWidgetItem([section_path, str(len(items))])
+            display_path = _strip_markdown_formatting(section_path) or section_path
+            node = QTreeWidgetItem([display_path, str(len(items))])
             node.setData(0, Qt.UserRole, section_path)
             self._tree.addTopLevelItem(node)
         self._tree.expandAll()
@@ -899,8 +772,8 @@ class ComparePage(QWidget):
     def _render_full_document(self, ir: DocumentIR, lookup: dict[str, DiffItem], side: str) -> str:
         parts: list[str] = []
         for section in ir.sections:
-            title = section.title or "正文"
-            parts.append(f"<h3>{html.escape(title)}</h3>")
+            title = _render_inline_markdown(section.title or "正文")
+            parts.append(f"<h3>{title}</h3>")
             for para in section.paragraphs:
                 if self._paragraph_looks_like_table(para):
                     parts.append(self._render_table_paragraph(para, lookup, side))
@@ -935,7 +808,7 @@ class ComparePage(QWidget):
                 f'data-diff-id="{html.escape(item.diff_id, quote=True)}">{content}</div>'
             )
         if line:
-            return f'<div class="doc-line">{html.escape(text, quote=False)}</div>'
+            return f'<div class="doc-line">{html.escape(_strip_markdown_formatting(text), quote=False)}</div>'
         return f'<div class="doc-block">{_render_markdown_fragment(text)}</div>'
 
     def _render_table_paragraph(self, para: Paragraph, lookup: dict[str, DiffItem], side: str) -> str:
@@ -969,11 +842,11 @@ class ComparePage(QWidget):
                 if item is not None:
                     other_cell = other_cells[cell_index] if cell_index < len(other_cells) else ""
                     if _normalize_diff_text(cell) == _normalize_diff_text(other_cell):
-                        content = html.escape(cell, quote=False)
+                        content = html.escape(_strip_markdown_formatting(cell), quote=False)
                     else:
-                        content = f'<mark class="diff-token">{html.escape(cell, quote=False)}</mark>'
+                        content = _render_changed_inline(cell, other_cell)
                 else:
-                    content = html.escape(cell, quote=False)
+                    content = _render_inline_markdown(cell)
                 cell_html.append(f"<{cell_tag}>{content}</{cell_tag}>")
             rendered_rows.append(f"<tr {row_attrs}>{''.join(cell_html)}</tr>")
 
@@ -1015,7 +888,7 @@ class ComparePage(QWidget):
 
         for section_path in sorted(sections.keys()):
             items = sections[section_path]
-            section_title = html.escape(section_path)
+            section_title = _render_inline_markdown(_strip_markdown_formatting(section_path) or section_path)
             baseline_parts.append(f"<h3>{section_title}</h3>")
             target_parts.append(f"<h3>{section_title}</h3>")
 
@@ -1102,7 +975,8 @@ class ComparePage(QWidget):
         card_layout.addLayout(header_row)
 
         # Section path
-        section_lbl = QLabel(f"章节：{item.section_path}")
+        section_path = _strip_markdown_formatting(item.section_path) or item.section_path
+        section_lbl = QLabel(f"章节：{section_path}")
         section_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         section_lbl.setStyleSheet(Theme.label_secondary())
         section_lbl.setWordWrap(True)

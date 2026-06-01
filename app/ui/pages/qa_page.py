@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.markdown_utils import render_markdown_fragment
 from app.core.types import RetrievalScope
 from app.db import document_repo, qa_repo
 from app.ui.app_context import AppContext
@@ -34,6 +35,7 @@ _SCOPE_MAP: dict[str, RetrievalScope] = {
     "全部": RetrievalScope.ALL,
 }
 _SCOPE_TEXT_BY_VALUE = {scope.value: text for text, scope in _SCOPE_MAP.items()}
+_MESSAGE_MAX_WIDTH = 600
 
 def _user_bubble_style() -> str:
     return (
@@ -602,39 +604,18 @@ class QaPage(QWidget):
     def _on_token(self, token: str) -> None:
         self._accumulated += token
         if self._current_bubble is not None:
-            self._current_bubble.setText(self._accumulated)
+            self._set_bubble_text(self._current_bubble, "assistant", self._accumulated)
         self._chat_scroll.verticalScrollBar().setValue(
             self._chat_scroll.verticalScrollBar().maximum()
         )
 
     def _on_citations(self, hits: list) -> None:
-        if not hits:
-            return
-        cit_outer = QWidget()
-        cit_layout = QHBoxLayout(cit_outer)
-        cit_layout.setContentsMargins(0, 0, 0, 0)
-
-        cit_parts: list[str] = []
-        for hit in hits:
-            chunk = hit.chunk
-            parts: list[str] = []
-            if chunk.section_path:
-                parts.append(chunk.section_path)
-            if chunk.page_no:
-                parts.append(f"p.{chunk.page_no}")
-            cit_parts.append("  ".join(parts))
-
-        cit_lbl = QLabel(f"引用：{' | '.join(cit_parts)}")
-        cit_lbl.setStyleSheet(Theme.caption() + "margin-left:4px;")
-        cit_lbl.setWordWrap(True)
-        cit_layout.addWidget(cit_lbl)
-        cit_layout.addStretch()
-
-        self._chat_layout.insertWidget(self._chat_layout.count() - 1, cit_outer)
+        """Citations are retained in graph state but not rendered as a separate UI row."""
+        return
 
     def _on_error(self, msg: str) -> None:
         if self._current_bubble is not None:
-            self._current_bubble.setText(f"错误：{msg}")
+            self._set_bubble_text(self._current_bubble, "assistant", f"错误：{msg}")
         else:
             self._add_message("assistant", f"错误：{msg}")
         if self._session_persisted:
@@ -659,11 +640,17 @@ class QaPage(QWidget):
         outer_layout = QHBoxLayout(outer)
         outer_layout.setContentsMargins(0, 0, 0, 0)
 
-        bubble = QLabel(text)
+        bubble = QLabel()
         bubble.setProperty("qa_role", role)
         bubble.setWordWrap(True)
+        bubble.setOpenExternalLinks(False)
+        bubble.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.LinksAccessibleByMouse
+        )
+        self._set_bubble_text(bubble, role, text)
         self._apply_bubble_style(bubble)
-        bubble.setMaximumWidth(600)
+        bubble.setMaximumWidth(_MESSAGE_MAX_WIDTH)
 
         if is_user:
             outer_layout.addStretch()
@@ -678,6 +665,14 @@ class QaPage(QWidget):
         )
 
         return bubble, outer
+
+    def _set_bubble_text(self, bubble: QLabel, role: str, text: str) -> None:
+        if role == "assistant":
+            bubble.setTextFormat(Qt.TextFormat.RichText)
+            bubble.setText(render_markdown_fragment(text))
+            return
+        bubble.setTextFormat(Qt.TextFormat.PlainText)
+        bubble.setText(text)
 
     def _apply_bubble_style(self, bubble: QLabel) -> None:
         role = bubble.property("qa_role")

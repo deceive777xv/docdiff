@@ -5,6 +5,7 @@ import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QMessageBox
 
 from app.config.settings import AppSettings
@@ -192,12 +193,14 @@ def test_qa_page_loads_existing_session_messages(qtbot, ctx, mem_conn):
     qtbot.addWidget(page)
 
     labels = [
-        label.text()
+        (label.property("qa_role"), label.text())
         for label in page._chat_content.findChildren(QLabel)
         if label.property("qa_role") in ("user", "assistant")
     ]
     assert page._session_combo.currentData() == session_id
-    assert labels == ["第一问", "第一答"]
+    assert labels[0] == ("user", "第一问")
+    assert labels[1][0] == "assistant"
+    assert "第一答" in labels[1][1]
 
 
 def test_qa_page_deletes_selected_session(qtbot, qa_page, monkeypatch):
@@ -241,8 +244,30 @@ def test_add_message_user(qtbot, qa_page):
     assert qa_page._chat_layout.count() == before + 1
 
 
-def test_add_message_assistant_with_citations(qtbot, qa_page):
-    """Assistant message inserts one bubble; _on_citations inserts a second widget."""
+def test_add_message_assistant_renders_markdown(qtbot, qa_page):
+    """Assistant Markdown replies should be rendered as safe rich text."""
+    bubble, _ = qa_page._add_message("assistant", "**重点**\n- 条目")
+
+    assert bubble.textFormat() == Qt.TextFormat.RichText
+    assert "<strong>重点</strong>" in bubble.text()
+    assert "<li>条目</li>" in bubble.text()
+    assert "**" not in bubble.text()
+
+
+def test_streamed_assistant_reply_rerenders_markdown(qtbot, qa_page):
+    """Streaming should keep persisted text raw while updating the visible rich text."""
+    bubble, _ = qa_page._add_message("assistant", "")
+    qa_page._current_bubble = bubble
+
+    qa_page._on_token("**重点**")
+
+    assert qa_page._accumulated == "**重点**"
+    assert "<strong>重点</strong>" in bubble.text()
+    assert "**" not in bubble.text()
+
+
+def test_on_citations_does_not_insert_redundant_source_row(qtbot, qa_page):
+    """Raw retrieval citations are kept out of the chat UI to avoid noisy source rows."""
     before = qa_page._chat_layout.count()
 
     chunk = Chunk(
@@ -255,13 +280,17 @@ def test_add_message_assistant_with_citations(qtbot, qa_page):
     )
     hits = [ChunkHit(chunk=chunk, score=0.9)]
 
-    # _add_message inserts the bubble (1 item)
     qa_page._add_message("assistant", "这是回答")
     assert qa_page._chat_layout.count() == before + 1
 
-    # _on_citations inserts the citation row (1 more item)
     qa_page._on_citations(hits)
-    assert qa_page._chat_layout.count() == before + 2
+    citation_labels = [
+        label
+        for label in qa_page._chat_content.findChildren(QLabel)
+        if label.property("qa_role") == "citation"
+    ]
+    assert qa_page._chat_layout.count() == before + 1
+    assert citation_labels == []
 
 
 def test_theme_change_restyles_existing_reply_bubbles(qtbot, qa_page, monkeypatch):

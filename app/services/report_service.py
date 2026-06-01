@@ -9,6 +9,7 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor
 
+from app.core.markdown_utils import strip_markdown_formatting
 from app.core.types import DiffResult
 
 _RISK_LABELS = {"high": "高风险", "medium": "中风险", "low": "低风险", "none": "无风险"}
@@ -25,6 +26,13 @@ _DIFF_COLORS_HEX: dict[str, str] = {
 
 def _hex_to_rgb(h: str) -> tuple[int, int, int]:
     return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _clean_report_text(text: str, *, limit: int | None = None) -> str:
+    cleaned = strip_markdown_formatting(text)
+    if limit is None:
+        return cleaned
+    return cleaned[:limit]
 
 
 def export_docx(result: DiffResult, output_path: str) -> None:
@@ -57,14 +65,14 @@ def export_docx(result: DiffResult, output_path: str) -> None:
             p = doc.add_paragraph()
             run = p.add_run("基准：")
             run.bold = True
-            p.add_run(item.baseline_text[:400])
+            p.add_run(_clean_report_text(item.baseline_text, limit=400))
         if item.target_text:
             p = doc.add_paragraph()
             run = p.add_run("目标：")
             run.bold = True
-            p.add_run(item.target_text[:400])
+            p.add_run(_clean_report_text(item.target_text, limit=400))
         if item.explanation:
-            p = doc.add_paragraph(f"说明：{item.explanation}")
+            p = doc.add_paragraph(f"说明：{_clean_report_text(item.explanation)}")
             p.runs[0].font.size = Pt(10)
             r, g, b = _hex_to_rgb("6b7280")
             p.runs[0].font.color.rgb = RGBColor(r, g, b)
@@ -85,9 +93,9 @@ def export_html(result: DiffResult, output_path: str) -> None:
         color = _DIFF_COLORS_HEX.get(item.diff_type, "9ca3af")
         risk = _RISK_LABELS.get(item.risk_level, item.risk_level)
         section = html_mod.escape(item.section_path)
-        b_text = html_mod.escape(item.baseline_text[:400]) if item.baseline_text else ""
-        t_text = html_mod.escape(item.target_text[:400]) if item.target_text else ""
-        exp = html_mod.escape(item.explanation) if item.explanation else ""
+        b_text = html_mod.escape(_clean_report_text(item.baseline_text, limit=400)) if item.baseline_text else ""
+        t_text = html_mod.escape(_clean_report_text(item.target_text, limit=400)) if item.target_text else ""
+        exp = html_mod.escape(_clean_report_text(item.explanation)) if item.explanation else ""
 
         baseline_block = (
             f'<div class="baseline"><strong>基准：</strong>{b_text}</div>' if b_text else ""

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QLabel, QWidget
 
 from app.config.settings import AppSettings
 from app.db import compare_repo, document_repo
@@ -75,6 +75,19 @@ def test_render_markdown_fragment_formats_tables_and_escapes_html():
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in rendered
 
 
+def test_render_markdown_fragment_normalizes_literal_breaks_and_emphasis():
+    """Stored Markdown/HTML break markers should not appear as visible syntax."""
+    from app.ui.pages.compare_page import _render_markdown_fragment
+
+    rendered = _render_markdown_fragment("第一行<br>**重点条款**")
+
+    assert "第一行" in rendered
+    assert "<strong>重点条款</strong>" in rendered
+    assert "**" not in rendered
+    assert "&lt;br&gt;" not in rendered
+    assert "<br>" not in rendered
+
+
 def test_strip_markdown_formatting_removes_common_markers():
     """Detail-card summaries should keep content while dropping Markdown syntax noise."""
     from app.ui.pages.compare_page import _strip_markdown_formatting
@@ -84,15 +97,45 @@ def test_strip_markdown_formatting_removes_common_markers():
         "- **付款周期**：`60天`\n"
         "| 项目 | 取值 |\n"
         "| --- | --- |\n"
-        "| 期限 | 60天 |"
+        "| 期限 | 60天 |\n"
+        "备注<br><b>仅展示文字</b>"
     )
 
     assert "合同条款" in stripped
     assert "付款周期：60天" in stripped
     assert "项目 取值" in stripped
+    assert "备注 仅展示文字" in stripped
     assert "| --- | --- |" not in stripped
     assert "**" not in stripped
     assert "`" not in stripped
+    assert "<br>" not in stripped
+    assert "<b>" not in stripped
+
+
+def test_render_changed_inline_strips_markdown_before_marking_tokens():
+    """Changed inline spans should focus on content words, not Markdown markers."""
+    from app.ui.pages.compare_page import _render_changed_inline
+
+    rendered = _render_changed_inline("**付款周期**<br>30天", "**付款周期**<br>60天")
+
+    assert "付款周期" in rendered
+    assert "30天" in rendered
+    assert "diff-token" in rendered
+    assert "**" not in rendered
+    assert "&lt;br&gt;" not in rendered
+
+
+def test_render_inline_markdown_cleans_table_cell_breaks_and_markers():
+    """Inline table-cell rendering should not expose source Markdown markers."""
+    from app.ui.pages.compare_page import _render_inline_markdown
+
+    rendered = _render_inline_markdown("区<br>域 **销售代表**<br>表")
+
+    assert "区域" in rendered
+    assert "<strong>销售代表</strong>" in rendered
+    assert "**" not in rendered
+    assert "&lt;br" not in rendered
+    assert "<br" not in rendered
 
 
 @pytest.fixture()
@@ -300,6 +343,32 @@ def test_diff_card_uses_neutral_surface_with_accent_border(compare_page):
     assert f"background:{compare_page._card_surface_color()}" in card.styleSheet()
     assert "border-left:4px solid" in card.styleSheet()
     assert "HexArgb" not in card.styleSheet()
+
+
+def test_diff_card_strips_markdown_from_section_path(compare_page):
+    """Detail card section labels should be plain readable text."""
+    from app.core.types import DiffItem
+
+    item = DiffItem(
+        diff_id="d-section-md",
+        section_path="**员工考勤摘要 （** **2025 年**3`月） **",
+        diff_type="实质修改",
+        risk_level="high",
+        baseline_text="旧内容",
+        target_text="新内容",
+        similarity_score=0.5,
+        explanation="",
+    )
+
+    card = compare_page._make_diff_card(item)
+    labels = [label.text() for label in card.findChildren(QLabel)]
+    section_labels = [text for text in labels if text.startswith("章节：")]
+
+    assert section_labels
+    assert "员工考勤摘要" in section_labels[0]
+    assert "2025 年3月" in section_labels[0]
+    assert "**" not in section_labels[0]
+    assert "`" not in section_labels[0]
 
 
 def test_theme_change_restyles_visible_diff_cards(compare_page, monkeypatch):
