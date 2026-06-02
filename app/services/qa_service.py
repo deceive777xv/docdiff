@@ -35,23 +35,17 @@ def _resolve_version_ids(
         return current_version_ids
 
     if scope == RetrievalScope.STANDARD_LIB:
-        docs = document_repo.list_documents(conn, source_type="standard")
-        version_ids = []
-        for doc in docs:
-            versions = document_repo.list_versions(conn, doc["id"])
-            if versions:
-                version_ids.append(versions[0]["id"])   # latest version
-        return version_ids
+        return [
+            row["id"]
+            for row in document_repo.list_latest_versions(conn, source_type="standard")
+        ]
 
     if scope == RetrievalScope.ALL:
         ids = list(current_version_ids)
-        docs = document_repo.list_documents(conn, source_type="standard")
-        for doc in docs:
-            versions = document_repo.list_versions(conn, doc["id"])
-            if versions:
-                vid = versions[0]["id"]
-                if vid not in ids:
-                    ids.append(vid)
+        for version in document_repo.list_latest_versions(conn, source_type="standard"):
+            vid = version["id"]
+            if vid not in ids:
+                ids.append(vid)
         return ids
 
     return current_version_ids

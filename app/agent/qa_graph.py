@@ -191,20 +191,19 @@ def resolve_scope(state: QAState, config: RunnableConfig) -> dict:
             return {"_version_ids": ids, "status": "scope_resolved"}
 
         if scope == "standard_lib":
-            docs = document_repo.list_documents(conn, source_type="standard")
-            ids = [document_repo.list_versions(conn, d["id"])[0]["id"]
-                   for d in docs
-                   if document_repo.list_versions(conn, d["id"])]
+            ids = [
+                row["id"]
+                for row in document_repo.list_latest_versions(conn, source_type="standard")
+            ]
             if not ids:
                 return {"error": "标准文档库中没有可检索的文档。", "status": "failed"}
             return {"_version_ids": ids, "status": "scope_resolved"}
 
         # "all"
         ids = list(state.get("current_version_ids") or [])
-        for doc in document_repo.list_documents(conn, source_type="standard"):
-            versions = document_repo.list_versions(conn, doc["id"])
-            if versions and versions[0]["id"] not in ids:
-                ids.append(versions[0]["id"])
+        for version in document_repo.list_latest_versions(conn, source_type="standard"):
+            if version["id"] not in ids:
+                ids.append(version["id"])
         if not ids:
             return {"error": "没有可检索的文档。", "status": "failed"}
         return {"_version_ids": ids, "status": "scope_resolved"}

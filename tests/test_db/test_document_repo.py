@@ -100,6 +100,32 @@ def test_insert_version_and_list(db_conn):
     assert versions[1]["id"] == v1_id
 
 
+def test_list_latest_versions_filters_by_source_type(db_conn):
+    """list_latest_versions returns one latest version per document."""
+    std_doc = _insert_doc(db_conn, doc_name="Standard", file_hash="hash_std")
+    std_v1 = document_repo.insert_version(db_conn, document_id=std_doc, version_no=1)
+    std_v2 = document_repo.insert_version(db_conn, document_id=std_doc, version_no=2)
+    uploaded_doc = _insert_doc(
+        db_conn,
+        doc_name="Uploaded",
+        file_hash="hash_uploaded",
+        source_type="uploaded",
+        file_path="/uploaded.pdf",
+    )
+    uploaded_v3 = document_repo.insert_version(
+        db_conn,
+        document_id=uploaded_doc,
+        version_no=3,
+    )
+
+    standards = document_repo.list_latest_versions(db_conn, source_type="standard")
+    all_latest = document_repo.list_latest_versions(db_conn)
+
+    assert [row["id"] for row in standards] == [std_v2]
+    assert std_v1 not in [row["id"] for row in all_latest]
+    assert {row["id"] for row in all_latest} == {std_v2, uploaded_v3}
+
+
 def test_update_version_status(db_conn):
     """update_version_status changes the status field; get_version_by_id reflects it."""
     doc_id = _insert_doc(db_conn)

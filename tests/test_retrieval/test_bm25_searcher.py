@@ -55,3 +55,36 @@ def test_bm25_search_returns_chunk_index_not_id():
     results = bm25_search(chunks, "付款", top_k=3)
     # index 1 should score higher
     assert results[0][0] == 1
+
+
+def test_bm25_search_reuses_cached_model_for_same_chunks(monkeypatch):
+    """Repeated searches over unchanged chunks should not rebuild BM25Okapi."""
+    from app.core.retrieval import bm25_searcher
+
+    build_count = 0
+
+    class CountingBM25:
+        def __init__(self, tokenized_corpus):
+            nonlocal build_count
+            build_count += 1
+            self.tokenized_corpus = tokenized_corpus
+
+        def get_scores(self, tokenized_query):
+            query = set(tokenized_query)
+            return [
+                float(sum(1 for token in doc if token in query))
+                for doc in self.tokenized_corpus
+            ]
+
+    monkeypatch.setattr(bm25_searcher, "BM25Okapi", CountingBM25)
+    chunks = [
+        _make_chunk(0, "付款周期三十天"),
+        _make_chunk(1, "交付期限六十天"),
+    ]
+
+    first = bm25_searcher.bm25_search(chunks, "付款", top_k=1)
+    second = bm25_searcher.bm25_search(chunks, "交付", top_k=1)
+
+    assert build_count == 1
+    assert first[0][0] == 0
+    assert second[0][0] == 1

@@ -156,6 +156,26 @@ def test_send_question_connects_worker_to_created_thread(qtbot, qa_page):
     assert thread.started_called
 
 
+def test_send_button_disabled_until_stream_finishes(qtbot, qa_page):
+    """A streaming answer in progress should block duplicate sends."""
+    _FakeQThread.instances.clear()
+    _FakeQaWorker.instances.clear()
+    qa_page.ctx.embedder = object()
+    qa_page.ctx.lc_model = object()
+    qa_page._input.setPlainText("什么是安全规范？")
+
+    with patch("app.ui.pages.qa_page.QThread", _FakeQThread):
+        with patch("app.ui.pages.qa_page._QaWorker", _FakeQaWorker):
+            qa_page.send_question()
+
+    worker = _FakeQaWorker.instances[-1]
+    assert not qa_page._send_btn.isEnabled()
+
+    worker.done.emit()
+
+    assert qa_page._send_btn.isEnabled()
+
+
 def test_send_question_creates_persisted_session_and_user_message(qtbot, qa_page):
     """Sending the first question stores a QA session and the user message."""
     from app.db import qa_repo

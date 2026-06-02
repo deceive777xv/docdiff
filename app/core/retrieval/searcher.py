@@ -61,8 +61,13 @@ def search(
         # FAISS branch
         if faiss_store.index_exists(data_dir, vid):
             faiss_hits = faiss_store.search(data_dir, vid, query_vec, top_k)
+            rows_by_faiss_id = chunk_repo.get_chunks_by_faiss_ids(
+                conn,
+                vid,
+                [faiss_id for faiss_id, _dist in faiss_hits],
+            )
             for rank, (faiss_id, _dist) in enumerate(faiss_hits):
-                row = chunk_repo.get_chunk_by_faiss_id(conn, vid, faiss_id)
+                row = rows_by_faiss_id.get(faiss_id)
                 if row:
                     cid = row["id"]
                     ranks.setdefault(cid, {})["faiss"] = rank

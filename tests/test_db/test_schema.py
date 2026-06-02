@@ -62,6 +62,29 @@ def test_wal_mode(tmp_path):
     assert result[0] == "wal"
 
 
+def test_common_query_indexes_created(tmp_path):
+    """Schema creates indexes for high-frequency library, retrieval, and diff queries."""
+    conn = init_db(str(tmp_path))
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    ).fetchall()
+    conn.close()
+
+    index_names = {row["name"] for row in rows}
+    expected = {
+        "idx_documents_source_created",
+        "idx_document_versions_document_version",
+        "idx_chunks_version_chunk_no",
+        "idx_chunks_version_faiss_id",
+        "idx_compare_tasks_created",
+        "idx_compare_tasks_status_created",
+        "idx_diff_items_task_section",
+        "idx_qa_sessions_updated",
+        "idx_qa_messages_session_rowid",
+    }
+    assert expected <= index_names
+
+
 def test_diff_items_accept_none_risk_level(tmp_path):
     """Fresh schemas allow persisted no-risk diff items."""
     conn = init_db(str(tmp_path))

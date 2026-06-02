@@ -429,6 +429,9 @@ class QaPage(QWidget):
             self._loading_session = False
 
     def send_question(self) -> None:
+        if not self._send_btn.isEnabled():
+            return
+
         question = self._input.toPlainText().strip()
         if not question:
             return
@@ -446,6 +449,7 @@ class QaPage(QWidget):
         bubble_label, _ = self._add_message("assistant", "")
         self._current_bubble = bubble_label
         self._accumulated = ""
+        self._send_btn.setEnabled(False)
 
         thread = QThread()
         worker = _QaWorker(
@@ -629,6 +633,7 @@ class QaPage(QWidget):
             self.sessions_changed.emit()
         self._current_bubble = None
         self._accumulated = ""
+        self._send_btn.setEnabled(True)
 
     # ── Message rendering ──────────────────────────────────────────────────────
 

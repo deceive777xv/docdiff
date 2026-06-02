@@ -12,6 +12,15 @@ def _config_path() -> Path:
     return Path(appdata) / "DocDiffAgent" / "config.json"
 
 
+def _safe_data_dest(data_dir: Path, rel: str) -> Path:
+    """Resolve a restored data entry and reject paths outside data_dir."""
+    base = data_dir.resolve()
+    dest = (data_dir / rel).resolve()
+    if dest != base and not dest.is_relative_to(base):
+        raise ValueError(f"Unsafe backup entry: data/{rel}")
+    return dest
+
+
 def backup(data_dir: str, dest_dir: str) -> Path:
     """Create a timestamped zip of data_dir + config.json. Returns the zip path."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -22,7 +31,7 @@ def backup(data_dir: str, dest_dir: str) -> Path:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         if config.exists():
             zf.write(config, "config.json")
-        for rel in ("app.db", "faiss", "parsed"):
+        for rel in ("app.db", "docs", "faiss", "parsed"):
             p = data / rel
             if p.is_file():
                 zf.write(p, f"data/{rel}")
@@ -46,6 +55,6 @@ def restore(zip_path: str, data_dir: str) -> None:
                 config.write_bytes(zf.read(name))
             elif name.startswith("data/") and not name.endswith("/"):
                 rel = name[len("data/"):]
-                dest = data / rel
+                dest = _safe_data_dest(data, rel)
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(zf.read(name))

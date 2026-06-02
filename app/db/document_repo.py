@@ -93,6 +93,36 @@ def list_versions(conn: sqlite3.Connection, document_id: str) -> list[sqlite3.Ro
     ).fetchall()
 
 
+def list_latest_versions(
+    conn: sqlite3.Connection,
+    source_type: str | None = None,
+) -> list[sqlite3.Row]:
+    """Return the latest version row for each document, optionally filtered by source."""
+    params: list[str] = []
+    where = ""
+    if source_type:
+        where = "WHERE d.source_type = ?"
+        params.append(source_type)
+
+    return conn.execute(
+        f"""
+        SELECT v.*
+        FROM document_versions v
+        JOIN documents d ON d.id = v.document_id
+        JOIN (
+            SELECT document_id, MAX(version_no) AS max_version_no
+            FROM document_versions
+            GROUP BY document_id
+        ) latest
+          ON latest.document_id = v.document_id
+         AND latest.max_version_no = v.version_no
+        {where}
+        ORDER BY d.created_at DESC
+        """,
+        params,
+    ).fetchall()
+
+
 def update_version_status(conn: sqlite3.Connection, version_id: str, status: str) -> None:
     conn.execute(
         "UPDATE document_versions SET status = ? WHERE id = ?", (status, version_id)

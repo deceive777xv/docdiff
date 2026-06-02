@@ -37,6 +37,7 @@ _CLASSIFY_PROMPT = """你是一个专业的文档差异分析助手。请分析�
 """
 
 _VALID_RISK_LEVELS = {"high", "medium", "low", "none"}
+_RISK_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 _RISK_ALIASES = {
     "高风险": "high",
     "high": "high",
@@ -50,6 +51,11 @@ _RISK_ALIASES = {
     "no_risk": "none",
     "norisk": "none",
 }
+
+_NUMBER_RE = re.compile(r'\d+[\.,]?\d*')
+_NEGATION_RE = re.compile(r'[不无未没]')
+_OBLIGATION_RE = re.compile(r'(?:必须|不得|禁止|应|须)')
+_CRITICAL_OBLIGATION_RE = re.compile(r'(?:必须|不得|禁止)')
 
 
 def _normalize_risk_level(value: str | None) -> str:
@@ -69,12 +75,12 @@ def _rule_classify(baseline: str, target: str, similarity: float = 1.0) -> tuple
     if similarity < 0.3:
         return "重写", "high", "文本结构大幅调整"
 
-    numbers_b = set(re.findall(r'\d+[\.,]?\d*', baseline))
-    numbers_t = set(re.findall(r'\d+[\.,]?\d*', target))
-    neg_b = set(re.findall(r'[不无未没]', baseline))
-    neg_t = set(re.findall(r'[不无未没]', target))
-    oblig_b = set(re.findall(r'(?:应|须|必须|不得|禁止)', baseline))
-    oblig_t = set(re.findall(r'(?:应|须|必须|不得|禁止)', target))
+    numbers_b = set(_NUMBER_RE.findall(baseline))
+    numbers_t = set(_NUMBER_RE.findall(target))
+    neg_b = set(_NEGATION_RE.findall(baseline))
+    neg_t = set(_NEGATION_RE.findall(target))
+    oblig_b = set(_OBLIGATION_RE.findall(baseline))
+    oblig_t = set(_OBLIGATION_RE.findall(target))
 
     if numbers_b != numbers_t or neg_b != neg_t or oblig_b != oblig_t:
         return "实质修改", "high", "关键数值或义务条款发生变化"
@@ -82,6 +88,31 @@ def _rule_classify(baseline: str, target: str, similarity: float = 1.0) -> tuple
     if similarity < 0.75:
         return "微调", "medium", "措辞有所调整"
     return "微调", "low", "措辞有所调整"
+
+
+def _critical_rule_risk(baseline: str, target: str) -> str | None:
+    """Return high only for concrete legal/business triggers, not low similarity."""
+    numbers_b = set(_NUMBER_RE.findall(baseline))
+    numbers_t = set(_NUMBER_RE.findall(target))
+    neg_b = set(_NEGATION_RE.findall(baseline))
+    neg_t = set(_NEGATION_RE.findall(target))
+    oblig_b = set(_CRITICAL_OBLIGATION_RE.findall(baseline))
+    oblig_t = set(_CRITICAL_OBLIGATION_RE.findall(target))
+
+    if numbers_b != numbers_t or neg_b != neg_t or oblig_b != oblig_t:
+        return "high"
+    return None
+
+
+def _single_sided_risk(text: str) -> str:
+    """Risk for added/deleted text where only one side exists."""
+    return "high" if _critical_rule_risk("", text) == "high" else "medium"
+
+
+def _max_risk(current: str, candidate: str | None) -> str:
+    if candidate is None:
+        return current
+    return candidate if _RISK_RANK[candidate] > _RISK_RANK.get(current, 2) else current
 
 
 def _llm_classify(
@@ -129,7 +160,7 @@ def classify(
                 diff_id=str(uuid.uuid4()),
                 section_path=pp.section_path,
                 diff_type="新增",
-                risk_level="medium",
+                risk_level=_single_sided_risk(pp.target_para.text),
                 baseline_text="",
                 target_text=pp.target_para.text,
                 similarity_score=0.0,
@@ -140,7 +171,7 @@ def classify(
                 diff_id=str(uuid.uuid4()),
                 section_path=pp.section_path,
                 diff_type="删减",
-                risk_level="medium",
+                risk_level=_single_sided_risk(pp.baseline_para.text),
                 baseline_text=pp.baseline_para.text,
                 target_text="",
                 similarity_score=0.0,
@@ -149,7 +180,6 @@ def classify(
         elif pp.baseline_para is not None and pp.target_para is not None:
             if pp.split_unit and _same_text_ignoring_whitespace(pp.baseline_para.text, pp.target_para.text):
                 continue
-            used_llm = policy.use_llm_classify and provider is not None
             if policy.use_llm_classify and provider is not None:
                 diff_type, risk_level, explanation = _llm_classify(
                     pp.baseline_para.text, pp.target_para.text, provider, pp.similarity
@@ -158,12 +188,11 @@ def classify(
                 diff_type, risk_level, explanation = _rule_classify(
                     pp.baseline_para.text, pp.target_para.text, pp.similarity
                 )
-            if policy.rule_strengthen and not used_llm:
-                _, rule_risk, _ = _rule_classify(
-                    pp.baseline_para.text, pp.target_para.text, pp.similarity
+            if policy.rule_strengthen:
+                rule_risk = _critical_rule_risk(
+                    pp.baseline_para.text, pp.target_para.text
                 )
-                if rule_risk == "high" and risk_level != "high":
-                    risk_level = "high"
+                risk_level = _max_risk(risk_level, rule_risk)
             items.append(DiffItem(
                 diff_id=str(uuid.uuid4()),
                 section_path=pp.section_path,

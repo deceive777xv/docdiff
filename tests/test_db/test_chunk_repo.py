@@ -100,3 +100,24 @@ def test_get_chunk_by_faiss_id(db_conn):
     # Non-existent faiss id should return None
     missing = chunk_repo.get_chunk_by_faiss_id(db_conn, version_id, 42)
     assert missing is None
+
+
+def test_get_chunks_by_faiss_ids_returns_mapping(db_conn):
+    """Bulk FAISS lookup returns rows keyed by faiss_index_id."""
+    version_id = _make_version(db_conn)
+    chunks = _make_chunks(version_id, count=3)
+    chunk_repo.insert_chunks(db_conn, chunks)
+    chunk_repo.update_faiss_ids(
+        db_conn,
+        {
+            chunks[0].id: 100,
+            chunks[1].id: 101,
+            chunks[2].id: 102,
+        },
+    )
+
+    rows = chunk_repo.get_chunks_by_faiss_ids(db_conn, version_id, [102, 100, 404])
+
+    assert set(rows) == {100, 102}
+    assert rows[100]["id"] == chunks[0].id
+    assert rows[102]["id"] == chunks[2].id

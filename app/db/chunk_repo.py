@@ -44,3 +44,21 @@ def get_chunk_by_faiss_id(
         "SELECT * FROM chunks WHERE version_id = ? AND faiss_index_id = ?",
         (version_id, faiss_index_id),
     ).fetchone()
+
+
+def get_chunks_by_faiss_ids(
+    conn: sqlite3.Connection,
+    version_id: str,
+    faiss_index_ids: list[int],
+) -> dict[int, sqlite3.Row]:
+    """Fetch chunks for multiple FAISS row ids in one query."""
+    ids = sorted({int(fid) for fid in faiss_index_ids})
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    rows = conn.execute(
+        f"""SELECT * FROM chunks
+            WHERE version_id = ? AND faiss_index_id IN ({placeholders})""",
+        [version_id, *ids],
+    ).fetchall()
+    return {int(row["faiss_index_id"]): row for row in rows}

@@ -41,6 +41,26 @@ def test_classifies_addition():
     assert result.items[0].target_text == t_para.text
 
 
+def test_addition_with_critical_terms_is_high_risk():
+    """Added obligations with numbers should be promoted above the default risk."""
+    from app.core.diff.diff_classifier import classify
+
+    t_para = make_para("新增条款：乙方必须在5日内支付违约金100万元。")
+    pp = ParagraphPair(baseline_para=None, target_para=t_para, similarity=0.0)
+
+    result = classify(
+        para_pairs=[pp],
+        policy=_NO_LLM_POLICY,
+        provider=None,  # type: ignore[arg-type]
+        task_id="t-add-risk",
+        baseline_version_id="b1",
+        target_version_id="v1",
+    )
+
+    assert result.items[0].diff_type == "新增"
+    assert result.items[0].risk_level == "high"
+
+
 def test_classifies_deletion():
     """ParagraphPair(baseline_para, None, 0.0) → DiffItem with diff_type='删减'."""
     from app.core.diff.diff_classifier import classify
@@ -225,6 +245,36 @@ def test_llm_low_risk_is_not_strengthened_to_high_by_low_similarity():
     )
 
     assert result.items[0].risk_level == "low"
+
+
+def test_llm_low_risk_is_strengthened_when_rules_detect_critical_change():
+    """Rules still catch concrete numeric or obligation changes after LLM classification."""
+    from app.core.diff.diff_classifier import classify
+
+    provider = type(
+        "Provider",
+        (),
+        {
+            "chat": lambda self, messages: (
+                '{"diff_type": "微调", "risk_level": "low", '
+                '"explanation": "措辞轻微调整"}'
+            )
+        },
+    )()
+    b_para = make_para("甲方应在30日内完成付款。")
+    t_para = make_para("甲方应在60日内完成付款。")
+    pp = ParagraphPair(baseline_para=b_para, target_para=t_para, similarity=0.92)
+
+    result = classify(
+        para_pairs=[pp],
+        policy=ComparePolicy(use_llm_classify=True, rule_strengthen=True),
+        provider=provider,  # type: ignore[arg-type]
+        task_id="t5",
+        baseline_version_id="b5",
+        target_version_id="v5",
+    )
+
+    assert result.items[0].risk_level == "high"
 
 
 def test_llm_chinese_risk_label_is_normalized_to_none():

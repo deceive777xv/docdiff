@@ -118,6 +118,33 @@ CREATE TABLE IF NOT EXISTS qa_checkpoint_blobs (
     value_blob       BLOB NOT NULL,
     PRIMARY KEY (thread_id, checkpoint_ns, channel, version)
 );
+
+CREATE INDEX IF NOT EXISTS idx_documents_source_created
+ON documents(source_type, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_document_versions_document_version
+ON document_versions(document_id, version_no DESC);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_version_chunk_no
+ON chunks(version_id, chunk_no);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_version_faiss_id
+ON chunks(version_id, faiss_index_id);
+
+CREATE INDEX IF NOT EXISTS idx_compare_tasks_created
+ON compare_tasks(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_compare_tasks_status_created
+ON compare_tasks(status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_diff_items_task_section
+ON diff_items(compare_task_id, section_path);
+
+CREATE INDEX IF NOT EXISTS idx_qa_sessions_updated
+ON qa_sessions(updated_at DESC, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_qa_messages_session_rowid
+ON qa_messages(session_id, created_at);
 """
 
 _DIFF_ITEM_COLUMNS = """
