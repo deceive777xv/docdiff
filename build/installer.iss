@@ -6,7 +6,7 @@
 ;   2. iscc build/installer.iss
 
 #define AppName      "Doc-Diff-Agent"
-#define AppVersion   "1.0.0"
+#define AppVersion   "1.0.1"
 #define AppPublisher "DocDiffAgent"
 #define AppURL       "https://github.com/deceive777xv/doc-diff-agent"
 #define AppExeName   "DocDiffAgent.exe"
