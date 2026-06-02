@@ -205,7 +205,10 @@ def strip_markdown_formatting(markdown_text: str) -> str:
     cleaned_lines: list[str] = []
     in_code_block = False
 
-    for raw_line in normalize_markdown_breaks(markdown_text).splitlines():
+    text = html.unescape(markdown_text or "")
+    text = normalized.replace("\r\n", "\n").replace("\r", "\n")
+
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         if line.startswith("```"):
             in_code_block = not in_code_block
