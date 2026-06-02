@@ -2,7 +2,7 @@
 
 本文档面向开发、维护、部署和二次扩展人员，说明 Doc Diff Agent 的整体架构、核心数据结构、业务链路、存储模型、模型接入、测试与打包方式。
 
-更新日期：2026-05-31
+更新日期：2026-06-02
 
 ## 1. 项目定位
 
@@ -12,8 +12,8 @@ Doc Diff Agent 是一个面向 Windows 桌面的文档版本管理、语义比�
 - 文档结构化为统一的 `DocumentIR`，并构建检索 chunk 与 FAISS 索引。
 - 两个文档版本之间的章节对齐、段落/句子/表格行级语义匹配、LLM 差异分类。
 - 差异结果持久化、风险等级判断、HTML/DOCX 报告导出。
-- 基于 BM25 + FAISS 的混合检索问答，支持本地 SQLite 会话记忆。
-- 首页任务管理、任务恢复、删除任务、QA 会话管理、备份恢复和更新检查。
+- 基于 BM25 + FAISS 的混合检索问答，支持本地 SQLite 会话记忆，并兼容无页码文档的段落引用。
+- 首页任务管理、任务恢复、删除任务、QA 会话管理、包含原始文档副本的备份恢复和更新检查。
 
 ## 2. 技术栈
 
@@ -29,7 +29,7 @@ Doc Diff Agent 是一个面向 Windows 桌面的文档版本管理、语义比�
 | 流式问答 | LangChain ChatOpenAI streaming | QA 页面逐 token 输出 |
 | 报告导出 | python-docx / HTML | 导出 DOCX 和独立 HTML |
 | 打包 | PyInstaller onedir + Inno Setup | 生成 Windows 离线安装器 |
-| 测试 | pytest / pytest-qt | 当前全量测试 230 个通过 |
+| 测试 | pytest / pytest-qt | 当前全量测试 254 个通过 |
 
 ## 3. 目录结构
 
@@ -134,6 +134,7 @@ DocumentIR
 - `chunk_no` 保持原始顺序。
 - `section_path` 用于引用章节。
 - `text` 是检索文本。
+- `page_no` 是可选页码，缺省或不可用时为 `0`。
 - `faiss_index_id` 映射到 FAISS 索引中的向量行号。
 
 ### 6.3 DiffResult / DiffItem
@@ -154,7 +155,7 @@ DocumentIR
 - `low`：低风险
 - `none`：无风险
 
-风险判断优先参考 LLM 对语义影响的判断；规则逻辑用于 fallback 或增强关键数值、否定词、义务词等风险。
+风险判断优先参考 LLM 对语义影响的判断；规则逻辑用于 fallback 或增强关键数值、否定词、义务词等明确触发项。新增、删减这类单侧文本也会根据硬触发词提升风险，避免重要义务或禁止条款被低估。
 
 ## 7. 数据库设计
 
@@ -179,6 +180,20 @@ DocumentIR
 | `qa_checkpoint_blobs` | checkpoint channel blob |
 
 `diff_items.risk_level` 的 CHECK 约束支持 `high / medium / low / none`。代码包含旧库迁移逻辑，会重建缺少 `none` 的 legacy `diff_items` 表。
+
+为了降低首页统计、文档库列表、检索、任务恢复和会话列表的查询成本，schema 初始化时会确保以下索引存在：
+
+| 索引 | 主要用途 |
+| --- | --- |
+| `idx_documents_source_created` | 按来源类型和创建时间列出文档 |
+| `idx_document_versions_document_version` | 查询同一文档的最新版本 |
+| `idx_chunks_version_chunk_no` | 按原始顺序加载版本 chunk |
+| `idx_chunks_version_faiss_id` | 将 FAISS 行号批量映射回 chunk |
+| `idx_compare_tasks_created` | 首页最近任务排序 |
+| `idx_compare_tasks_status_created` | 按状态恢复或统计任务 |
+| `idx_diff_items_task_section` | 加载对比任务差异和章节定位 |
+| `idx_qa_sessions_updated` | QA 历史会话按更新时间排序 |
+| `idx_qa_messages_session_rowid` | 按写入顺序加载会话消息 |
 
 ## 8. 文件存储结构
 
@@ -301,6 +316,8 @@ DOCX、PPTX、XLSX、HTML、CSV、EPUB、TXT 等由 `MarkItDown` 转 Markdown。
 1. embedder 对所有 chunk 文本批量生成 embedding。
 2. `faiss_store.build_and_save()` 保存 `index.faiss`。
 3. `chunk_repo.update_faiss_ids()` 将 FAISS 行号回写到 `chunks.faiss_index_id`。
+
+当前 chunk 的 `page_no` 字段允许为空或为 `0`。QA 引用不会假设所有解析器都能产出页码：有有效页码时显示页码；没有页码时使用 `chunk_no + 1` 显示段落序号。
 
 ## 12. 文档比对链路
 
@@ -438,6 +455,15 @@ score = 1 / (RRF_K + faiss_rank) + 1 / (RRF_K + bm25_rank)
 
 默认 `RRF_K = 60`，默认返回 `top_k=5`。
 
+性能相关实现：
+
+- FAISS 命中会通过 `chunk_repo.get_chunks_by_faiss_ids()` 批量映射回 chunk，避免逐条查询。
+- 文档库范围通过 `document_repo.list_latest_versions()` 一次取出各文档最新版本，避免重复扫描版本表。
+- `app/db/faiss_store.py` 维护最多 2 个 FAISS 索引的 LRU 缓存，并用 `index.faiss` 的 `mtime_ns` 自动失效；重新构建索引时会清理旧缓存。
+- `app/core/retrieval/bm25_searcher.py` 维护最多 8 个 BM25 语料缓存；当单个版本 chunk 数超过 2000 时跳过缓存，避免在低内存机器上长期占用大量内存。
+
+这些缓存都保持较小上限，目标是减少重复加载和重复建模，同时兼容性能较差或内存较小的运行环境。
+
 ### 14.3 对比任务 QA 上下文
 
 当范围是“对比文档”且存在 `compare_task_id` 时：
@@ -468,6 +494,16 @@ qa_history_message_char_limit
 ```
 
 当前实现使用字符数近似 token 预算，优点是无需额外 tokenizer 依赖；缺点是不能精确匹配不同模型的 token 规则。
+
+### 14.5 检索引用位置
+
+QA prompt 中的检索片段由 `app/core/retrieval/context_format.py` 统一格式化：
+
+- 有章节时显示 `章节：...`。
+- `page_no > 0` 时显示 `第 N 页`。
+- 没有页码、页码为 `0` 或解析器未提供页码时，显示 `段落：第 N 段`。
+
+这避免了无页码文档在回答中出现“第 0 页”或空引用。LangGraph QA 工作流和 `qa_service.answer()` 使用同一套格式化函数，保证 UI 流式问答和 service 问答行为一致。
 
 ## 15. QA 会话记忆
 
@@ -593,6 +629,7 @@ API Key 使用 `cryptography.fernet.Fernet` 加密。密钥由机器标识派生
 - 根据范围显示不同的文档或对比任务选择器。
 - 流式输出。
 - 引用检索片段。
+- 回答生成中禁用发送按钮，避免重复提交同一问题。
 - 历史会话列表、加载、删除、新建会话。
 
 ### 17.6 SettingsDialog
@@ -641,14 +678,14 @@ HTML 报告是独立文件，包含内联 CSS 和 escaped 文本，避免用户�
 
 - `config.json`
 - `data/app.db`
+- `data/docs/`
 - `data/faiss/`
 - `data/parsed/`
 
-恢复时会覆盖对应文件。
+恢复时会覆盖对应文件。恢复逻辑会校验 ZIP 内路径，只允许写入配置文件和数据目录下的预期内容，避免带有 `..` 的路径穿越条目写出目标目录。
 
 注意：
 
-- 当前备份不包含 `docs/` 原始文档副本。
 - 如果备份迁移到另一台机器，API Key 可能因机器密钥不同而无法解密。
 
 ## 21. 更新检查
@@ -722,7 +759,7 @@ $env:TMP = $tmp
 最近一次验证结果：
 
 ```text
-230 passed
+254 passed, 3 warnings
 ```
 
 ## 24. 主要扩展点
@@ -771,7 +808,8 @@ $env:TMP = $tmp
 - SQLite connection 使用 `check_same_thread=False`，应避免长事务。
 - QA 本地记忆不支持多设备同步。
 - 配置文件中的 API Key 依赖机器派生密钥，不适合直接跨机器复制。
-- 备份恢复当前不包含原始 `docs/` 文件副本。
+- QA 引用页码依赖解析器输出；无页码或页码不可用时会显示段落位置。
+- BM25 与 FAISS 缓存上限偏保守，优先保证低性能环境的内存稳定性。
 - 对比风险等级依赖 LLM 输出质量；规则 fallback 只覆盖数字、否定词、义务词等明确模式。
 - QA 上下文预算当前按字符裁剪，不是严格 token 裁剪。
 
@@ -783,7 +821,7 @@ $env:TMP = $tmp
 | --- | --- |
 | 文档解析 | `tests/test_parser/`, `tests/test_services/test_ingest_service.py` |
 | 文档比对 | `tests/test_diff/`, `tests/test_agent/test_compare_graph.py` |
-| 检索问答 | `tests/test_retrieval/`, `tests/test_agent/test_qa_graph.py`, `tests/test_agent/test_qa_stream.py` |
+| 检索问答 | `tests/test_retrieval/`, `tests/test_db/test_faiss_store.py`, `tests/test_agent/test_qa_graph.py`, `tests/test_services/test_qa_service.py`, `tests/test_agent/test_qa_stream.py` |
 | QA 会话 | `tests/test_db/test_qa_repo.py`, `tests/test_agent/test_sqlite_checkpointer.py`, `tests/ui/test_qa_page.py` |
 | UI 样式和主题 | `tests/ui/`, `tests/test_ui/test_theme.py` |
 | 打包 | 手动执行 PyInstaller + Inno Setup，并检查 `dist/` 产物 |

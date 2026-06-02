@@ -9,12 +9,12 @@ Doc Diff Agent 是一个面向 Windows 桌面场景的文档比对与问答工�
 - **文档入库与版本管理**：支持导入 PDF、DOCX、PPTX、XLSX、HTML、CSV、EPUB 等多种格式，自动计算文件哈希避免重复导入，支持同一文档下新增版本，并在文档库展示最新版本与总版本数。
 - **语义级文档比对**：章节对齐 → 段落/句子/表格行语义匹配 → LLM 分类，差异类型涵盖新增、删减、微调、实质修改、重写、格式变化。
 - **差异定位与风险判断**：对比页双栏保留完整文档，可从章节或差异卡片定位到对应行与变化词；风险等级支持高/中/低/无风险，并结合 LLM 的语义一致性判断。
-- **混合检索问答（RAG）**：BM25 词法检索与 FAISS 向量检索并行，通过 Reciprocal Rank Fusion（RRF）融合排序，支持当前文档、对比任务、文档库、全部四种检索范围。
-- **流式问答与本地会话记忆**：基于 LangGraph `astream_events` 实现逐 Token 流式输出，使用 SQLite-backed checkpointer 持久化上下文记忆，支持历史会话加载、切换与删除。
+- **混合检索问答（RAG）**：BM25 词法检索与 FAISS 向量检索并行，通过 Reciprocal Rank Fusion（RRF）融合排序，支持当前文档、对比任务、文档库、全部四种检索范围；引用优先显示页码，无页码时回退到段落位置。
+- **流式问答与本地会话记忆**：基于 LangGraph `astream_events` 实现逐 Token 流式输出，使用 SQLite-backed checkpointer 持久化上下文记忆，支持历史会话加载、切换与删除，并在回答生成中避免重复提交。
 - **首页任务管理**：最近对比任务可直接打开报告、恢复意外中断的任务、查看差异统计结果，并支持删除任务记录。
 - **差异报告导出**：支持导出 HTML 与 DOCX 对比报告，包含差异统计、风险等级、相似度和详细内容。
 - **模型接入**：OpenAI 兼容接口（聊天 + Embedding），可选本地 sentence-transformers Embedding；Azure Provider 接口已预留。
-- **数据备份恢复**：一键备份数据库、向量索引和配置文件为 ZIP；支持从备份还原。
+- **数据备份恢复**：一键备份数据库、原始文档副本、解析缓存、向量索引和配置文件为 ZIP；支持从备份还原。
 - **应用内更新检查**：从 GitHub Release 获取最新版本号，在设置页提示可用更新。
 
 ## 技术栈
@@ -85,6 +85,8 @@ data/
 | 文档库 | 仅在已入库的文档中检索 |
 | 全部 | 当前文档 + 文档库 |
 
+检索引用会优先使用“章节 + 页码”；当解析结果没有页码或页码不可用时，自动显示“章节 + 段落序号”，避免出现无效的第 0 页引用。
+
 ## 文档处理说明
 
 文档解析采用 `pymupdf4llm + markitdown` 的组合方案：PDF 优先由 [pymupdf4llm](https://github.com/pymupdf/RAG) 转换为 Markdown，DOCX、PPTX、XLSX、HTML、CSV、EPUB、TXT 等格式由 [markitdown](https://github.com/microsoft/markitdown) 转换为 Markdown。两条解析路径随后统一转换为内部 DocumentIR 结构，保留章节、段落、句子与 Markdown 表格行，供检索、比对和报告生成复用。
@@ -118,7 +120,7 @@ app/
   ui/         桌面界面（主窗口 + 5 个页面）
 assets/       模板、字体、图标
 build/        PyInstaller spec + Inno Setup 脚本
-tests/        自动化测试（228 个用例）
+tests/        自动化测试（254 个用例）
 ```
 
 ## 打包
@@ -141,5 +143,5 @@ iscc build/installer.iss
 
 - 修改解析链路后，优先运行 `tests/test_parser/` 与 `tests/test_services/`。
 - 修改比对逻辑后，优先运行 `tests/test_diff/` 与 `tests/test_agent/`。
-- 修改检索逻辑后，优先运行 `tests/test_retrieval/`。
+- 修改检索逻辑后，优先运行 `tests/test_retrieval/`、`tests/test_agent/test_qa_graph.py` 与 `tests/test_services/test_qa_service.py`。
 - 接入本地 Embedding 时，确保模型目录可被 sentence-transformers 正确加载。
