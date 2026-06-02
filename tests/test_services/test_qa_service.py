@@ -119,3 +119,40 @@ def test_answer_standard_lib_scope(tmp_path, docx_file, db_conn):
 
     assert isinstance(answer_text, str)
     assert len(hits) > 0
+
+
+def test_answer_prompt_uses_paragraph_position_when_page_missing(tmp_path, db_conn, monkeypatch):
+    """QA service prompts should cite paragraph position when chunks have no page."""
+    from app.core.types import Chunk, ChunkHit, RetrievalScope
+    from app.services import qa_service
+
+    hit = ChunkHit(
+        chunk=Chunk(
+            id="c-no-page",
+            version_id="v1",
+            chunk_no=4,
+            section_path="付款条款",
+            page_no=0,
+            text="付款周期为30天。",
+        ),
+        score=0.9,
+    )
+    monkeypatch.setattr(qa_service, "search", lambda *args, **kwargs: [hit])
+    mock_provider = MagicMock()
+    mock_provider.chat.return_value = "付款周期为30天。"
+
+    answer_text, hits = qa_service.answer(
+        conn=db_conn,
+        data_dir=str(tmp_path),
+        question="付款周期是多少？",
+        provider=mock_provider,
+        embedder=MagicMock(),
+        scope=RetrievalScope.CURRENT_DOC,
+        current_version_ids=["v1"],
+    )
+
+    prompt = mock_provider.chat.call_args.args[0][0]["content"]
+    assert answer_text == "付款周期为30天。"
+    assert hits == [hit]
+    assert "段落：第5段" in prompt
+    assert "第0页" not in prompt

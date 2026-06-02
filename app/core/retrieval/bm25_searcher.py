@@ -7,7 +7,8 @@ from rank_bm25 import BM25Okapi
 
 from app.core.types import Chunk
 
-_CACHE_MAX_SIZE = 32
+_CACHE_MAX_SIZE = 8
+_CACHE_MAX_CHUNKS = 2000
 _BM25_CACHE: OrderedDict[tuple[tuple[str, str], ...], BM25Okapi] = OrderedDict()
 
 
@@ -16,6 +17,10 @@ def _cache_key(chunks: list[Chunk]) -> tuple[tuple[str, str], ...]:
 
 
 def _get_bm25(chunks: list[Chunk]) -> BM25Okapi:
+    if len(chunks) > _CACHE_MAX_CHUNKS:
+        tokenized_corpus = [list(c.text.replace(" ", "")) for c in chunks]
+        return BM25Okapi(tokenized_corpus)
+
     key = _cache_key(chunks)
     cached = _BM25_CACHE.get(key)
     if cached is not None:

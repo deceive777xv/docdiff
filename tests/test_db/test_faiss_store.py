@@ -85,3 +85,25 @@ def test_load_and_search_after_reload(tmp_path):
     ]
 
     assert results_direct == results_reloaded
+
+
+def test_search_reuses_cached_index_for_repeated_reads(tmp_path, monkeypatch):
+    """Repeated searches against the same unchanged index should avoid disk reloads."""
+    from app.db import faiss_store
+
+    build_and_save(str(tmp_path), VERSION_ID, _EMBEDDINGS.copy())
+    faiss_store.clear_index_cache()
+    original_read_index = faiss_store.faiss.read_index
+    read_count = 0
+
+    def counting_read_index(path):
+        nonlocal read_count
+        read_count += 1
+        return original_read_index(path)
+
+    monkeypatch.setattr(faiss_store.faiss, "read_index", counting_read_index)
+
+    search(str(tmp_path), VERSION_ID, _EMBEDDINGS[0], top_k=1)
+    search(str(tmp_path), VERSION_ID, _EMBEDDINGS[1], top_k=1)
+
+    assert read_count == 1

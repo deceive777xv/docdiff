@@ -10,6 +10,7 @@ from langgraph.graph import END, StateGraph
 
 from app.agent.sqlite_checkpointer import SQLiteCheckpointSaver
 from app.agent.states import QAState
+from app.core.retrieval.context_format import format_hits_context
 from app.core.retrieval.searcher import search
 from app.db import compare_repo, document_repo
 
@@ -33,7 +34,7 @@ _QA_SYSTEM_PROMPT = """你是一个专业的文档问答助手。请根据以下
 回答要求：
 1. 只根据参考资料中的内容回答，不要编造信息
 2. 如果参考资料中找不到答案，请明确说明"文档中未找到相关内容"
-3. 引用具体章节或页码（如资料中有）
+3. 引用具体章节、页码或段落位置（如资料中有）
 4. 回答简洁、准确
 """
 
@@ -46,17 +47,7 @@ def _route(state: QAState) -> str:
 
 
 def _format_context(hits: list) -> str:
-    parts = []
-    for i, hit in enumerate(hits, 1):
-        chunk = hit.chunk
-        ref = f"[{i}] "
-        if chunk.section_path:
-            ref += f"章节：{chunk.section_path}，"
-        if chunk.page_no:
-            ref += f"第{chunk.page_no}页，"
-        ref += f"内容：{chunk.text}"
-        parts.append(ref)
-    return "\n\n".join(parts)
+    return format_hits_context(hits)
 
 
 def _clip_text(text: str, limit: int = 300) -> str:

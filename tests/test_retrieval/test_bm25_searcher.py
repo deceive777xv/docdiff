@@ -88,3 +88,31 @@ def test_bm25_search_reuses_cached_model_for_same_chunks(monkeypatch):
     assert build_count == 1
     assert first[0][0] == 0
     assert second[0][0] == 1
+
+
+def test_bm25_search_skips_cache_for_large_corpora(monkeypatch):
+    """Large corpora should not be kept in memory on low-resource machines."""
+    from app.core.retrieval import bm25_searcher
+
+    build_count = 0
+
+    class CountingBM25:
+        def __init__(self, tokenized_corpus):
+            nonlocal build_count
+            build_count += 1
+            self.tokenized_corpus = tokenized_corpus
+
+        def get_scores(self, tokenized_query):
+            return [0.0 for _doc in self.tokenized_corpus]
+
+    monkeypatch.setattr(bm25_searcher, "BM25Okapi", CountingBM25)
+    monkeypatch.setattr(bm25_searcher, "_CACHE_MAX_CHUNKS", 1)
+    chunks = [
+        _make_chunk(0, "付款周期三十天"),
+        _make_chunk(1, "交付期限六十天"),
+    ]
+
+    bm25_searcher.bm25_search(chunks, "付款", top_k=1)
+    bm25_searcher.bm25_search(chunks, "交付", top_k=1)
+
+    assert build_count == 2

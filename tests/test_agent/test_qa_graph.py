@@ -162,6 +162,51 @@ def test_retrieve_chunks_adds_compare_result_context():
     conn.close()
 
 
+def test_format_context_uses_paragraph_position_when_page_missing():
+    """Context references should remain useful for parsed docs without page numbers."""
+    from app.agent.qa_graph import _format_context
+
+    hit = ChunkHit(
+        chunk=Chunk(
+            id="c-no-page",
+            version_id="v1",
+            chunk_no=3,
+            section_path="付款条款",
+            page_no=0,
+            text="付款周期为30天。",
+        ),
+        score=0.9,
+    )
+
+    context = _format_context([hit])
+
+    assert "章节：付款条款" in context
+    assert "段落：第4段" in context
+    assert "第0页" not in context
+
+
+def test_format_context_prefers_page_when_available():
+    """When page numbers exist, keep using pages instead of paragraph fallback."""
+    from app.agent.qa_graph import _format_context
+
+    hit = ChunkHit(
+        chunk=Chunk(
+            id="c-page",
+            version_id="v1",
+            chunk_no=3,
+            section_path="付款条款",
+            page_no=8,
+            text="付款周期为30天。",
+        ),
+        score=0.9,
+    )
+
+    context = _format_context([hit])
+
+    assert "第8页" in context
+    assert "段落：第4段" not in context
+
+
 # ── Full graph integration tests ───────────────────────────────────────────────
 
 def test_graph_happy_path():

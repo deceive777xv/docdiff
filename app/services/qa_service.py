@@ -4,6 +4,7 @@ import logging
 import sqlite3
 
 from app.core.model.base_provider import BaseProvider
+from app.core.retrieval.context_format import format_hits_context
 from app.core.retrieval.searcher import search
 from app.core.types import ChunkHit, RetrievalScope
 from app.db import document_repo
@@ -20,7 +21,7 @@ _QA_PROMPT = """你是一个专业的文档问答助手。请根据以下参考�
 回答要求：
 1. 只根据参考资料中的内容回答，不要编造信息
 2. 如果参考资料中找不到答案，请明确说明"文档中未找到相关内容"
-3. 引用具体章节或页码（如资料中有）
+3. 引用具体章节、页码或段落位置（如资料中有）
 4. 回答简洁、准确
 """
 
@@ -78,18 +79,7 @@ def answer(
     if not hits:
         return "文档中未找到与问题相关的内容。", []
 
-    context_parts = []
-    for i, hit in enumerate(hits, 1):
-        chunk = hit.chunk
-        ref = f"[{i}] "
-        if chunk.section_path:
-            ref += f"章节：{chunk.section_path}，"
-        if chunk.page_no:
-            ref += f"第{chunk.page_no}页，"
-        ref += f"内容：{chunk.text}"
-        context_parts.append(ref)
-
-    context = "\n\n".join(context_parts)
+    context = format_hits_context(hits)
     prompt = _QA_PROMPT.format(context=context, question=question)
 
     answer_text = provider.chat([{"role": "user", "content": prompt}])
