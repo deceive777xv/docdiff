@@ -719,7 +719,7 @@ dist/DocDiffAgent/
 Inno Setup 输出：
 
 ```text
-dist/DocDiffAgent-v1.0.0-setup.exe
+dist/DocDiffAgent-v1.0.1-setup.exe
 ```
 
 当前安装器脚本语言使用 Inno Setup 内置英文语言文件。应用本体 UI 文案仍由项目代码控制，主要为中文。

@@ -6,7 +6,6 @@
 #   pip install pyinstaller
 #   pyinstaller build/doc_diff_agent.spec
 
-import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
@@ -22,12 +21,6 @@ try:
     from PyInstaller.utils.hooks import collect_data_files as _cdf
     datas += _cdf("PySide6", subdir="Qt/resources")
     datas += _cdf("PySide6", subdir="Qt/translations")
-except Exception:
-    pass
-
-# docling data files
-try:
-    datas += collect_data_files("docling")
 except Exception:
     pass
 
@@ -66,7 +59,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "IPython", "jupyter"],
+    excludes=["tkinter", "matplotlib", "IPython", "jupyter", "sqlalchemy"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     noarchive=False,
