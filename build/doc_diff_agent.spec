@@ -31,6 +31,18 @@ try:
 except Exception:
     pass
 
+# PyMuPDF (pymupdf) layout resources (ONNX models, etc.)
+try:
+    datas += collect_data_files("pymupdf")
+except Exception:
+    pass
+
+# python-docx XML templates
+try:
+    datas += collect_data_files("docx")
+except Exception:
+    pass
+
 # ── Hidden imports ──────────────────────────────────────────────────────────
 hiddenimports = [
     "PySide6.QtWebEngineWidgets",
