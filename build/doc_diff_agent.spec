@@ -58,9 +58,6 @@ hiddenimports = [
     "rank_bm25",
     "docx",
     "fitz",  # PyMuPDF
-    "pycparser.lextab",
-    "pycparser.yacctab",
-    "scipy.special._cdflib",
 ]
 hiddenimports += collect_submodules("app")
 
