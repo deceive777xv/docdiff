@@ -58,6 +58,9 @@ hiddenimports = [
     "rank_bm25",
     "docx",
     "fitz",  # PyMuPDF
+    "pycparser.lextab",
+    "pycparser.yacctab",
+    "scipy.special._cdflib",
 ]
 hiddenimports += collect_submodules("app")
 
@@ -71,7 +74,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "IPython", "jupyter", "sqlalchemy"],
+    excludes=["tkinter", "matplotlib", "IPython", "jupyter", "sqlalchemy", "tensorboard", "torch.utils.tensorboard"],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     noarchive=False,
