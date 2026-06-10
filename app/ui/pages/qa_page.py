@@ -51,6 +51,25 @@ def _asst_bubble_style() -> str:
     )
 
 
+class CustomLabel(QLabel):
+    def contextMenuEvent(self, event):
+        super().contextMenuEvent(event)
+        menu = QApplication.activePopupWidget()
+        if isinstance(menu, QMenu):
+            old_style = menu.styleSheet()
+            new_style = old_style + f"""
+                QMenu{{
+                    border: none;
+                }}
+                QMenu::item {{
+                    padding: 5px 5px;
+                }}
+                QMenu::item:selected {{
+                    background-color: #d0e4f5;
+                }}
+            """
+            menu.setStyleSheet(new_style)
+
 class CustomTextEdit(QTextEdit):
     def __init__(self, button=None, parent=None):
         super().__init__(parent)
@@ -645,7 +664,7 @@ class QaPage(QWidget):
         outer_layout = QHBoxLayout(outer)
         outer_layout.setContentsMargins(0, 0, 0, 0)
 
-        bubble = QLabel()
+        bubble = CustomLabel()
         bubble.setProperty("qa_role", role)
         bubble.setWordWrap(True)
         bubble.setOpenExternalLinks(False)
