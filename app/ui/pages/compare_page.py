@@ -447,7 +447,7 @@ class ComparePage(QWidget):
         if not ok:
             logger.warning("diff web template failed to load")
             return
-
+        self._web_view.page().runJavaScript("document.oncontextmenu = function() { return false; };")
         self._apply_webview_theme()
         if self._pending_diff_js:
             js = self._pending_diff_js

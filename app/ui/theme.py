@@ -44,6 +44,7 @@ LATTE: dict[str, str] = {
     "DIFF_MAJOR":      "#df8e1d",
     "DIFF_REWRITE":    "#ea76cb",
     "DIFF_FORMAT":     "#8839ef",
+    "ITEM_SELECTED":   "#d0e4f5",
 }
 
 # ── Catppuccin Mocha (dark) ───────────────────────────────────────────────────
@@ -78,6 +79,7 @@ MOCHA: dict[str, str] = {
     "DIFF_MAJOR":      "#f9e2af",
     "DIFF_REWRITE":    "#f5c2e7",
     "DIFF_FORMAT":     "#cba6f7",
+    "ITEM_SELECTED":   "#c4d5e5",
 }
 
 

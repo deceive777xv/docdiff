@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QApplication, 
+    QMenu,
 )
 
 from app.core.markdown_utils import render_markdown_fragment
@@ -46,7 +48,7 @@ def _user_bubble_style() -> str:
 
 def _asst_bubble_style() -> str:
     return (
-        f"background:{Theme.BG_CARD};border:1px solid {Theme.BORDER};"
+        f"background:{Theme.BG_CARD};color: {Theme.TEXT_SECONDARY};border:1px solid {Theme.BORDER};"
         "border-radius:12px;padding:10px;margin:4px 0;"
     )
 
@@ -65,7 +67,7 @@ class CustomLabel(QLabel):
                     padding: 5px 5px;
                 }}
                 QMenu::item:selected {{
-                    background-color: #d0e4f5;
+                    background-color: {Theme.ITEM_SELECTED};
                 }}
             """
             menu.setStyleSheet(new_style)
