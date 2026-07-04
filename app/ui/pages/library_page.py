@@ -184,9 +184,10 @@ class LibraryPage(QWidget):
     def _import_document(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self, "选择文档", "",
-            "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt)"
+            "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt *.md *.markdown)"
             ";;PDF (*.pdf);;Word (*.docx);;PowerPoint (*.pptx)"
-            ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;其他 (*.csv *.json *.xml *.epub *.txt)"
+            ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;Markdown (*.md *.markdown)"
+            ";;其他 (*.csv *.json *.xml *.epub *.txt)"
         )
         if not paths:
             return
@@ -236,9 +237,10 @@ class LibraryPage(QWidget):
             self,
             f"为《{doc_name}》选择新版本文件",
             "",
-            "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt)"
+            "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt *.md *.markdown)"
             ";;PDF (*.pdf);;Word (*.docx);;PowerPoint (*.pptx)"
-            ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;其他 (*.csv *.json *.xml *.epub *.txt)",
+            ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;Markdown (*.md *.markdown)"
+            ";;其他 (*.csv *.json *.xml *.epub *.txt)",
         )
         for path in paths:
             self._run_ingest(path, document_id=doc_id)

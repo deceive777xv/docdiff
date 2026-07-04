@@ -5,6 +5,7 @@ Top-level entry point matching the design spec:
 """
 from __future__ import annotations
 
+import re
 import uuid
 
 from app.core.types import ComparePolicy, DiffResult, DocumentIR
@@ -12,28 +13,41 @@ from app.core.model.base_provider import BaseProvider
 
 
 class _JaccardEmbedder:
-    """Fallback embedder using character-bigram overlap vectors.
+    """Fallback embedder using lightweight lexical overlap vectors.
 
     Used when no real embedder is provided so compare() remains callable in
     tests and offline scenarios without a running model server.
     """
 
+    def _features(self, text: str) -> set[tuple[str, str]]:
+        compact = re.sub(r"\s+", "", text.lower())
+        useful_chars = [ch for ch in compact if ch.isalnum() or "\u4e00" <= ch <= "\u9fff"]
+        features: set[tuple[str, str]] = {("char", ch) for ch in useful_chars}
+        features.update(
+            ("bigram", "".join(pair))
+            for pair in zip(useful_chars, useful_chars[1:])
+        )
+        features.update(
+            ("token", token)
+            for token in re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]+", text.lower())
+        )
+        return features
+
     def embed(self, texts: list[str]) -> list[list[float]]:
-        bigram_sets: list[set] = []
+        feature_sets: list[set[tuple[str, str]]] = []
         vocab: set = set()
         for text in texts:
-            chars = list(text.replace(" ", ""))
-            bgs = set(zip(chars, chars[1:]))
-            bigram_sets.append(bgs)
-            vocab |= bgs
+            features = self._features(text)
+            feature_sets.append(features)
+            vocab |= features
 
         if not vocab:
             return [[0.0]] * len(texts)
 
         vocab_list = sorted(vocab)
         return [
-            [1.0 if bg in bgs else 0.0 for bg in vocab_list]
-            for bgs in bigram_sets
+            [1.0 if feature in features else 0.0 for feature in vocab_list]
+            for features in feature_sets
         ]
 
     def chat(self, messages, **kwargs) -> str:  # pragma: no cover

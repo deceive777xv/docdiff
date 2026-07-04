@@ -1,5 +1,6 @@
 """Match paragraphs between aligned section pairs using embedding similarity."""
 from __future__ import annotations
+import html
 import re
 from dataclasses import dataclass
 
@@ -25,8 +26,8 @@ class ParagraphPair:
 class _ParagraphUnit:
     para: Paragraph
     split_unit: bool
-    match_key: str | None = None
     match_text: str | None = None
+    table_values: list[str] | None = None
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -43,13 +44,14 @@ _RULE_PATTERNS = [
 
 _FINE_GRAINED_MAX_CHARS = 500
 _TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{2,}:?")
-_ORDINAL_HEADER_CELLS = {
-    "#",
-    "no",
-    "no.",
-    "序号",
-    "行号",
-}
+_HTML_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"</?[^>\n]+>")
+_LEXICAL_TOKEN_RE = re.compile(r"[a-z]+|\d+(?:[\.,]\d+)?%?|[\u4e00-\u9fff]", re.IGNORECASE)
+_NUMERIC_TOKEN_RE = re.compile(r"\d+(?:[\.,]\d+)?%?")
+_EMPHASIZED_PART_RE = re.compile(
+    r"^\s*(?:\*\*.+\*\*|__.+__|<(?:strong|b)>.*</(?:strong|b)>)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _rule_score_delta(text_a: str, text_b: str) -> float:
@@ -63,6 +65,24 @@ def _rule_score_delta(text_a: str, text_b: str) -> float:
     return score
 
 
+def _set_cosine(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / ((len(left) * len(right)) ** 0.5)
+
+
+def _lexical_similarity(text_a: str, text_b: str) -> float:
+    tokens_a = set(_LEXICAL_TOKEN_RE.findall(text_a.lower()))
+    tokens_b = set(_LEXICAL_TOKEN_RE.findall(text_b.lower()))
+    token_sim = _set_cosine(tokens_a, tokens_b)
+
+    non_numeric_a = {token for token in tokens_a if not _NUMERIC_TOKEN_RE.fullmatch(token)}
+    non_numeric_b = {token for token in tokens_b if not _NUMERIC_TOKEN_RE.fullmatch(token)}
+    if len(non_numeric_a) >= 2 and len(non_numeric_b) >= 2:
+        token_sim = max(token_sim, _set_cosine(non_numeric_a, non_numeric_b) * 0.95)
+    return token_sim
+
+
 def _split_table_row(line: str) -> list[str]:
     stripped = line.strip()
     if stripped.startswith("|"):
@@ -72,6 +92,100 @@ def _split_table_row(line: str) -> list[str]:
     return [cell.strip() for cell in stripped.split("|")]
 
 
+def _strip_cell_markup(text: str) -> str:
+    text = html.unescape(text or "")
+    text = _HTML_TAG_RE.sub("", text)
+    text = re.sub(r"[`*_~]+", "", text)
+    return re.sub(r"\s+", "", text).strip()
+
+
+def _raw_cell_parts(cell: str) -> list[str]:
+    normalized = _HTML_BREAK_RE.sub("\n", html.unescape(cell or ""))
+    return [
+        part.strip()
+        for part in normalized.splitlines()
+        if _strip_cell_markup(part)
+    ]
+
+
+def _cell_parts(cell: str) -> list[str]:
+    return [_strip_cell_markup(part) for part in _raw_cell_parts(cell)]
+
+
+def _plain_cell(cell: str) -> str:
+    return "".join(_cell_parts(cell)) or _strip_cell_markup(cell)
+
+
+def _normalize_cell(cell: str) -> str:
+    return _plain_cell(cell).strip().lower().rstrip("：:")
+
+
+def _header_label_from_cell(cell: str) -> str:
+    return _normalize_cell(cell)
+
+
+def _cell_part_is_emphasized(raw_part: str) -> bool:
+    return bool(_EMPHASIZED_PART_RE.fullmatch(raw_part.strip()))
+
+
+def _cell_looks_like_header_value(cell: str) -> bool:
+    raw_parts = _raw_cell_parts(cell)
+    if len(raw_parts) < 2:
+        return False
+
+    first = raw_parts[0].strip()
+    if first.endswith((":", "：")):
+        return True
+
+    first_is_emphasized = _cell_part_is_emphasized(first)
+    rest_are_emphasized = [_cell_part_is_emphasized(part) for part in raw_parts[1:]]
+    return first_is_emphasized and not all(rest_are_emphasized)
+
+
+def _row_has_embedded_header_values(line: str) -> bool:
+    if "|" not in line:
+        return False
+    cells = [cell for cell in _split_table_row(line) if _plain_cell(cell)]
+    if not cells:
+        return False
+    embedded_count = sum(1 for cell in cells if _cell_looks_like_header_value(cell))
+    if len(cells) == 1:
+        return embedded_count == 1
+    return embedded_count >= 2 and embedded_count >= len(cells) / 2
+
+
+def _cell_value(cell: str, row_has_embedded_header_values: bool = False) -> str:
+    parts = _cell_parts(cell)
+    if row_has_embedded_header_values and _cell_looks_like_header_value(cell):
+        return "".join(parts[1:])
+    return "".join(parts)
+
+
+def _table_header_labels(lines: list[str]) -> list[str]:
+    for index, line in enumerate(lines):
+        if "|" not in line or _is_table_separator_row(line) or _is_empty_table_row(line):
+            continue
+        following = next(
+            (
+                later
+                for later in lines[index + 1 :]
+                if "|" in later and not _is_empty_table_row(later)
+            ),
+            "",
+        )
+        if _is_table_separator_row(following) and not _row_has_embedded_header_values(line):
+            return [_header_label_from_cell(cell) for cell in _split_table_row(line)]
+        return []
+    return []
+
+
+def _is_table_header_row(line: str, header_labels: list[str]) -> bool:
+    if "|" not in line or not header_labels or _row_has_embedded_header_values(line):
+        return False
+    labels = [_header_label_from_cell(cell) for cell in _split_table_row(line)]
+    return labels == header_labels
+
+
 def _is_table_separator_row(line: str) -> bool:
     if "|" not in line:
         return False
@@ -79,39 +193,48 @@ def _is_table_separator_row(line: str) -> bool:
     return bool(cells) and all(_TABLE_SEPARATOR_CELL_RE.fullmatch(cell) for cell in cells)
 
 
-def _table_row_key(line: str) -> str | None:
-    if "|" not in line or _is_table_separator_row(line):
-        return None
-    cells = [cell for cell in _split_table_row(line) if cell]
-    if not cells:
-        return None
-    return re.sub(r"\s+", "", cells[0])
-
-
-def _normalize_cell(cell: str) -> str:
-    return re.sub(r"\s+", "", cell).strip().lower()
-
-
-def _is_ordinal_header_cell(cell: str) -> bool:
-    return _normalize_cell(cell).rstrip("：:") in _ORDINAL_HEADER_CELLS
-
-
-def _table_has_ordinal_first_column(lines: list[str]) -> bool:
-    for line in lines:
-        if "|" not in line or _is_table_separator_row(line):
-            continue
-        cells = _split_table_row(line)
-        return bool(cells) and _is_ordinal_header_cell(cells[0])
-    return False
-
-
-def _table_row_match_text(line: str, ignore_first_cell: bool = False) -> str:
-    if "|" not in line or not ignore_first_cell:
-        return line
+def _is_empty_table_row(line: str) -> bool:
+    if "|" not in line:
+        return False
     cells = _split_table_row(line)
-    if len(cells) <= 1:
-        return line
-    return " | ".join(cells[1:]).strip()
+    return bool(cells) and all(not _plain_cell(cell) for cell in cells)
+
+
+def _table_row_values(line: str) -> list[str]:
+    cells = _split_table_row(line)
+    embedded_header_values = _row_has_embedded_header_values(line)
+    return [_cell_value(cell, embedded_header_values) for cell in cells]
+
+
+def _table_row_match_text(line: str) -> str:
+    if "|" not in line:
+        return _plain_cell(line)
+    return " | ".join(_table_row_values(line)).strip()
+
+
+def _join_table_values(values: list[str]) -> str:
+    return " | ".join(values).strip()
+
+
+def _classification_texts(
+    baseline_unit: _ParagraphUnit,
+    target_unit: _ParagraphUnit,
+) -> tuple[str | None, str | None]:
+    baseline_text = baseline_unit.match_text
+    target_text = target_unit.match_text
+    b_values = baseline_unit.table_values
+    t_values = target_unit.table_values
+    if (
+        b_values is not None
+        and t_values is not None
+        and len(b_values) == len(t_values)
+        and len(b_values) > 1
+        and b_values[1:] == t_values[1:]
+        and b_values[0] != t_values[0]
+    ):
+        shared_content = _join_table_values(b_values[1:])
+        return shared_content, shared_content
+    return baseline_text, target_text
 
 
 def _looks_like_table(para: Paragraph) -> bool:
@@ -133,12 +256,16 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
 
         is_table = _looks_like_table(para)
         table_lines = [sent.text.strip() for sent in para.sentences if sent.text.strip()] if is_table else []
-        ignore_first_cell = is_table and _table_has_ordinal_first_column(table_lines)
+        header_labels = _table_header_labels(table_lines) if is_table else []
         for index, sent in enumerate(para.sentences):
             text = sent.text.strip()
             if not text:
                 continue
-            if is_table and _is_table_separator_row(text):
+            if is_table and (
+                _is_table_separator_row(text)
+                or _is_empty_table_row(text)
+                or _is_table_header_row(text, header_labels)
+            ):
                 continue
 
             unit_para = Paragraph(
@@ -146,15 +273,12 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
                 text=text,
                 sentences=[Sentence(text=text)],
             )
-            match_key = None
-            if is_table and not ignore_first_cell:
-                match_key = _table_row_key(text)
             units.append(
                 _ParagraphUnit(
                     para=unit_para,
                     split_unit=True,
-                    match_key=match_key,
-                    match_text=_table_row_match_text(text, ignore_first_cell),
+                    match_text=_table_row_match_text(text),
+                    table_values=_table_row_values(text) if is_table else None,
                 )
             )
     return units
@@ -220,48 +344,41 @@ def match_paragraphs(
         b_embeds = all_embeds[: len(b_units)]
         t_embeds = all_embeds[len(b_units) :]
 
-        t_used: set[int] = set()
+        candidates: list[tuple[float, int, int]] = []
         for i, b_unit in enumerate(b_units):
-            best_sim = -1.0
-            best_j = None
-            best_key_matched = False
             for j, t_unit in enumerate(t_units):
-                if j in t_used:
-                    continue
-                sim = _cosine(b_embeds[i], t_embeds[j])
-                # Apply rule penalty
+                b_match_text = b_unit.match_text if b_unit.match_text is not None else b_unit.para.text
+                t_match_text = t_unit.match_text if t_unit.match_text is not None else t_unit.para.text
+                sim = max(
+                    _cosine(b_embeds[i], t_embeds[j]),
+                    _lexical_similarity(b_match_text, t_match_text),
+                )
                 sim -= _rule_score_delta(b_unit.para.text, t_unit.para.text)
-                key_matched = (
-                    b_unit.match_key is not None
-                    and b_unit.match_key == t_unit.match_key
-                    and b_unit.split_unit
-                    and t_unit.split_unit
-                )
-                if key_matched:
-                    if not best_key_matched or sim > best_sim:
-                        best_sim = sim
-                        best_j = j
-                        best_key_matched = True
-                elif not best_key_matched and sim > best_sim:
-                    best_sim = sim
-                    best_j = j
-                    best_key_matched = False
+                if sim >= similarity_threshold:
+                    candidates.append((sim, i, j))
 
-            if best_j is not None and (best_sim >= similarity_threshold or best_key_matched):
-                t_used.add(best_j)
+        b_matched: dict[int, tuple[int, float]] = {}
+        t_used: set[int] = set()
+        for sim, i, j in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
+            if i in b_matched or j in t_used:
+                continue
+            b_matched[i] = (j, sim)
+            t_used.add(j)
+
+        for i, b_unit in enumerate(b_units):
+            if i in b_matched:
+                best_j, similarity = b_matched[i]
                 target_unit = t_units[best_j]
-                similarity = max(best_sim, 0.5) if best_key_matched else best_sim
-                results.append(
-                    ParagraphPair(
-                        b_unit.para,
-                        target_unit.para,
-                        similarity,
-                        section_path=sec_path,
-                        split_unit=b_unit.split_unit or target_unit.split_unit,
-                        baseline_match_text=b_unit.match_text,
-                        target_match_text=target_unit.match_text,
-                    )
-                )
+                baseline_match_text, target_match_text = _classification_texts(b_unit, target_unit)
+                results.append(ParagraphPair(
+                    b_unit.para,
+                    target_unit.para,
+                    similarity,
+                    section_path=sec_path,
+                    split_unit=b_unit.split_unit or target_unit.split_unit,
+                    baseline_match_text=baseline_match_text,
+                    target_match_text=target_match_text,
+                ))
             else:
                 results.append(ParagraphPair(
                     b_unit.para,

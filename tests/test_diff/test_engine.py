@@ -221,6 +221,86 @@ class TestCompare:
         assert all(item.diff_type == "格式变化" for item in result.items)
         assert all(item.risk_level == "none" for item in result.items)
 
+    def test_compare_pdf_styled_tables_match_by_business_content_before_sequence(self):
+        """PDF Markdown styling should not make ordinal cells dominate matching."""
+        from app.core.diff import compare
+
+        b_rows = [
+            "|**序**<br>**号**|**区**<br>**域**|**销售**<br>**代表**|**一月**|",
+            "|---|---|---|---|",
+            "|`4`|华<br>东|周明|`134`|",
+            "|`5`|华<br>南|赵六|`87`|",
+        ]
+        t_rows = [
+            "|**序**<br>**号**|**区**<br>**域**|**销售**<br>**代表**|**一月**|",
+            "|---|---|---|---|",
+            "|`4`|华<br>南|赵六|`87`|",
+            "|`5`|华<br>东|周明|`134`|",
+        ]
+
+        result = compare(
+            _make_table_ir(b_rows),
+            _make_table_ir(t_rows),
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        )
+
+        assert len(result.items) == 2
+        assert all(item.diff_type == "格式变化" for item in result.items)
+        assert all(item.risk_level == "none" for item in result.items)
+        assert any("周明" in item.baseline_text and "周明" in item.target_text for item in result.items)
+        assert any("赵六" in item.baseline_text and "赵六" in item.target_text for item in result.items)
+
+    def test_compare_pdf_key_value_row_matches_plain_row_and_reports_content_change(self):
+        """Header-value PDF rows should match by the business key, then compare values."""
+        from app.core.diff import compare
+
+        baseline = DocumentIR(
+            doc_id="b",
+            title="考勤",
+            file_hash="b",
+            sections=[
+                Section(
+                    section_id="s",
+                    title="员工考勤摘要",
+                    level=1,
+                    paragraphs=[
+                        Paragraph(
+                            paragraph_id="p",
+                            text=(
+                                "|**序号**<br>`3`|**姓名**<br>赵六|**部门**<br>销售|"
+                                "**出勤天数**<br>`23`|"
+                            ),
+                            sentences=[
+                                Sentence(text=(
+                                    "|**序号**<br>`3`|**姓名**<br>赵六|**部门**<br>销售|"
+                                    "**出勤天数**<br>`23`|"
+                                )),
+                                Sentence(text="|---|---|---|---|"),
+                            ],
+                        )
+                    ],
+                )
+            ],
+        )
+        target = _make_table_ir([
+            "|**序号**|**姓名**|**部门**|**出勤天数**|",
+            "|---|---|---|---|",
+            "|`4`|赵六|销售|`20`|",
+        ])
+        target.sections[0].title = "员工考勤摘要"
+
+        result = compare(
+            baseline,
+            target,
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        )
+
+        assert len(result.items) == 1
+        item = result.items[0]
+        assert item.diff_type == "实质修改"
+        assert item.risk_level == "high"
+        assert "赵六" in item.baseline_text and "赵六" in item.target_text
+
     def test_compare_markdown_table_with_insert_and_reorder_keeps_business_rows_matched(self):
         """Real markdown table syntax should not compare separators or shifted rows."""
         from app.core.diff import compare
