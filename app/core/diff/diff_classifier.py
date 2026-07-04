@@ -145,6 +145,14 @@ def _same_text_ignoring_whitespace(baseline: str, target: str) -> bool:
     return re.sub(r"\s+", "", baseline) == re.sub(r"\s+", "", target)
 
 
+def _pair_compare_texts(pp: ParagraphPair) -> tuple[str, str]:
+    baseline_text = pp.baseline_para.text if pp.baseline_para is not None else ""
+    target_text = pp.target_para.text if pp.target_para is not None else ""
+    baseline_compare = pp.baseline_match_text if pp.baseline_match_text is not None else baseline_text
+    target_compare = pp.target_match_text if pp.target_match_text is not None else target_text
+    return baseline_compare, target_compare
+
+
 def classify(
     para_pairs: list[ParagraphPair],
     policy: ComparePolicy,
@@ -180,17 +188,30 @@ def classify(
         elif pp.baseline_para is not None and pp.target_para is not None:
             if pp.split_unit and _same_text_ignoring_whitespace(pp.baseline_para.text, pp.target_para.text):
                 continue
+            baseline_compare, target_compare = _pair_compare_texts(pp)
+            if pp.split_unit and _same_text_ignoring_whitespace(baseline_compare, target_compare):
+                items.append(DiffItem(
+                    diff_id=str(uuid.uuid4()),
+                    section_path=pp.section_path,
+                    diff_type="格式变化",
+                    risk_level="none",
+                    baseline_text=pp.baseline_para.text,
+                    target_text=pp.target_para.text,
+                    similarity_score=pp.similarity,
+                    explanation="仅顺序或序号变化",
+                ))
+                continue
             if policy.use_llm_classify and provider is not None:
                 diff_type, risk_level, explanation = _llm_classify(
-                    pp.baseline_para.text, pp.target_para.text, provider, pp.similarity
+                    baseline_compare, target_compare, provider, pp.similarity
                 )
             else:
                 diff_type, risk_level, explanation = _rule_classify(
-                    pp.baseline_para.text, pp.target_para.text, pp.similarity
+                    baseline_compare, target_compare, pp.similarity
                 )
             if policy.rule_strengthen:
                 rule_risk = _critical_rule_risk(
-                    pp.baseline_para.text, pp.target_para.text
+                    baseline_compare, target_compare
                 )
                 risk_level = _max_risk(risk_level, rule_risk)
             items.append(DiffItem(

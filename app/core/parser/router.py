@@ -9,7 +9,7 @@ from app.core.types import DocumentIR, ParseQualityReport
 SUPPORTED_EXTENSIONS = {
     ".pdf", ".docx", ".pptx", ".xlsx", ".xls",
     ".html", ".htm", ".csv", ".json", ".xml", ".epub",
-    ".txt",
+    ".txt", ".md", ".markdown",
 }
 
 

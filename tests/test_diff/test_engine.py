@@ -193,3 +193,84 @@ class TestCompare:
         assert all("\n" not in item.baseline_text for item in result.items if item.baseline_text)
         assert all("\n" not in item.target_text for item in result.items if item.target_text)
         assert not any("违约金" in item.baseline_text or "违约金" in item.target_text for item in result.items)
+
+    def test_compare_ordinal_table_reorder_is_not_high_risk_rewrite(self):
+        """Rows moved in a table with an ordinal first column are order changes."""
+        from app.core.diff import compare
+
+        b_rows = [
+            "| 序号 | 区域 | 销售代表 | 一月(万元) |",
+            "| --- | --- | --- | --- |",
+            "| 4 | 华南 | 赵六 | 87 |",
+            "| 5 | 华东 | 周明 | 134 |",
+        ]
+        t_rows = [
+            "| 序号 | 区域 | 销售代表 | 一月(万元) |",
+            "| --- | --- | --- | --- |",
+            "| 4 | 华东 | 周明 | 134 |",
+            "| 5 | 华南 | 赵六 | 87 |",
+        ]
+
+        result = compare(
+            _make_table_ir(b_rows),
+            _make_table_ir(t_rows),
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        )
+
+        assert result.items
+        assert all(item.diff_type == "格式变化" for item in result.items)
+        assert all(item.risk_level == "none" for item in result.items)
+
+    def test_compare_markdown_table_with_insert_and_reorder_keeps_business_rows_matched(self):
+        """Real markdown table syntax should not compare separators or shifted rows."""
+        from app.core.diff import compare
+        from app.core.parser.markitdown_adapter import _parse_markdown
+
+        baseline_md = """
+# 项目数据统计表
+
+## 产品库存状态表
+
+| 序号 | 产品类别 | 产品名称   | 库存数量 | 安全库存 | 状态           | 存放货架 |
+| :--: | -------- | ---------- | -------- | -------- | -------------- | -------- |
+|  1   | 电子     | 无线鼠标   | 245      | 50       | 充足           | A12      |
+|  2   | 电子     | 机械键盘   | 38       | 40       | **低于安全线** | B07      |
+|  3   | 办公     | 订书机     | 67       | 40       | 正常           | C09      |
+|  4   | 家具     | 人体工学椅 | 12       | 15       | **低于安全线** | D01      |
+""".strip()
+        target_md = """
+# 项目数据统计表
+
+## 产品库存状态表
+
+| 序号 | 产品类别 | 产品名称     | 库存数量 | 安全库存 | 状态           | 存放货架 |
+| :--: | -------- | ------------ | -------- | -------- | -------------- | -------- |
+|  1   | 电子     | 无线鼠标     | 245      | 50       | 充足           | A12      |
+|  2   | 电子     | 机械键盘     | 38       | 40       | **低于安全线** | B07      |
+|  3   | 办公     | A4复印纸(箱) | 120      | 100      | 正常           | C03      |
+|  4   | 办公     | 订书机       | 67       | 40       | 正常           | C08      |
+|  5   | 家具     | 人体工学椅   | 12       | 15       | **低于安全线** | D01      |
+""".strip()
+
+        result = compare(
+            _parse_markdown(baseline_md, "baseline", "b"),
+            _parse_markdown(target_md, "target", "t"),
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        )
+
+        assert not any(":--:" in item.baseline_text or ":--:" in item.target_text for item in result.items)
+        assert not any(
+            "订书机" in item.baseline_text and "A4复印纸" in item.target_text
+            for item in result.items
+        )
+        assert any(
+            item.diff_type == "新增" and "A4复印纸" in item.target_text
+            for item in result.items
+        )
+        assert any(
+            "订书机" in item.baseline_text
+            and "订书机" in item.target_text
+            and "C09" in item.baseline_text
+            and "C08" in item.target_text
+            for item in result.items
+        )

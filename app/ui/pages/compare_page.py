@@ -72,7 +72,7 @@ _RISK_LABELS: dict[str, str] = {
 
 _ALL_SECTIONS_KEY = "__all_sections__"
 
-_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{2,}:?")
 
 
 def _split_markdown_table_row(line: str) -> list[str]:

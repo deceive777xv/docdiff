@@ -23,6 +23,13 @@ def extract(
     llm_client=None,
     llm_model: str = "",
 ) -> DocumentIR:
+    path = Path(file_path)
+    title = path.stem
+    file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    if path.suffix.lower() in {".md", ".markdown"}:
+        result_md = clean_md_table_cells(path.read_text(encoding="utf-8"))
+        return _parse_markdown(result_md, title, file_hash)
+
     if not is_available():
         raise RuntimeError("markitdown is not installed")
 
@@ -35,8 +42,6 @@ def extract(
     )
     result = md.convert(file_path)
     result_md = clean_md_table_cells(result.markdown)
-    title = Path(file_path).stem
-    file_hash = hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
     return _parse_markdown(result_md, title, file_hash)
 
 SENTENCE_END_PATTERN = re.compile(

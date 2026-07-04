@@ -161,3 +161,35 @@ def test_large_table_paragraph_is_matched_by_table_rows():
     assert changed[0].baseline_para.text == "| 付款周期 | 30天 |"
     assert changed[0].target_para.text == "| 付款周期 | 60天 |"
     assert "\n" not in changed[0].baseline_para.text
+
+
+def test_table_rows_with_ordinal_first_column_match_by_content_not_sequence():
+    """Ordinal table columns should not force mismatched rows after reordering."""
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    b_rows = [
+        "| 序号 | 区域 | 销售代表 | 一月(万元) |",
+        "| --- | --- | --- | --- |",
+        "| 4 | 华南 | 赵六 | 87 |",
+        "| 5 | 华东 | 周明 | 134 |",
+    ]
+    t_rows = [
+        "| 序号 | 区域 | 销售代表 | 一月(万元) |",
+        "| --- | --- | --- | --- |",
+        "| 4 | 华东 | 周明 | 134 |",
+        "| 5 | 华南 | 赵六 | 87 |",
+    ]
+    b_sec = make_section("销售业绩一览", [make_para_with_sentences(b_rows)])
+    t_sec = make_section("销售业绩一览", [make_para_with_sentences(t_rows)])
+    sp = SectionPair(baseline_section=b_sec, target_section=t_sec, title_similarity=1.0)
+
+    pairs = match_paragraphs([sp], MockEmbedder(), similarity_threshold=0.75)
+
+    zhaoliu = [
+        pair for pair in pairs
+        if pair.baseline_para is not None
+        and pair.target_para is not None
+        and "赵六" in pair.baseline_para.text
+    ]
+    assert len(zhaoliu) == 1
+    assert "赵六" in zhaoliu[0].target_para.text

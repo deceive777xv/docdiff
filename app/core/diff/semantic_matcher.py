@@ -17,6 +17,8 @@ class ParagraphPair:
     similarity: float   # cosine similarity, -1..1 (1 = identical)
     section_path: str = ""
     split_unit: bool = False
+    baseline_match_text: str | None = None
+    target_match_text: str | None = None
 
 
 @dataclass
@@ -24,6 +26,7 @@ class _ParagraphUnit:
     para: Paragraph
     split_unit: bool
     match_key: str | None = None
+    match_text: str | None = None
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -39,7 +42,14 @@ _RULE_PATTERNS = [
 ]
 
 _FINE_GRAINED_MAX_CHARS = 500
-_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{2,}:?")
+_ORDINAL_HEADER_CELLS = {
+    "#",
+    "no",
+    "no.",
+    "序号",
+    "行号",
+}
 
 
 def _rule_score_delta(text_a: str, text_b: str) -> float:
@@ -78,6 +88,32 @@ def _table_row_key(line: str) -> str | None:
     return re.sub(r"\s+", "", cells[0])
 
 
+def _normalize_cell(cell: str) -> str:
+    return re.sub(r"\s+", "", cell).strip().lower()
+
+
+def _is_ordinal_header_cell(cell: str) -> bool:
+    return _normalize_cell(cell).rstrip("：:") in _ORDINAL_HEADER_CELLS
+
+
+def _table_has_ordinal_first_column(lines: list[str]) -> bool:
+    for line in lines:
+        if "|" not in line or _is_table_separator_row(line):
+            continue
+        cells = _split_table_row(line)
+        return bool(cells) and _is_ordinal_header_cell(cells[0])
+    return False
+
+
+def _table_row_match_text(line: str, ignore_first_cell: bool = False) -> str:
+    if "|" not in line or not ignore_first_cell:
+        return line
+    cells = _split_table_row(line)
+    if len(cells) <= 1:
+        return line
+    return " | ".join(cells[1:]).strip()
+
+
 def _looks_like_table(para: Paragraph) -> bool:
     row_count = sum(1 for sent in para.sentences if "|" in sent.text)
     return row_count >= 2
@@ -92,10 +128,12 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
     units: list[_ParagraphUnit] = []
     for para in paras:
         if not _should_split_para(para):
-            units.append(_ParagraphUnit(para=para, split_unit=False))
+            units.append(_ParagraphUnit(para=para, split_unit=False, match_text=para.text))
             continue
 
         is_table = _looks_like_table(para)
+        table_lines = [sent.text.strip() for sent in para.sentences if sent.text.strip()] if is_table else []
+        ignore_first_cell = is_table and _table_has_ordinal_first_column(table_lines)
         for index, sent in enumerate(para.sentences):
             text = sent.text.strip()
             if not text:
@@ -108,11 +146,15 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
                 text=text,
                 sentences=[Sentence(text=text)],
             )
+            match_key = None
+            if is_table and not ignore_first_cell:
+                match_key = _table_row_key(text)
             units.append(
                 _ParagraphUnit(
                     para=unit_para,
                     split_unit=True,
-                    match_key=_table_row_key(text) if is_table else None,
+                    match_key=match_key,
+                    match_text=_table_row_match_text(text, ignore_first_cell),
                 )
             )
     return units
@@ -145,15 +187,35 @@ def match_paragraphs(
         # Sections with no match in other doc → all paragraphs are added/removed
         if not b_units:
             for unit in t_units:
-                results.append(ParagraphPair(None, unit.para, 0.0, section_path=sec_path, split_unit=unit.split_unit))
+                results.append(ParagraphPair(
+                    None,
+                    unit.para,
+                    0.0,
+                    section_path=sec_path,
+                    split_unit=unit.split_unit,
+                    target_match_text=unit.match_text,
+                ))
             continue
         if not t_units:
             for unit in b_units:
-                results.append(ParagraphPair(unit.para, None, 0.0, section_path=sec_path, split_unit=unit.split_unit))
+                results.append(ParagraphPair(
+                    unit.para,
+                    None,
+                    0.0,
+                    section_path=sec_path,
+                    split_unit=unit.split_unit,
+                    baseline_match_text=unit.match_text,
+                ))
             continue
 
         # Embed all paragraphs in both sections in one batch
-        all_texts = [unit.para.text for unit in b_units] + [unit.para.text for unit in t_units]
+        all_texts = [
+            unit.match_text if unit.match_text is not None else unit.para.text
+            for unit in b_units
+        ] + [
+            unit.match_text if unit.match_text is not None else unit.para.text
+            for unit in t_units
+        ]
         all_embeds = embedder.embed(all_texts)
         b_embeds = all_embeds[: len(b_units)]
         t_embeds = all_embeds[len(b_units) :]
@@ -196,13 +258,29 @@ def match_paragraphs(
                         similarity,
                         section_path=sec_path,
                         split_unit=b_unit.split_unit or target_unit.split_unit,
+                        baseline_match_text=b_unit.match_text,
+                        target_match_text=target_unit.match_text,
                     )
                 )
             else:
-                results.append(ParagraphPair(b_unit.para, None, 0.0, section_path=sec_path, split_unit=b_unit.split_unit))
+                results.append(ParagraphPair(
+                    b_unit.para,
+                    None,
+                    0.0,
+                    section_path=sec_path,
+                    split_unit=b_unit.split_unit,
+                    baseline_match_text=b_unit.match_text,
+                ))
 
         for j, t_unit in enumerate(t_units):
             if j not in t_used:
-                results.append(ParagraphPair(None, t_unit.para, 0.0, section_path=sec_path, split_unit=t_unit.split_unit))
+                results.append(ParagraphPair(
+                    None,
+                    t_unit.para,
+                    0.0,
+                    section_path=sec_path,
+                    split_unit=t_unit.split_unit,
+                    target_match_text=t_unit.match_text,
+                ))
 
     return results

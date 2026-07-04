@@ -9,7 +9,7 @@ import pytest
 
 def test_supported_extensions_set():
     from app.core.parser.router import SUPPORTED_EXTENSIONS
-    for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".html", ".csv", ".epub"):
+    for ext in (".pdf", ".docx", ".pptx", ".xlsx", ".html", ".csv", ".epub", ".md"):
         assert ext in SUPPORTED_EXTENSIONS
 
 
@@ -41,6 +41,23 @@ def test_parse_document_none_llm_client_does_not_raise(tmp_path):
 
     ir, report = parse_document(str(f), llm_client=None, llm_model="")
     assert ir is not None
+    assert report is not None
+
+
+def test_parse_document_accepts_markdown_file(tmp_path):
+    from app.core.parser.router import parse_document
+
+    f = tmp_path / "sample.md"
+    f.write_text(
+        "# 标题\n\n| 序号 | 名称 |\n| :--: | ---- |\n| 1 | 示例 |",
+        encoding="utf-8",
+    )
+
+    ir, report = parse_document(str(f), llm_client=None, llm_model="")
+
+    assert ir.title == "sample"
+    assert ir.sections[0].title == "标题"
+    assert "| 序号 | 名称 |" in ir.plain_text
     assert report is not None
 
 

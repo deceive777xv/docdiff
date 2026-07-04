@@ -9,7 +9,7 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 _ORDERED_LIST_RE = re.compile(r"^\s*\d+[.)]\s+(.+)$")
 _UNORDERED_LIST_RE = re.compile(r"^\s*[-*+]\s+(.+)$")
 _BLOCKQUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
-_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
+_TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{2,}:?")
 _HTML_TAG_RE = re.compile(r"</?[^>\n]+>")
 
 
