@@ -50,13 +50,16 @@ class _FakeWebView(QWidget):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.loadFinished = _FakeSignal()
+        self.loaded_urls = []
 
     def page(self):
         if not hasattr(self, "_mock_page"):
             self._mock_page = MagicMock()
         return self._mock_page
 
-    def load(self, *_args):
+    def load(self, *args):
+        if args:
+            self.loaded_urls.append(args[0])
         if self.auto_finish_load:
             self.loadFinished.emit(True)
 
@@ -704,6 +707,97 @@ def test_load_task_result_populates_compare_page(qtbot, ctx, mem_conn):
     assert page._loading_label.text() == "已加载任务结果：1 处差异。"
     assert page._export_btn.isEnabled()
     assert page._web_view.page().runJavaScript.called
+
+
+def test_clear_webview_reloads_empty_template(compare_page):
+    """Clearing result content should reset the WebEngine document itself."""
+    previous_load_count = len(compare_page._web_view.loaded_urls)
+
+    compare_page._clear_webview()
+
+    assert len(compare_page._web_view.loaded_urls) == previous_load_count + 1
+
+
+def test_clear_task_if_displayed_resets_current_compare_page(compare_page):
+    """Deleting the task currently shown in ComparePage should clear all result UI."""
+    from app.core.types import DiffItem, DiffResult
+
+    result = DiffResult(
+        task_id="task-delete-current",
+        baseline_version_id="baseline",
+        target_version_id="target",
+        items=[
+            DiffItem(
+                diff_id="d-delete-current",
+                section_path="第一章",
+                diff_type="新增",
+                risk_level="high",
+                baseline_text="旧内容",
+                target_text="新内容",
+                similarity_score=0.5,
+                explanation="说明",
+            )
+        ],
+    )
+    compare_page._display_result(result, "已加载任务结果：1 处差异。")
+    previous_load_count = len(compare_page._web_view.loaded_urls)
+
+    compare_page.clear_task_if_displayed("task-delete-current")
+
+    assert compare_page._current_result is None
+    assert compare_page._diff_items_by_id == {}
+    assert compare_page._visible_diff_items == []
+    assert not compare_page._export_btn.isEnabled()
+    assert compare_page._tree.topLevelItemCount() == 0
+    assert compare_page._detail_layout.count() == 1
+    assert compare_page._loading_label.text() == "当前对比任务已删除。"
+    assert len(compare_page._web_view.loaded_urls) == previous_load_count + 1
+
+
+def test_start_compare_clears_previous_result_before_running(compare_page):
+    """Starting a new compare task should remove stale result content immediately."""
+    from app.core.types import DiffItem, DiffResult
+
+    result = DiffResult(
+        task_id="task-old",
+        baseline_version_id="baseline-old",
+        target_version_id="target-old",
+        items=[
+            DiffItem(
+                diff_id="d-old",
+                section_path="旧章节",
+                diff_type="新增",
+                risk_level="low",
+                baseline_text="",
+                target_text="旧结果",
+                similarity_score=0.0,
+                explanation="",
+            )
+        ],
+    )
+    compare_page._display_result(result, "旧任务结果")
+    previous_load_count = len(compare_page._web_view.loaded_urls)
+
+    with patch("app.ui.pages.compare_page.QThread") as thread_cls, patch(
+        "app.ui.pages.compare_page._CompareWorker"
+    ) as worker_cls:
+        thread = MagicMock()
+        worker = MagicMock()
+        thread_cls.return_value = thread
+        worker_cls.return_value = worker
+
+        compare_page._start_compare("baseline-new", "target-new", "task-new")
+
+    assert compare_page._current_result is None
+    assert compare_page._diff_items_by_id == {}
+    assert compare_page._visible_diff_items == []
+    assert not compare_page._export_btn.isEnabled()
+    assert compare_page._tree.topLevelItemCount() == 0
+    assert compare_page._detail_layout.count() == 1
+    assert compare_page._loading_label.text() == "对比中，请稍候…"
+    assert compare_page._recover_task_id == "task-new"
+    assert len(compare_page._web_view.loaded_urls) == previous_load_count + 1
+    thread.start.assert_called_once()
 
 
 def test_load_unfinished_task_sets_recovery_state(qtbot, ctx, mem_conn):

@@ -374,8 +374,9 @@ class ComparePage(QWidget):
         template_path = (
             Path(__file__).parent.parent.parent.parent / "assets" / "diff_template.html"
         )
+        self._diff_template_url = QUrl.fromLocalFile(str(template_path))
         self._web_view.loadFinished.connect(self._on_webview_load_finished)
-        self._web_view.load(QUrl.fromLocalFile(str(template_path)))
+        self._web_view.load(self._diff_template_url)
         splitter.addWidget(self._web_view)
         splitter.setStretchFactor(1, 1)
 
@@ -441,6 +442,35 @@ class ComparePage(QWidget):
     # ── Public API ─────────────────────────────────────────────────────────────
     def refresh(self) -> None:
         self.refresh_versions()
+
+    def clear_task_if_displayed(self, task_id: str) -> None:
+        """Clear the page when the deleted task is currently displayed."""
+        if self._current_result is not None and self._current_result.task_id == task_id:
+            self._clear_result("当前对比任务已删除。")
+            return
+        if self._recover_task_id == task_id:
+            self._clear_result("当前对比任务已删除。")
+
+    def _clear_result(self, message: str = "") -> None:
+        """Reset all result-related UI state."""
+        self._current_result = None
+        self._diff_items_by_id = {}
+        self._visible_diff_items = []
+        self._recover_task_id = None
+        self._export_btn.setEnabled(False)
+        self._tree.clear()
+        self._clear_filter_controls()
+        self._show_diff_list([])
+        self._update_overview(DiffResult("", "", "", []))
+        self._loading_label.setText(message)
+        self._run_btn.setText("▶ 开始对比")
+        self._update_run_btn_state()
+        self._clear_webview()
+
+    def _clear_webview(self) -> None:
+        self._pending_diff_js = None
+        self._web_view_ready = False
+        self._web_view.load(self._diff_template_url)
 
     def _on_webview_load_finished(self, ok: bool) -> None:
         self._web_view_ready = bool(ok)
@@ -590,7 +620,9 @@ class ComparePage(QWidget):
         task_id: str,
     ) -> None:
         """Start or recover a compare task in a background thread."""
+        self._clear_result()
         self._run_btn.setEnabled(False)
+        self._run_btn.setText("对比中…")
         self._loading_label.setText("对比中，请稍候…")
         self._recover_task_id = task_id
         self.ctx.active_compare_task_ids.add(task_id)

@@ -192,6 +192,27 @@ def test_home_page_delete_button_removes_task_after_confirmation(
     assert compare_repo.get_diff_items(mem_conn, task_id) == []
 
 
+def test_home_page_delete_emits_deleted_task_id(home_page, mem_conn, qtbot, monkeypatch):
+    """Deleting a compare task should notify other pages with the deleted task id."""
+    baseline_id, target_id = _insert_versions(mem_conn)
+    task_id = compare_repo.create_compare_task(
+        mem_conn,
+        baseline_version_id=baseline_id,
+        target_version_id=target_id,
+    )
+    compare_repo.update_task_status(mem_conn, task_id, "completed", "/tmp/result.json")
+    monkeypatch.setattr(
+        "app.ui.pages.home_page.QMessageBox.question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    home_page.refresh()
+    with qtbot.waitSignal(home_page.compare_task_deleted) as blocker:
+        _action_button(home_page, 0, "删除").click()
+
+    assert blocker.args == [task_id]
+
+
 def test_home_page_refresh_updates_completed_qa_after_session_delete(home_page, mem_conn):
     """Completed QA count should reflect persisted sessions after a session is deleted."""
     session_id = qa_repo.create_session(mem_conn, title="问答", scope="all")

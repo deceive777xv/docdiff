@@ -76,6 +76,7 @@ class HomePage(QWidget):
     navigate_requested = Signal(int)   # page index to navigate to
     compare_task_open_requested = Signal(str)
     compare_task_recover_requested = Signal(str)
+    compare_task_deleted = Signal(str)
 
     def __init__(self, ctx: AppContext, parent=None):
         super().__init__(parent)
@@ -349,6 +350,7 @@ class HomePage(QWidget):
             return
         try:
             compare_repo.delete_compare_task(self.ctx.conn, task_id)
+            self.compare_task_deleted.emit(task_id)
             self.refresh()
         except Exception as exc:
             logger.exception("Delete compare task failed: %s", exc)

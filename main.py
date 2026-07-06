@@ -137,6 +137,7 @@ def main() -> None:
     home.compare_task_recover_requested.connect(
         lambda task_id: (window.navigate_to(1), compare.recover_task(task_id))
     )
+    home.compare_task_deleted.connect(compare.clear_task_if_displayed)
     window.settings_requested.connect(settings_dialog.exec)
     settings_dialog.provider_changed.connect(
         lambda: _rebuild_providers(ctx, compare, qa)
