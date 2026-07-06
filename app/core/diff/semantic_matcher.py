@@ -42,7 +42,6 @@ _RULE_PATTERNS = [
     re.compile(r'(?:应|须|必须|不得|禁止)'),  # obligation words
 ]
 
-_FINE_GRAINED_MAX_CHARS = 500
 _TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{2,}:?")
 _HTML_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"</?[^>\n]+>")
@@ -244,7 +243,7 @@ def _looks_like_table(para: Paragraph) -> bool:
 
 def _should_split_para(para: Paragraph) -> bool:
     sentences = [sent.text.strip() for sent in para.sentences if sent.text.strip()]
-    return len(sentences) > 1 and (len(para.text) > _FINE_GRAINED_MAX_CHARS or _looks_like_table(para))
+    return len(sentences) > 1
 
 
 def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
@@ -277,7 +276,7 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
                 _ParagraphUnit(
                     para=unit_para,
                     split_unit=True,
-                    match_text=_table_row_match_text(text),
+                    match_text=_table_row_match_text(text) if is_table else text,
                     table_values=_table_row_values(text) if is_table else None,
                 )
             )

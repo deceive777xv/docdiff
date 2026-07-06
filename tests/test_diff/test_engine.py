@@ -194,6 +194,49 @@ class TestCompare:
         assert all("\n" not in item.target_text for item in result.items if item.target_text)
         assert not any("违约金" in item.baseline_text or "违约金" in item.target_text for item in result.items)
 
+    def test_compare_paragraph_boundary_changes_do_not_create_add_delete_noise(self):
+        """Same sentences split into different paragraphs should still match."""
+        from app.core.diff import compare
+
+        sentences = [
+            "Alpha warranty obligation remains unchanged.",
+            "Beta delivery schedule remains unchanged.",
+            "Gamma invoice approval remains unchanged.",
+        ]
+        baseline_para = Paragraph(
+            paragraph_id="p-all",
+            text="\n".join(sentences),
+            sentences=[Sentence(text=text) for text in sentences],
+        )
+        target_paras = [
+            Paragraph(
+                paragraph_id=f"p-{index}",
+                text=text,
+                sentences=[Sentence(text=text)],
+            )
+            for index, text in enumerate(sentences)
+        ]
+        baseline = DocumentIR(
+            doc_id="baseline",
+            title="boundary",
+            file_hash="baseline",
+            sections=[Section(section_id="s", title="Terms", level=1, paragraphs=[baseline_para])],
+        )
+        target = DocumentIR(
+            doc_id="target",
+            title="boundary",
+            file_hash="target",
+            sections=[Section(section_id="s", title="Terms", level=1, paragraphs=target_paras)],
+        )
+
+        result = compare(
+            baseline,
+            target,
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        )
+
+        assert not any(item.diff_type in ("新增", "删减") for item in result.items)
+
     def test_compare_ordinal_table_reorder_is_not_high_risk_rewrite(self):
         """Rows moved in a table with an ordinal first column are order changes."""
         from app.core.diff import compare

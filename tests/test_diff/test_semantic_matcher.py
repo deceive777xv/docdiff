@@ -149,6 +149,38 @@ def test_section_with_only_target_paras():
         assert p.similarity == 0.0
 
 
+def test_short_paragraph_boundary_changes_match_sentence_units():
+    """Same sentences should match even when parser paragraph boundaries differ."""
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    sentences = [
+        "Alpha warranty obligation remains unchanged.",
+        "Beta delivery schedule remains unchanged.",
+        "Gamma invoice approval remains unchanged.",
+    ]
+    b_para = Paragraph(
+        paragraph_id=str(uuid.uuid4()),
+        text="\n".join(sentences),
+        sentences=[Sentence(text=text) for text in sentences],
+    )
+    b_sec = make_section("Terms", [b_para])
+    t_sec = make_section("Terms", [make_para(text) for text in sentences])
+    sp = SectionPair(baseline_section=b_sec, target_section=t_sec, title_similarity=1.0)
+
+    pairs = match_paragraphs([sp], TokenOverlapEmbedder(), similarity_threshold=0.75)
+
+    matched = [
+        (pair.baseline_para.text, pair.target_para.text)
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    ]
+    assert matched == [(text, text) for text in sentences]
+    assert not any(
+        pair.baseline_para is None or pair.target_para is None
+        for pair in pairs
+    )
+
+
 def test_large_table_paragraph_is_matched_by_table_rows():
     """Large table paragraphs should be compared row-by-row, not as one blob."""
     from app.core.diff.semantic_matcher import match_paragraphs
