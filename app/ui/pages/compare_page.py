@@ -552,6 +552,16 @@ class ComparePage(QWidget):
         
     def refresh_versions(self) -> None:
         """Repopulate baseline/target combos from the database."""
+        baseline_value = (
+            self._current_result.baseline_version_id
+            if self._current_result is not None
+            else self._baseline_combo.currentData()
+        )
+        target_value = (
+            self._current_result.target_version_id
+            if self._current_result is not None
+            else self._target_combo.currentData()
+        )
         self._baseline_combo.blockSignals(True)
         self._target_combo.blockSignals(True)
         try:
@@ -566,6 +576,10 @@ class ComparePage(QWidget):
                         label += f"  ({ver['version_label']})"
                     self._baseline_combo.addItem(label, ver["id"])
                     self._target_combo.addItem(label, ver["id"])
+            if baseline_value:
+                self._select_combo_value(self._baseline_combo, baseline_value)
+            if target_value:
+                self._select_combo_value(self._target_combo, target_value)
         except Exception as exc:
             logger.warning("refresh_versions failed: %s", exc)
         finally:

@@ -709,6 +709,75 @@ def test_load_task_result_populates_compare_page(qtbot, ctx, mem_conn):
     assert page._web_view.page().runJavaScript.called
 
 
+def test_refresh_keeps_selectors_aligned_with_displayed_result(qtbot, ctx, mem_conn):
+    """Refreshing the page should not replace displayed result versions with newest docs."""
+    from app.core.types import DiffItem
+
+    doc_id = document_repo.insert_document(
+        mem_conn,
+        doc_name="当前对比文档",
+        doc_type="docx",
+        file_path="/docs/current.docx",
+        file_hash="compare-current-doc",
+        source_type="standard",
+    )
+    baseline_id = document_repo.insert_version(
+        mem_conn, document_id=doc_id, version_no=1, version_label="基准"
+    )
+    target_id = document_repo.insert_version(
+        mem_conn, document_id=doc_id, version_no=2, version_label="目标"
+    )
+    task_id = compare_repo.create_compare_task(
+        mem_conn,
+        baseline_version_id=baseline_id,
+        target_version_id=target_id,
+    )
+    compare_repo.insert_diff_items(
+        mem_conn,
+        task_id,
+        [
+            DiffItem(
+                diff_id="d-current",
+                section_path="第一章",
+                diff_type="新增",
+                risk_level="low",
+                baseline_text="旧内容",
+                target_text="新内容",
+                similarity_score=0.5,
+                explanation="说明",
+            )
+        ],
+    )
+    compare_repo.update_task_status(mem_conn, task_id, "completed", "/tmp/result.json")
+
+    with patch("app.ui.pages.compare_page.QWebEngineView", _FakeWebView):
+        from app.ui.pages.compare_page import ComparePage
+
+        page = ComparePage(ctx)
+        qtbot.addWidget(page)
+
+    page.load_task(task_id)
+
+    newest_doc_id = document_repo.insert_document(
+        mem_conn,
+        doc_name="最新导入文档",
+        doc_type="docx",
+        file_path="/docs/newest.docx",
+        file_hash="compare-newest-doc",
+        source_type="standard",
+    )
+    newest_version_id = document_repo.insert_version(
+        mem_conn, document_id=newest_doc_id, version_no=1, version_label="最新"
+    )
+
+    page.refresh()
+
+    assert page._baseline_combo.currentData() == baseline_id
+    assert page._target_combo.currentData() == target_id
+    assert page._baseline_combo.currentData() != newest_version_id
+    assert page._target_combo.currentData() != newest_version_id
+
+
 def test_clear_webview_reloads_empty_template(compare_page):
     """Clearing result content should reset the WebEngine document itself."""
     previous_load_count = len(compare_page._web_view.loaded_urls)
