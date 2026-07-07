@@ -264,6 +264,32 @@ class TestCompare:
         assert all(item.diff_type == "格式变化" for item in result.items)
         assert all(item.risk_level == "none" for item in result.items)
 
+    def test_compare_multiple_leading_number_columns_are_order_metadata(self):
+        """Leading numeric-only cells can be display/index metadata, not content."""
+        from app.core.diff import compare
+
+        b_rows = [
+            "| A | B | 标题 |",
+            "| --- | --- | --- |",
+            "| 56 | 55 | 漫画技法终极指导1-6全六集PDF原书教程 |",
+        ]
+        t_rows = [
+            "| A | B | 标题 |",
+            "| --- | --- | --- |",
+            "| 57 | 56 | 漫画技法终极指导1-6全六集PDF原书教程 |",
+        ]
+
+        result = compare(
+            _make_table_ir(b_rows),
+            _make_table_ir(t_rows),
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        )
+
+        assert len(result.items) == 1
+        item = result.items[0]
+        assert item.diff_type == "格式变化"
+        assert item.risk_level == "none"
+
     def test_compare_pdf_styled_tables_match_by_business_content_before_sequence(self):
         """PDF Markdown styling should not make ordinal cells dominate matching."""
         from app.core.diff import compare

@@ -115,6 +115,11 @@ def _max_risk(current: str, candidate: str | None) -> str:
     return candidate if _RISK_RANK[candidate] > _RISK_RANK.get(current, 2) else current
 
 
+def _should_strengthen_risk(diff_type: str, risk_level: str) -> bool:
+    """Only strengthen when the primary classifier already sees content impact."""
+    return diff_type != "格式变化" and risk_level != "none"
+
+
 def _llm_classify(
     baseline: str,
     target: str,
@@ -209,7 +214,7 @@ def classify(
                 diff_type, risk_level, explanation = _rule_classify(
                     baseline_compare, target_compare, pp.similarity
                 )
-            if policy.rule_strengthen:
+            if policy.rule_strengthen and _should_strengthen_risk(diff_type, risk_level):
                 rule_risk = _critical_rule_risk(
                     baseline_compare, target_compare
                 )

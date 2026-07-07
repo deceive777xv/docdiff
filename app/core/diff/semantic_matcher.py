@@ -215,6 +215,19 @@ def _join_table_values(values: list[str]) -> str:
     return " | ".join(values).strip()
 
 
+def _is_numeric_cell(value: str) -> bool:
+    return bool(re.fullmatch(r"[-+]?\d+(?:[\.,]\d+)?%?", value.strip()))
+
+
+def _leading_numeric_cell_count(values: list[str]) -> int:
+    count = 0
+    for value in values:
+        if not _is_numeric_cell(value):
+            break
+        count += 1
+    return count
+
+
 def _classification_texts(
     baseline_unit: _ParagraphUnit,
     target_unit: _ParagraphUnit,
@@ -228,11 +241,16 @@ def _classification_texts(
         and t_values is not None
         and len(b_values) == len(t_values)
         and len(b_values) > 1
-        and b_values[1:] == t_values[1:]
-        and b_values[0] != t_values[0]
     ):
-        shared_content = _join_table_values(b_values[1:])
-        return shared_content, shared_content
+        leading_count = min(_leading_numeric_cell_count(b_values), _leading_numeric_cell_count(t_values))
+        if (
+            leading_count > 0
+            and leading_count < len(b_values)
+            and b_values[leading_count:] == t_values[leading_count:]
+            and b_values[:leading_count] != t_values[:leading_count]
+        ):
+            shared_content = _join_table_values(b_values[leading_count:])
+            return shared_content, shared_content
     return baseline_text, target_text
 
 

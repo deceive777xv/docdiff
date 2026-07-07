@@ -217,6 +217,37 @@ def test_llm_none_risk_is_not_strengthened_by_low_similarity():
     assert result.items[0].risk_level == "none"
 
 
+def test_llm_none_risk_is_not_strengthened_by_numeric_metadata_changes():
+    """LLM no-risk judgment should not be overridden by metadata-like numbers."""
+    from app.core.diff.diff_classifier import classify
+
+    provider = type(
+        "Provider",
+        (),
+        {
+            "chat": lambda self, messages: (
+                '{"diff_type": "格式变化", "risk_level": "none", '
+                '"explanation": "仅数字序号变化，内容实质未变"}'
+            )
+        },
+    )()
+    b_para = make_para("56 55 漫画技法终极指导1-6全六集PDF原书教程")
+    t_para = make_para("57 56 漫画技法终极指导1-6全六集PDF原书教程")
+    pp = ParagraphPair(baseline_para=b_para, target_para=t_para, similarity=0.998)
+
+    result = classify(
+        para_pairs=[pp],
+        policy=ComparePolicy(use_llm_classify=True, rule_strengthen=True),
+        provider=provider,  # type: ignore[arg-type]
+        task_id="t3-numeric-metadata",
+        baseline_version_id="b3",
+        target_version_id="v3",
+    )
+
+    assert result.items[0].diff_type == "格式变化"
+    assert result.items[0].risk_level == "none"
+
+
 def test_llm_low_risk_is_not_strengthened_to_high_by_low_similarity():
     """LLM low-risk judgment should survive the similarity fallback rule."""
     from app.core.diff.diff_classifier import classify
