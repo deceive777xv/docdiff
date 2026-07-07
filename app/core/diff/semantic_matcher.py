@@ -1,6 +1,8 @@
 """Match paragraphs between aligned section pairs using embedding similarity."""
 from __future__ import annotations
 import html
+import json
+import logging
 import re
 from dataclasses import dataclass
 
@@ -9,6 +11,8 @@ import numpy as np
 from app.core.diff.structure_aligner import SectionPair
 from app.core.model.base_provider import BaseProvider
 from app.core.types import Paragraph, Sentence
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -51,6 +55,33 @@ _EMPHASIZED_PART_RE = re.compile(
     r"^\s*(?:\*\*.+\*\*|__.+__|<(?:strong|b)>.*</(?:strong|b)>)\s*$",
     re.IGNORECASE,
 )
+_LLM_RERANK_TOP_K = 5
+_LLM_RERANK_SCORE_GAP = 0.15
+_LLM_RERANK_MIN_SCORE = 0.45
+_LLM_RERANK_MIN_CONFIDENCE = 0.6
+
+_MATCH_RERANK_PROMPT = """你是文档表格行匹配助手。请判断“基准行”应该和哪一个候选行视为同一条记录。
+
+匹配原则：
+- 优先看核心内容、名称、标题、主体是否一致。
+- 行号、页码、展示序号、位置变化可以不同。
+- 数量、金额、日期等如果属于标题/业务内容的一部分，不要忽略。
+- 如果没有合适候选，返回 null。
+
+基准行：
+原文：{baseline_text}
+匹配文本：{baseline_match}
+
+候选行：
+{candidates}
+
+请只输出 JSON：
+{{
+  "matched_candidate": 1,
+  "confidence": 0.0,
+  "reason": "简短原因"
+}}
+"""
 
 
 def _rule_score_delta(text_a: str, text_b: str) -> float:
@@ -208,7 +239,11 @@ def _table_row_values(line: str) -> list[str]:
 def _table_row_match_text(line: str) -> str:
     if "|" not in line:
         return _plain_cell(line)
-    return " | ".join(_table_row_values(line)).strip()
+    values = _table_row_values(line)
+    leading_count = _leading_numeric_cell_count(values)
+    if 0 < leading_count < len(values):
+        values = values[leading_count:]
+    return " | ".join(values).strip()
 
 
 def _join_table_values(values: list[str]) -> str:
@@ -252,6 +287,78 @@ def _classification_texts(
             shared_content = _join_table_values(b_values[leading_count:])
             return shared_content, shared_content
     return baseline_text, target_text
+
+
+def _unit_match_text(unit: _ParagraphUnit) -> str:
+    return unit.match_text if unit.match_text is not None else unit.para.text
+
+
+def _normalize_match_text(text: str) -> str:
+    return re.sub(r"\s+", "", text or "").strip().lower()
+
+
+def _should_llm_rerank_candidates(
+    baseline_unit: _ParagraphUnit,
+    target_units: list[_ParagraphUnit],
+    candidates: list[tuple[float, int]],
+) -> bool:
+    if baseline_unit.table_values is None or len(candidates) < 2:
+        return False
+
+    top_score, top_j = candidates[0]
+    second_score, _ = candidates[1]
+    baseline_text = _normalize_match_text(_unit_match_text(baseline_unit))
+    top_text = _normalize_match_text(_unit_match_text(target_units[top_j]))
+    if baseline_text and baseline_text == top_text:
+        return False
+    return top_score - second_score <= _LLM_RERANK_SCORE_GAP
+
+
+def _llm_rerank_candidate(
+    baseline_unit: _ParagraphUnit,
+    target_units: list[_ParagraphUnit],
+    candidates: list[tuple[float, int]],
+    provider: BaseProvider,
+) -> int | None:
+    candidate_lines = []
+    for index, (score, target_index) in enumerate(candidates, start=1):
+        target_unit = target_units[target_index]
+        candidate_lines.append(
+            (
+                f"{index}. 相似度：{score:.3f}\n"
+                f"   原文：{target_unit.para.text[:300]}\n"
+                f"   匹配文本：{_unit_match_text(target_unit)[:300]}"
+            )
+        )
+
+    prompt = _MATCH_RERANK_PROMPT.format(
+        baseline_text=baseline_unit.para.text[:500],
+        baseline_match=_unit_match_text(baseline_unit)[:500],
+        candidates="\n".join(candidate_lines),
+    )
+    try:
+        response = provider.chat([{"role": "user", "content": prompt}])
+        match = re.search(r"\{.*\}", response, re.DOTALL)
+        if not match:
+            return None
+        data = json.loads(match.group())
+        raw_index = (
+            data.get("matched_candidate")
+            if "matched_candidate" in data
+            else data.get("candidate_index", data.get("index"))
+        )
+        if raw_index is None:
+            return None
+        confidence = float(data.get("confidence", 0.0))
+        if confidence < _LLM_RERANK_MIN_CONFIDENCE:
+            return None
+        candidate_index = int(raw_index) - 1
+        if not 0 <= candidate_index < len(candidates):
+            return None
+        return candidates[candidate_index][1]
+    except Exception as exc:
+        logger.warning("LLM match rerank failed, using embedding score: %s", exc)
+        return None
 
 
 def _looks_like_table(para: Paragraph) -> bool:
@@ -305,6 +412,9 @@ def match_paragraphs(
     pairs: list[SectionPair],
     embedder: BaseProvider,
     similarity_threshold: float = 0.75,
+    *,
+    rerank_provider: BaseProvider | None = None,
+    use_llm_rerank: bool = True,
 ) -> list[ParagraphPair]:
     """
     For each SectionPair, match paragraphs by embedding similarity.
@@ -361,22 +471,45 @@ def match_paragraphs(
         b_embeds = all_embeds[: len(b_units)]
         t_embeds = all_embeds[len(b_units) :]
 
-        candidates: list[tuple[float, int, int]] = []
+        candidates: list[tuple[float, float, int, int]] = []
+        candidates_by_baseline: dict[int, list[tuple[float, int]]] = {}
+        rerank_floor = min(similarity_threshold, _LLM_RERANK_MIN_SCORE)
         for i, b_unit in enumerate(b_units):
             for j, t_unit in enumerate(t_units):
-                b_match_text = b_unit.match_text if b_unit.match_text is not None else b_unit.para.text
-                t_match_text = t_unit.match_text if t_unit.match_text is not None else t_unit.para.text
+                b_match_text = _unit_match_text(b_unit)
+                t_match_text = _unit_match_text(t_unit)
                 sim = max(
                     _cosine(b_embeds[i], t_embeds[j]),
                     _lexical_similarity(b_match_text, t_match_text),
                 )
                 sim -= _rule_score_delta(b_unit.para.text, t_unit.para.text)
+                if sim >= rerank_floor:
+                    candidates_by_baseline.setdefault(i, []).append((sim, j))
                 if sim >= similarity_threshold:
-                    candidates.append((sim, i, j))
+                    candidates.append((sim, sim, i, j))
+
+        if rerank_provider is not None and use_llm_rerank:
+            for i, row_candidates in candidates_by_baseline.items():
+                ranked = sorted(row_candidates, key=lambda item: (-item[0], item[1]))[:_LLM_RERANK_TOP_K]
+                if not _should_llm_rerank_candidates(b_units[i], t_units, ranked):
+                    continue
+                selected_j = _llm_rerank_candidate(
+                    b_units[i],
+                    t_units,
+                    ranked,
+                    rerank_provider,
+                )
+                if selected_j is None:
+                    continue
+                selected_score = next(
+                    score for score, candidate_j in ranked if candidate_j == selected_j
+                )
+                rank_score = max(ranked[0][0] + 0.001, similarity_threshold)
+                candidates.append((rank_score, selected_score, i, selected_j))
 
         b_matched: dict[int, tuple[int, float]] = {}
         t_used: set[int] = set()
-        for sim, i, j in sorted(candidates, key=lambda item: (-item[0], item[1], item[2])):
+        for _, sim, i, j in sorted(candidates, key=lambda item: (-item[0], item[2], item[3])):
             if i in b_matched or j in t_used:
                 continue
             b_matched[i] = (j, sim)

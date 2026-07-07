@@ -106,7 +106,11 @@ def do_semantic_compare(state: CompareState) -> dict:
     try:
         policy = ComparePolicy()
         para_pairs = match_paragraphs(
-            state["_section_pairs"], state["embedder"], policy.similarity_threshold
+            state["_section_pairs"],
+            state["embedder"],
+            policy.similarity_threshold,
+            rerank_provider=state["provider"] if policy.use_llm_match else None,
+            use_llm_rerank=policy.use_llm_match,
         )
         return {"_para_pairs": para_pairs, "status": "matched"}
     except Exception as e:

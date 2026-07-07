@@ -74,10 +74,11 @@ def test_diff_item_stores_all_fields():
 
 
 def test_compare_policy_defaults():
-    """ComparePolicy defaults are threshold=0.75, use_llm_classify=True, rule_strengthen=True."""
+    """ComparePolicy defaults enable LLM match/classify and rule strengthening."""
     policy = ComparePolicy()
 
     assert policy.similarity_threshold == pytest.approx(0.75)
+    assert policy.use_llm_match is True
     assert policy.use_llm_classify is True
     assert policy.rule_strengthen is True
 

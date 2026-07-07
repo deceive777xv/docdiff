@@ -423,3 +423,80 @@ class TestCompare:
             and "C08" in item.target_text
             for item in result.items
         )
+
+    def test_compare_uses_llm_match_reranker_for_ambiguous_table_rows(self):
+        """The full compare pipeline should pass the provider into LLM match rerank."""
+        from app.core.diff import compare
+        from app.core.model.base_provider import BaseProvider
+
+        class PositionNumberBiasedEmbedder(BaseProvider):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                markers = []
+                for text in texts:
+                    if "位置46" in text:
+                        markers.append("位置46")
+                    elif "位置45" in text:
+                        markers.append("位置45")
+                    else:
+                        markers.append("")
+                vocab = sorted(set(markers))
+                return [
+                    [1.0 if marker == value else 0.0 for value in vocab]
+                    for marker in markers
+                ]
+
+            def chat(self, messages: list[dict], **kwargs) -> str:
+                return ""
+
+            def health_check(self) -> bool:
+                return True
+
+        class RerankProvider(BaseProvider):
+            def __init__(self):
+                self.prompts: list[str] = []
+
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                return [[0.0] for _ in texts]
+
+            def chat(self, messages: list[dict], **kwargs) -> str:
+                self.prompts.append(messages[-1]["content"])
+                return (
+                    '{"matched_candidate": 2, "confidence": 0.96, '
+                    '"reason": "标题和数量完全一致"}'
+                )
+
+            def health_check(self) -> bool:
+                return True
+
+        baseline = _make_table_ir([
+            "| 序号 | 位置 | 标题 |",
+            "| --- | --- | --- |",
+            "| 1 | 位置46 | 51本日本漫画绘画教程电子书 |",
+        ])
+        target = _make_table_ir([
+            "| 序号 | 位置 | 标题 |",
+            "| --- | --- | --- |",
+            "| 2 | 位置45 | 51本日本漫画绘画教程电子书 |",
+            "| 3 | 位置46 | 52本日本漫画绘画教程电子书 |",
+        ])
+        provider = RerankProvider()
+
+        result = compare(
+            baseline,
+            target,
+            policy=ComparePolicy(use_llm_match=True, use_llm_classify=False, rule_strengthen=True),
+            embedder=PositionNumberBiasedEmbedder(),
+            provider=provider,
+        )
+
+        assert any(
+            item.diff_type == "新增"
+            and "52本日本漫画绘画教程电子书" in item.target_text
+            for item in result.items
+        )
+        assert not any(
+            "51本日本漫画" in item.baseline_text
+            and "52本日本漫画" in item.target_text
+            for item in result.items
+        )
+        assert len(provider.prompts) == 1

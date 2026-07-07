@@ -101,5 +101,6 @@ class DiffResult:
 @dataclass
 class ComparePolicy:
     similarity_threshold: float = 0.75   # below this → 新增/删减
+    use_llm_match: bool = True
     use_llm_classify: bool = True
     rule_strengthen: bool = True

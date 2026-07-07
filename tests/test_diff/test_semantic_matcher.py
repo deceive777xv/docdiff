@@ -62,6 +62,72 @@ class TokenOverlapEmbedder(BaseProvider):
         return True
 
 
+class LeadingNumberBiasedEmbedder(BaseProvider):
+    """Embedder that overweights the first number, like a model biased by row position."""
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        first_numbers = [
+            (re.search(r"\d+", text).group(0) if re.search(r"\d+", text) else "")
+            for text in texts
+        ]
+        number_vocab = sorted(set(first_numbers))
+        return [
+            [
+                1.0 if first_number == number else 0.0
+                for number in number_vocab
+            ]
+            for first_number in first_numbers
+        ]
+
+    def chat(self, messages: list[dict], **kwargs) -> str:
+        return ""
+
+    def health_check(self) -> bool:
+        return True
+
+
+class PositionNumberBiasedEmbedder(BaseProvider):
+    """Embedder that overweights a non-leading numeric position marker."""
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        markers = [
+            (re.search(r"位置\d+", text).group(0) if re.search(r"位置\d+", text) else "")
+            for text in texts
+        ]
+        vocab = sorted(set(markers))
+        return [
+            [1.0 if marker == value else 0.0 for value in vocab]
+            for marker in markers
+        ]
+
+    def chat(self, messages: list[dict], **kwargs) -> str:
+        return ""
+
+    def health_check(self) -> bool:
+        return True
+
+
+class CandidateRerankProvider(BaseProvider):
+    """Fake LLM provider that chooses a configured candidate from the prompt."""
+
+    def __init__(self, candidate_index: int):
+        self.candidate_index = candidate_index
+        self.prompts: list[str] = []
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] for _ in texts]
+
+    def chat(self, messages: list[dict], **kwargs) -> str:
+        self.prompts.append(messages[-1]["content"])
+        return (
+            '{"matched_candidate": %d, "confidence": 0.96, '
+            '"reason": "候选标题和数量完全一致"}'
+        ) % self.candidate_index
+
+    def health_check(self) -> bool:
+        return True
+
+
 def make_para(text: str) -> Paragraph:
     return Paragraph(
         paragraph_id=str(uuid.uuid4()),
@@ -277,6 +343,84 @@ def test_table_row_matching_prefers_vector_similarity_over_first_column_key():
     ]
     assert ("| 4 | Atlas | Ready | 200 |", "| 5 | Atlas | Ready | 200 |") in matched
     assert ("| 5 | Boreal | Hold | 900 |", "| 4 | Boreal | Hold | 900 |") in matched
+
+
+def test_table_row_matching_ignores_leading_number_metadata_for_insertions():
+    """Identical content with shifted row numbers should beat same-number near matches."""
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    b_rows = [
+        "| A | B |",
+        "| --- | --- |",
+        "| 46 | 51本日本漫画绘画教程电子书 |",
+    ]
+    t_rows = [
+        "| A | B |",
+        "| --- | --- |",
+        "| 45 | 51本日本漫画绘画教程电子书 |",
+        "| 46 | 52本日本漫画绘画教程电子书 |",
+    ]
+    b_sec = make_section("正文", [make_para_with_sentences(b_rows)])
+    t_sec = make_section("正文", [make_para_with_sentences(t_rows)])
+    sp = SectionPair(baseline_section=b_sec, target_section=t_sec, title_similarity=1.0)
+
+    pairs = match_paragraphs([sp], LeadingNumberBiasedEmbedder(), similarity_threshold=0.75)
+
+    matched = [
+        pair for pair in pairs
+        if pair.baseline_para is not None
+        and "51本日本漫画" in pair.baseline_para.text
+    ]
+    added = [
+        pair for pair in pairs
+        if pair.baseline_para is None
+        and pair.target_para is not None
+    ]
+    assert len(matched) == 1
+    assert "| 45 | 51本日本漫画绘画教程电子书 |" == matched[0].target_para.text
+    assert any("| 46 | 52本日本漫画绘画教程电子书 |" == pair.target_para.text for pair in added)
+
+
+def test_llm_rerank_selects_better_candidate_when_numbers_are_ambiguous():
+    """LLM rerank can choose content-equivalent rows over same-number near matches."""
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    b_rows = [
+        "| 序号 | 位置 | 标题 |",
+        "| --- | --- | --- |",
+        "| 1 | 位置46 | 51本日本漫画绘画教程电子书 |",
+    ]
+    t_rows = [
+        "| 序号 | 位置 | 标题 |",
+        "| --- | --- | --- |",
+        "| 2 | 位置45 | 51本日本漫画绘画教程电子书 |",
+        "| 3 | 位置46 | 52本日本漫画绘画教程电子书 |",
+    ]
+    b_sec = make_section("正文", [make_para_with_sentences(b_rows)])
+    t_sec = make_section("正文", [make_para_with_sentences(t_rows)])
+    sp = SectionPair(baseline_section=b_sec, target_section=t_sec, title_similarity=1.0)
+    reranker = CandidateRerankProvider(candidate_index=2)
+
+    pairs = match_paragraphs(
+        [sp],
+        PositionNumberBiasedEmbedder(),
+        similarity_threshold=0.75,
+        rerank_provider=reranker,
+    )
+
+    matched = [
+        pair for pair in pairs
+        if pair.baseline_para is not None
+        and "51本日本漫画" in pair.baseline_para.text
+    ]
+    added = [
+        pair for pair in pairs
+        if pair.baseline_para is None and pair.target_para is not None
+    ]
+    assert len(matched) == 1
+    assert matched[0].target_para.text == "| 2 | 位置45 | 51本日本漫画绘画教程电子书 |"
+    assert any("| 3 | 位置46 | 52本日本漫画绘画教程电子书 |" == pair.target_para.text for pair in added)
+    assert len(reranker.prompts) == 1
 
 
 def test_pdf_header_value_cells_do_not_require_known_header_names():

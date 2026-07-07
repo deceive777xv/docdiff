@@ -88,7 +88,13 @@ def run_compare(
         target_ir = _load_ir(target_version_id, conn)
 
         section_pairs = align_sections(baseline_ir, target_ir)
-        para_pairs = match_paragraphs(section_pairs, embedder, policy.similarity_threshold)
+        para_pairs = match_paragraphs(
+            section_pairs,
+            embedder,
+            policy.similarity_threshold,
+            rerank_provider=provider if policy.use_llm_match else None,
+            use_llm_rerank=policy.use_llm_match,
+        )
         result = classify(
             para_pairs,
             policy=policy,
