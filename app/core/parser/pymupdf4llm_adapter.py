@@ -26,6 +26,7 @@ def extract(
     import pymupdf4llm  # noqa: F401
 
     result = pymupdf4llm.to_markdown(file_path)
+    result = _merge_pdf_tables_into_markdown(result, _extract_pdf_tables(file_path))
     title = Path(file_path).stem
     file_hash = hashlib.sha256(Path(file_path).read_bytes()).hexdigest()
     return _parse_markdown(result, title, file_hash)
@@ -37,6 +38,197 @@ SENTENCE_END_PATTERN = re.compile(
 
 # 匹配 Markdown 表格行（整行以 | 开头和结尾）
 TABLE_ROW_PATTERN = re.compile(r'^\s*\|.*\|\s*$')
+TABLE_SEPARATOR_PATTERN = re.compile(r'^\s*\|[\s\-:|]+\|\s*$')
+
+
+def _extract_pdf_tables(file_path: str) -> list[list[list[str]]]:
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+
+    tables: list[list[list[str]]] = []
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                for raw_table in page.extract_tables() or []:
+                    table = _normalize_pdf_table(raw_table)
+                    if _is_useful_pdf_table(table):
+                        tables.append(table)
+    except Exception:
+        return []
+    return tables
+
+
+def _merge_pdf_tables_into_markdown(
+    md_text: str,
+    pdf_tables: list[list[list[object]]],
+) -> str:
+    if not pdf_tables:
+        return md_text
+
+    repaired = md_text
+    table_signatures = _markdown_table_row_signatures(repaired)
+    for raw_table in pdf_tables:
+        table = _normalize_pdf_table(raw_table)
+        if not _is_useful_pdf_table(table):
+            continue
+
+        row_signatures = _table_row_signatures(table)
+        if _table_already_present(row_signatures, table_signatures):
+            continue
+
+        table_md = _pdf_table_to_markdown(table)
+        repaired, replaced = _replace_flattened_table_text(
+            repaired,
+            row_signatures,
+            table_md,
+        )
+        if not replaced:
+            repaired = f"{repaired.rstrip()}\n\n{table_md}\n"
+        table_signatures.update(row_signatures)
+
+    return repaired
+
+
+def _normalize_pdf_table(raw_table: list[list[object]]) -> list[list[str]]:
+    rows: list[list[str]] = []
+    max_cols = 0
+    for raw_row in raw_table:
+        cells = [_clean_pdf_cell(cell) for cell in raw_row]
+        if any(cells):
+            rows.append(cells)
+            max_cols = max(max_cols, len(cells))
+
+    if not rows or max_cols == 0:
+        return []
+
+    padded = [row + [""] * (max_cols - len(row)) for row in rows]
+    non_empty_cols = [
+        index
+        for index in range(max_cols)
+        if any(row[index] for row in padded)
+    ]
+    if not non_empty_cols:
+        return []
+
+    return [[row[index] for index in non_empty_cols] for row in padded]
+
+
+def _clean_pdf_cell(cell: object) -> str:
+    if cell is None:
+        return ""
+    return re.sub(r"\s+", " ", str(cell)).strip()
+
+
+def _is_useful_pdf_table(table: list[list[str]]) -> bool:
+    if len(table) < 2:
+        return False
+    return max((len(row) for row in table), default=0) >= 2
+
+
+def _markdown_table_row_signatures(md_text: str) -> set[str]:
+    signatures: set[str] = set()
+    for line in md_text.splitlines():
+        stripped = line.strip()
+        if not TABLE_ROW_PATTERN.match(stripped):
+            continue
+        if TABLE_SEPARATOR_PATTERN.match(stripped):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        signature = _row_signature(cells)
+        if signature:
+            signatures.add(signature)
+    return signatures
+
+
+def _table_row_signatures(table: list[list[str]]) -> list[str]:
+    signatures: list[str] = []
+    for row in table:
+        signature = _row_signature(row)
+        if signature:
+            signatures.append(signature)
+    return signatures
+
+
+def _row_signature(row: list[str]) -> str:
+    return _normalize_text(" ".join(cell for cell in row if cell))
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _table_already_present(
+    row_signatures: list[str],
+    existing_signatures: set[str],
+) -> bool:
+    if not row_signatures:
+        return True
+    present = sum(1 for signature in row_signatures if signature in existing_signatures)
+    return present / len(row_signatures) >= 0.7
+
+
+def _pdf_table_to_markdown(table: list[list[str]]) -> str:
+    col_count = max((len(row) for row in table), default=0)
+    header = [f"列{index + 1}" for index in range(col_count)]
+    lines = [
+        _format_markdown_row(header),
+        _format_markdown_row(["---"] * col_count),
+    ]
+    for row in table:
+        padded = row + [""] * (col_count - len(row))
+        lines.append(_format_markdown_row(padded))
+    return "\n".join(lines)
+
+
+def _format_markdown_row(cells: list[str]) -> str:
+    return "|" + "|".join(_escape_markdown_cell(cell) for cell in cells) + "|"
+
+
+def _escape_markdown_cell(cell: str) -> str:
+    return cell.replace("|", r"\|")
+
+
+def _replace_flattened_table_text(
+    md_text: str,
+    row_signatures: list[str],
+    table_md: str,
+) -> tuple[str, bool]:
+    if not row_signatures:
+        return md_text, False
+
+    lines = md_text.splitlines()
+    min_hits = min(3, len(row_signatures))
+    first_signature = row_signatures[0]
+    last_signature = row_signatures[-1]
+
+    for index, line in enumerate(lines):
+        normalized = _normalize_text(line)
+        hit_count = _count_signature_hits(normalized, row_signatures)
+        if (
+            first_signature in normalized
+            and last_signature in normalized
+            and hit_count >= min_hits
+        ):
+            lines[index] = table_md
+            return "\n".join(lines), True
+
+    for start in range(len(lines)):
+        if first_signature not in _normalize_text(lines[start]):
+            continue
+        for end in range(start, min(len(lines), start + len(row_signatures) + 3)):
+            block = _normalize_text(" ".join(lines[start:end + 1]))
+            hit_count = _count_signature_hits(block, row_signatures)
+            if last_signature in block and hit_count >= min_hits:
+                lines[start:end + 1] = [table_md]
+                return "\n".join(lines), True
+
+    return md_text, False
+
+
+def _count_signature_hits(text: str, row_signatures: list[str]) -> int:
+    return sum(1 for signature in row_signatures if signature in text)
 
 def _split_sentences(text: str) -> list[str]:
     """
