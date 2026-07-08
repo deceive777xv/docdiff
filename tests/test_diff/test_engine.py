@@ -370,6 +370,42 @@ class TestCompare:
         assert item.risk_level == "high"
         assert "赵六" in item.baseline_text and "赵六" in item.target_text
 
+    def test_compare_delegates_single_sided_table_header_to_llm(self):
+        """When LLM classification is available, matcher should not suppress headers first."""
+        from app.core.diff import compare
+
+        class HeaderProvider:
+            def __init__(self):
+                self.prompts: list[str] = []
+
+            def chat(self, messages: list[dict], **kwargs) -> str:
+                self.prompts.append(messages[-1]["content"])
+                return (
+                    '{"should_report": false, "diff_type": "格式变化", '
+                    '"risk_level": "none", "explanation": "仅表格列名"}'
+                )
+
+        baseline = _make_table_ir([
+            "| 1 | Alpha |",
+        ])
+        target = _make_table_ir([
+            "| 编号 | 名称 |",
+            "| --- | --- |",
+            "| 1 | Alpha |",
+        ])
+        provider = HeaderProvider()
+
+        result = compare(
+            baseline,
+            target,
+            policy=ComparePolicy(use_llm_match=False, use_llm_classify=True, rule_strengthen=True),
+            provider=provider,  # type: ignore[arg-type]
+        )
+
+        assert result.items == []
+        assert len(provider.prompts) == 1
+        assert "表头" in provider.prompts[0]
+
     def test_compare_markdown_table_with_insert_and_reorder_keeps_business_rows_matched(self):
         """Real markdown table syntax should not compare separators or shifted rows."""
         from app.core.diff import compare

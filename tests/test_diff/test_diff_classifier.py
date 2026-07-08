@@ -217,6 +217,44 @@ def test_llm_none_risk_is_not_strengthened_by_low_similarity():
     assert result.items[0].risk_level == "none"
 
 
+def test_llm_can_suppress_single_sided_table_header():
+    """Unmatched table headers can be delegated to LLM before reporting."""
+    from app.core.diff.diff_classifier import classify
+
+    class Provider:
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def chat(self, messages):
+            self.prompts.append(messages[-1]["content"])
+            return (
+                '{"should_report": "false", "diff_type": "格式变化", '
+                '"risk_level": "none", "explanation": "仅表格列名"}'
+            )
+
+    provider = Provider()
+    t_para = make_para("| 序号 | 姓名 | 部门 |")
+    pp = ParagraphPair(
+        baseline_para=None,
+        target_para=t_para,
+        similarity=0.0,
+        target_table_header=True,
+    )
+
+    result = classify(
+        para_pairs=[pp],
+        policy=ComparePolicy(use_llm_classify=True, rule_strengthen=True),
+        provider=provider,  # type: ignore[arg-type]
+        task_id="t-header",
+        baseline_version_id="b",
+        target_version_id="t",
+    )
+
+    assert result.items == []
+    assert len(provider.prompts) == 1
+    assert "表头" in provider.prompts[0]
+
+
 def test_llm_none_risk_is_not_strengthened_by_numeric_metadata_changes():
     """LLM no-risk judgment should not be overridden by metadata-like numbers."""
     from app.core.diff.diff_classifier import classify

@@ -548,9 +548,9 @@ def test_table_content_row_before_separator_is_not_treated_as_header():
     from app.core.diff.semantic_matcher import _expand_paragraphs
 
     rows = [
-        "|3.2||滑轮是否借用件说明|**☆**|**☆**|**☆**|**☆**|借用那个项目/新开|",
+        "|3.2||滑轮是否借用件说明|等级1|等级2|等级3|等级4|借用那个项目/新开|",
         "|---|---|---|---|---|---|---|---|",
-        "|3.3||电机底座是否借用件说明|**☆**|**☆**|**☆**|**☆**|借用那个项目/新开|",
+        "|3.3||电机底座是否借用件说明|等级1|等级2|等级3|等级4|借用那个项目/新开|",
     ]
 
     units = _expand_paragraphs([make_para_with_sentences(rows)])
@@ -558,3 +558,34 @@ def test_table_content_row_before_separator_is_not_treated_as_header():
     assert any("3.2" in unit.para.text for unit in units)
     assert any("3.3" in unit.para.text for unit in units)
     assert not any("---" in unit.para.text for unit in units)
+
+
+def test_single_new_header_like_table_row_is_reported_as_added():
+    """A one-off new row parsed like a header must not be silently suppressed."""
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    b_rows = [
+        "| 编号 | 名称 |",
+        "| --- | --- |",
+        "| 1 | Alpha |",
+    ]
+    t_rows = [
+        "| 编号 | 名称 |",
+        "| --- | --- |",
+        "| 1 | Alpha |",
+        "| 2 | Beta |",
+        "| --- | --- |",
+        "| 3 | Gamma |",
+    ]
+    b_sec = make_section("清单", [make_para_with_sentences(b_rows)])
+    t_sec = make_section("清单", [make_para_with_sentences(t_rows)])
+    sp = SectionPair(baseline_section=b_sec, target_section=t_sec, title_similarity=1.0)
+
+    pairs = match_paragraphs([sp], TokenOverlapEmbedder(), similarity_threshold=0.75)
+
+    added = [
+        pair.target_para.text
+        for pair in pairs
+        if pair.baseline_para is None and pair.target_para is not None
+    ]
+    assert "| 2 | Beta |" in added

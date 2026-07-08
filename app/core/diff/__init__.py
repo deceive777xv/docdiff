@@ -98,6 +98,9 @@ def compare(
         effective_policy.similarity_threshold,
         rerank_provider=provider if effective_policy.use_llm_match else None,
         use_llm_rerank=effective_policy.use_llm_match,
+        suppress_unmatched_table_headers=not (
+            effective_policy.use_llm_classify and provider is not None
+        ),
     )
     return classify(
         para_pairs,
