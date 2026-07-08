@@ -32,6 +32,7 @@ class _ParagraphUnit:
     split_unit: bool
     match_text: str | None = None
     table_values: list[str] | None = None
+    table_header: bool = False
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -254,6 +255,26 @@ def _is_numeric_cell(value: str) -> bool:
     return bool(re.fullmatch(r"[-+]?\d+(?:[\.,]\d+)?%?", value.strip()))
 
 
+def _is_item_number_cell(value: str) -> bool:
+    return bool(re.fullmatch(r"\d+(?:\.\d+)+", value.strip()))
+
+
+def _looks_like_structural_table_header(line: str, following: str = "") -> bool:
+    if "|" not in line or not _is_table_separator_row(following):
+        return False
+    if _row_has_embedded_header_values(line):
+        return False
+
+    values = [value for value in _table_row_values(line) if value]
+    if len(values) < 2:
+        return False
+    if any(_is_item_number_cell(value) for value in values):
+        return False
+    if any("☆" in value or "★" in value for value in values):
+        return False
+    return True
+
+
 def _leading_numeric_cell_count(values: list[str]) -> int:
     count = 0
     for value in values:
@@ -379,16 +400,11 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
             continue
 
         is_table = _looks_like_table(para)
-        table_lines = [sent.text.strip() for sent in para.sentences if sent.text.strip()] if is_table else []
-        header_labels = _table_header_labels(table_lines) if is_table else []
-        for index, sent in enumerate(para.sentences):
-            text = sent.text.strip()
-            if not text:
-                continue
+        sentences = [sent.text.strip() for sent in para.sentences if sent.text.strip()]
+        for index, text in enumerate(sentences):
             if is_table and (
                 _is_table_separator_row(text)
                 or _is_empty_table_row(text)
-                or _is_table_header_row(text, header_labels)
             ):
                 continue
 
@@ -397,12 +413,14 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
                 text=text,
                 sentences=[Sentence(text=text)],
             )
+            following = sentences[index + 1] if index + 1 < len(sentences) else ""
             units.append(
                 _ParagraphUnit(
                     para=unit_para,
                     split_unit=True,
                     match_text=_table_row_match_text(text) if is_table else text,
                     table_values=_table_row_values(text) if is_table else None,
+                    table_header=_looks_like_structural_table_header(text, following) if is_table else False,
                 )
             )
     return units
@@ -438,6 +456,8 @@ def match_paragraphs(
         # Sections with no match in other doc → all paragraphs are added/removed
         if not b_units:
             for unit in t_units:
+                if unit.table_header:
+                    continue
                 results.append(ParagraphPair(
                     None,
                     unit.para,
@@ -449,6 +469,8 @@ def match_paragraphs(
             continue
         if not t_units:
             for unit in b_units:
+                if unit.table_header:
+                    continue
                 results.append(ParagraphPair(
                     unit.para,
                     None,
@@ -530,6 +552,8 @@ def match_paragraphs(
                     target_match_text=target_match_text,
                 ))
             else:
+                if b_unit.table_header:
+                    continue
                 results.append(ParagraphPair(
                     b_unit.para,
                     None,
@@ -541,6 +565,8 @@ def match_paragraphs(
 
         for j, t_unit in enumerate(t_units):
             if j not in t_used:
+                if t_unit.table_header:
+                    continue
                 results.append(ParagraphPair(
                     None,
                     t_unit.para,

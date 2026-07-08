@@ -541,3 +541,20 @@ def test_empty_pdf_table_rows_are_ignored():
         or (pair.target_para is not None and pair.target_para.text == "||||")
         for pair in pairs
     )
+
+
+def test_table_content_row_before_separator_is_not_treated_as_header():
+    """A page-continuation data row followed by a separator must still be matched."""
+    from app.core.diff.semantic_matcher import _expand_paragraphs
+
+    rows = [
+        "|3.2||滑轮是否借用件说明|**☆**|**☆**|**☆**|**☆**|借用那个项目/新开|",
+        "|---|---|---|---|---|---|---|---|",
+        "|3.3||电机底座是否借用件说明|**☆**|**☆**|**☆**|**☆**|借用那个项目/新开|",
+    ]
+
+    units = _expand_paragraphs([make_para_with_sentences(rows)])
+
+    assert any("3.2" in unit.para.text for unit in units)
+    assert any("3.3" in unit.para.text for unit in units)
+    assert not any("---" in unit.para.text for unit in units)
