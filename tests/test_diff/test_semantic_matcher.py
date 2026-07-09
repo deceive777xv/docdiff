@@ -128,6 +128,28 @@ class CandidateRerankProvider(BaseProvider):
         return True
 
 
+class ConflictClusterRerankProvider(BaseProvider):
+    """Fake LLM provider that returns global pairings for a local conflict cluster."""
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] for _ in texts]
+
+    def chat(self, messages: list[dict], **kwargs) -> str:
+        self.prompts.append(messages[-1]["content"])
+        return (
+            '{"matches": ['
+            '{"baseline": 1, "target": 2, "confidence": 0.98}, '
+            '{"baseline": 2, "target": null, "confidence": 0.96}'
+            '], "reason": "按项目内容和方向成组匹配"}'
+        )
+
+    def health_check(self) -> bool:
+        return True
+
+
 def make_para(text: str) -> Paragraph:
     return Paragraph(
         paragraph_id=str(uuid.uuid4()),
@@ -420,6 +442,58 @@ def test_llm_rerank_selects_better_candidate_when_numbers_are_ambiguous():
     assert len(matched) == 1
     assert matched[0].target_para.text == "| 2 | 位置45 | 51本日本漫画绘画教程电子书 |"
     assert any("| 3 | 位置46 | 52本日本漫画绘画教程电子书 |" == pair.target_para.text for pair in added)
+    assert len(reranker.prompts) == 1
+
+
+def test_llm_conflict_cluster_rerank_resolves_shifted_table_rows():
+    """A local LLM rerank can resolve rows that compete for the same target after insertion."""
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    b_rows = [
+        "| 序号 | 类型 | 项目 | 要求 |",
+        "| --- | --- | --- | --- |",
+        "| 2.98 | 动态间隙 | 升降器托架与转轮间隙(Y向) | ≥3mm |",
+        "| 2.99 | 动态间隙 | 升降器托架与转轮间隙(Z向) | ≥3mm |",
+    ]
+    t_rows = [
+        "| 序号 | 类型 | 项目 | 要求 |",
+        "| --- | --- | --- | --- |",
+        "| 2.98 | 动态间隙 | 升降器电机座板与玻璃间隙 | ≥8mm |",
+        "| 2.99 | 动态间隙 | 升降器托架与转轮间隙(Y向) | ≥3mm |",
+    ]
+    b_sec = make_section("设计点检表", [make_para_with_sentences(b_rows)])
+    t_sec = make_section("设计点检表", [make_para_with_sentences(t_rows)])
+    sp = SectionPair(baseline_section=b_sec, target_section=t_sec, title_similarity=1.0)
+    reranker = ConflictClusterRerankProvider()
+
+    pairs = match_paragraphs(
+        [sp],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.5,
+        rerank_provider=reranker,
+    )
+
+    matched = [
+        (pair.baseline_para.text, pair.target_para.text)
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    ]
+    deleted = [
+        pair.baseline_para.text
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is None
+    ]
+    added = [
+        pair.target_para.text
+        for pair in pairs
+        if pair.baseline_para is None and pair.target_para is not None
+    ]
+    assert (
+        "| 2.98 | 动态间隙 | 升降器托架与转轮间隙(Y向) | ≥3mm |",
+        "| 2.99 | 动态间隙 | 升降器托架与转轮间隙(Y向) | ≥3mm |",
+    ) in matched
+    assert "| 2.99 | 动态间隙 | 升降器托架与转轮间隙(Z向) | ≥3mm |" in deleted
+    assert "| 2.98 | 动态间隙 | 升降器电机座板与玻璃间隙 | ≥8mm |" in added
     assert len(reranker.prompts) == 1
 
 

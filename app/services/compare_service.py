@@ -94,6 +94,9 @@ def run_compare(
             policy.similarity_threshold,
             rerank_provider=provider if policy.use_llm_match else None,
             use_llm_rerank=policy.use_llm_match,
+            suppress_unmatched_table_headers=not (
+                policy.use_llm_classify and provider is not None
+            ),
         )
         result = classify(
             para_pairs,

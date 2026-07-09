@@ -62,6 +62,8 @@ _LLM_RERANK_TOP_K = 5
 _LLM_RERANK_SCORE_GAP = 0.15
 _LLM_RERANK_MIN_SCORE = 0.45
 _LLM_RERANK_MIN_CONFIDENCE = 0.6
+_LLM_CONFLICT_MAX_BASELINES = 6
+_LLM_CONFLICT_MAX_TARGETS = 8
 
 _MATCH_RERANK_PROMPT = """你是文档表格行匹配助手。请判断“基准行”应该和哪一个候选行视为同一条记录。
 
@@ -82,6 +84,33 @@ _MATCH_RERANK_PROMPT = """你是文档表格行匹配助手。请判断“基准
 {{
   "matched_candidate": 1,
   "confidence": 0.0,
+  "reason": "简短原因"
+}}
+"""
+
+_CONFLICT_RERANK_PROMPT = """你是文档表格行匹配助手。下面是一组局部冲突候选：多条基准行和多条目标行内容相近，可能发生插入、删除或序号偏移。
+
+匹配原则：
+- 优先看核心内容、项目名称、主体、方向、条件、尺寸/数值要求是否一致。
+- 行号、序号、页码、展示位置可以不同，不能因为序号相同就强行匹配。
+- 如果某条基准行在目标文档没有对应行，target 返回 null。
+- 每条目标行最多匹配一条基准行。
+
+基准行：
+{baseline_rows}
+
+目标行：
+{target_rows}
+
+候选相似度：
+{score_rows}
+
+请只输出 JSON：
+{{
+  "matches": [
+    {{"baseline": 1, "target": 2, "confidence": 0.95}},
+    {{"baseline": 2, "target": null, "confidence": 0.90}}
+  ],
   "reason": "简短原因"
 }}
 """
@@ -429,6 +458,178 @@ def _llm_rerank_candidate(
         return None
 
 
+def _rank_candidates_by_baseline(
+    candidates_by_baseline: dict[int, list[tuple[float, int]]],
+) -> dict[int, list[tuple[float, int]]]:
+    return {
+        i: sorted(row_candidates, key=lambda item: (-item[0], item[1]))[:_LLM_RERANK_TOP_K]
+        for i, row_candidates in candidates_by_baseline.items()
+    }
+
+
+def _candidate_score_map(
+    ranked_by_baseline: dict[int, list[tuple[float, int]]],
+) -> dict[tuple[int, int], float]:
+    return {
+        (i, j): score
+        for i, row_candidates in ranked_by_baseline.items()
+        for score, j in row_candidates
+    }
+
+
+def _find_conflict_clusters(
+    b_units: list[_ParagraphUnit],
+    t_units: list[_ParagraphUnit],
+    ranked_by_baseline: dict[int, list[tuple[float, int]]],
+) -> list[tuple[list[int], list[int]]]:
+    top_target_to_baselines: dict[int, list[int]] = {}
+    for i, row_candidates in ranked_by_baseline.items():
+        if not row_candidates or b_units[i].table_values is None:
+            continue
+        _, top_j = row_candidates[0]
+        if t_units[top_j].table_values is None:
+            continue
+        top_target_to_baselines.setdefault(top_j, []).append(i)
+
+    clusters: list[tuple[list[int], list[int]]] = []
+    seen_baselines: set[int] = set()
+    for _, initial_baselines in sorted(top_target_to_baselines.items()):
+        if len(initial_baselines) < 2:
+            continue
+
+        baseline_set = set(initial_baselines)
+        target_set: set[int] = set()
+        for i in baseline_set:
+            for _, j in ranked_by_baseline.get(i, []):
+                if t_units[j].table_values is not None:
+                    target_set.add(j)
+
+        if len(baseline_set) < 2 or not target_set:
+            continue
+        if baseline_set & seen_baselines:
+            continue
+        baseline_indices = sorted(baseline_set)
+        target_indices = sorted(target_set)
+        if (
+            len(baseline_indices) > _LLM_CONFLICT_MAX_BASELINES
+            or len(target_indices) > _LLM_CONFLICT_MAX_TARGETS
+        ):
+            continue
+        seen_baselines.update(baseline_indices)
+        clusters.append((baseline_indices, target_indices))
+    return clusters
+
+
+def _format_conflict_rows(
+    units: list[_ParagraphUnit],
+    indices: list[int],
+) -> str:
+    lines: list[str] = []
+    for local_index, unit_index in enumerate(indices, start=1):
+        unit = units[unit_index]
+        lines.append(
+            (
+                f"{local_index}. 原文：{unit.para.text[:300]}\n"
+                f"   匹配文本：{_unit_match_text(unit)[:300]}"
+            )
+        )
+    return "\n".join(lines)
+
+
+def _format_conflict_scores(
+    baseline_indices: list[int],
+    target_indices: list[int],
+    score_map: dict[tuple[int, int], float],
+) -> str:
+    target_lookup = {target_index: local for local, target_index in enumerate(target_indices, start=1)}
+    rows: list[str] = []
+    for baseline_local, baseline_index in enumerate(baseline_indices, start=1):
+        parts = []
+        for target_index in target_indices:
+            score = score_map.get((baseline_index, target_index))
+            if score is not None:
+                parts.append(f"T{target_lookup[target_index]}={score:.3f}")
+        rows.append(f"B{baseline_local}: " + (", ".join(parts) if parts else "无候选"))
+    return "\n".join(rows)
+
+
+def _parse_nullable_index(value: object, upper_bound: int) -> int | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"", "null", "none", "no_match", "unmatched", "无", "无匹配"}:
+        return None
+    index = int(float(normalized))
+    if not 1 <= index <= upper_bound:
+        return None
+    return index
+
+
+def _llm_rerank_conflict_cluster(
+    b_units: list[_ParagraphUnit],
+    t_units: list[_ParagraphUnit],
+    baseline_indices: list[int],
+    target_indices: list[int],
+    score_map: dict[tuple[int, int], float],
+    provider: BaseProvider,
+) -> tuple[list[tuple[int, int, float, float]], set[int]]:
+    prompt = _CONFLICT_RERANK_PROMPT.format(
+        baseline_rows=_format_conflict_rows(b_units, baseline_indices),
+        target_rows=_format_conflict_rows(t_units, target_indices),
+        score_rows=_format_conflict_scores(baseline_indices, target_indices, score_map),
+    )
+    try:
+        response = provider.chat([{"role": "user", "content": prompt}])
+        match = re.search(r"\{.*\}", response, re.DOTALL)
+        if not match:
+            return [], set()
+        data = json.loads(match.group())
+        raw_matches = data.get("matches", [])
+        if not isinstance(raw_matches, list):
+            return [], set()
+
+        selected: list[tuple[int, int, float, float]] = []
+        unmatched_baselines: set[int] = set()
+        used_targets: set[int] = set()
+        max_cluster_score = max(
+            (
+                score
+                for (i, j), score in score_map.items()
+                if i in baseline_indices and j in target_indices
+            ),
+            default=0.0,
+        )
+        for item in raw_matches:
+            if not isinstance(item, dict):
+                continue
+            try:
+                baseline_local = int(float(str(item.get("baseline")).strip()))
+                if not 1 <= baseline_local <= len(baseline_indices):
+                    continue
+                target_local = _parse_nullable_index(item.get("target"), len(target_indices))
+                confidence = float(item.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if confidence < _LLM_RERANK_MIN_CONFIDENCE:
+                continue
+
+            baseline_index = baseline_indices[baseline_local - 1]
+            if target_local is None:
+                unmatched_baselines.add(baseline_index)
+                continue
+            target_index = target_indices[target_local - 1]
+            if target_index in used_targets:
+                continue
+            selected_score = score_map.get((baseline_index, target_index), 0.0)
+            rank_score = max(max_cluster_score + 0.002, selected_score, _LLM_RERANK_MIN_SCORE)
+            selected.append((baseline_index, target_index, rank_score, selected_score))
+            used_targets.add(target_index)
+        return selected, unmatched_baselines
+    except Exception as exc:
+        logger.warning("LLM conflict rerank failed, using embedding score: %s", exc)
+        return [], set()
+
+
 def _looks_like_table(para: Paragraph) -> bool:
     row_count = sum(1 for sent in para.sentences if "|" in sent.text)
     return row_count >= 2
@@ -568,9 +769,30 @@ def match_paragraphs(
                 if sim >= similarity_threshold:
                     candidates.append((sim, sim, i, j))
 
+        llm_unmatched_baselines: set[int] = set()
         if rerank_provider is not None and use_llm_rerank:
-            for i, row_candidates in candidates_by_baseline.items():
-                ranked = sorted(row_candidates, key=lambda item: (-item[0], item[1]))[:_LLM_RERANK_TOP_K]
+            ranked_by_baseline = _rank_candidates_by_baseline(candidates_by_baseline)
+            score_map = _candidate_score_map(ranked_by_baseline)
+            for baseline_indices, target_indices in _find_conflict_clusters(
+                b_units,
+                t_units,
+                ranked_by_baseline,
+            ):
+                selected_pairs, unmatched_baselines = _llm_rerank_conflict_cluster(
+                    b_units,
+                    t_units,
+                    baseline_indices,
+                    target_indices,
+                    score_map,
+                    rerank_provider,
+                )
+                llm_unmatched_baselines.update(unmatched_baselines)
+                for i, j, rank_score, selected_score in selected_pairs:
+                    candidates.append((rank_score, selected_score, i, j))
+
+            for i, ranked in ranked_by_baseline.items():
+                if i in llm_unmatched_baselines:
+                    continue
                 if not _should_llm_rerank_candidates(b_units[i], t_units, ranked):
                     continue
                 selected_j = _llm_rerank_candidate(
@@ -591,6 +813,8 @@ def match_paragraphs(
         t_used: set[int] = set()
         for _, sim, i, j in sorted(candidates, key=lambda item: (-item[0], item[2], item[3])):
             if i in b_matched or j in t_used:
+                continue
+            if i in llm_unmatched_baselines:
                 continue
             b_matched[i] = (j, sim)
             t_used.add(j)
