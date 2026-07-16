@@ -401,12 +401,33 @@
       'use strict';
 
       var scrollSyncInProgress = false;
+      var scrollSyncPaused = false;
+      var scrollSyncPauseTimer = null;
+
+      function schedulePaneScrollSyncResume() {
+        if (scrollSyncPauseTimer !== null) {
+          window.clearTimeout(scrollSyncPauseTimer);
+        }
+        scrollSyncPauseTimer = window.setTimeout(function () {
+          scrollSyncPaused = false;
+          scrollSyncPauseTimer = null;
+        }, 120);
+      }
+
+      function pausePaneScrollSync() {
+        scrollSyncPaused = true;
+        schedulePaneScrollSyncResume();
+      }
 
       function maximumScrollTop(pane) {
         return Math.max(0, pane.scrollHeight - pane.clientHeight);
       }
 
       function syncPaneScroll(sourcePane, targetPane) {
+        if (scrollSyncPaused) {
+          schedulePaneScrollSyncResume();
+          return;
+        }
         if (scrollSyncInProgress) {
           return;
         }
@@ -465,6 +486,7 @@
 
       function focusDiff(diffId) {
         var matches = selectDiff(diffId);
+        pausePaneScrollSync();
         ['baseline-pane', 'target-pane'].forEach(function (paneId) {
           var pane = document.getElementById(paneId);
           var target = null;
@@ -495,7 +517,7 @@
               window.bridge.onDiffClick(diffId);
             }
 
-            selectDiff(diffId);
+            focusDiff(diffId);
           };
           el.addEventListener('click', el._diffClickHandler);
         });

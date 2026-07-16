@@ -668,6 +668,20 @@ def test_diff_template_syncs_panes_by_relative_scroll_progress():
     assert "scrollSyncInProgress" in template
 
 
+def test_diff_template_click_centers_matching_items_and_pauses_sync_feedback():
+    """Clicking a document diff should center both matches without scroll fighting."""
+    from pathlib import Path
+
+    template = Path("assets/diff_template.html").read_text(encoding="utf-8")
+
+    assert "function pausePaneScrollSync()" in template
+    assert "function schedulePaneScrollSyncResume()" in template
+    assert "pausePaneScrollSync();" in template
+    assert "schedulePaneScrollSyncResume();" in template
+    assert "target.scrollIntoView({ behavior: 'smooth', block: 'center' });" in template
+    assert "focusDiff(diffId);" in template
+
+
 def test_render_diff_resets_both_panes_without_auto_focusing(compare_page):
     """Injecting a result should show document tops without selecting a diff."""
     from app.core.types import DiffItem, DiffResult
