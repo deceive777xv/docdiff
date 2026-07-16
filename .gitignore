@@ -21,3 +21,4 @@ app.log
 releases/
 .codegraph/
 .tmp/
+.worktrees/
