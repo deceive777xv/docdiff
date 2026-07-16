@@ -653,6 +653,50 @@ def test_diff_template_exposes_focus_diff_function():
     assert "scrollIntoView" in html
 
 
+def test_diff_template_syncs_panes_by_relative_scroll_progress():
+    """Either document pane should drive proportional scrolling in the other pane."""
+    from pathlib import Path
+
+    template = Path("assets/diff_template.html").read_text(encoding="utf-8")
+
+    assert "function maximumScrollTop(pane)" in template
+    assert "function syncPaneScroll(sourcePane, targetPane)" in template
+    assert "sourcePane.scrollTop / sourceMaximum" in template
+    assert "progress * targetMaximum" in template
+    assert "baselinePane.addEventListener('scroll'" in template
+    assert "targetPane.addEventListener('scroll'" in template
+    assert "scrollSyncInProgress" in template
+
+
+def test_render_diff_resets_both_panes_without_auto_focusing(compare_page):
+    """Injecting a result should show document tops without selecting a diff."""
+    from app.core.types import DiffItem, DiffResult
+
+    result = DiffResult(
+        task_id="task-top",
+        baseline_version_id="baseline-top",
+        target_version_id="target-top",
+        items=[
+            DiffItem(
+                diff_id="diff-top",
+                section_path="第一章",
+                diff_type="实质修改",
+                risk_level="medium",
+                baseline_text="旧内容",
+                target_text="新内容",
+                similarity_score=0.5,
+                explanation="",
+            )
+        ],
+    )
+
+    compare_page._render_diff(result)
+
+    script = compare_page._web_view.page().runJavaScript.call_args.args[0]
+    assert "resetDiffPaneScroll();" in script
+    assert "focusDiff(" not in script
+
+
 def test_load_task_result_populates_compare_page(qtbot, ctx, mem_conn):
     """A completed task can be opened from the home page and rendered in ComparePage."""
     from app.core.types import DiffItem

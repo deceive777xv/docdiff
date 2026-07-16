@@ -934,6 +934,7 @@ class ComparePage(QWidget):
                 f"{json.dumps(baseline_html, ensure_ascii=False)};\n"
                 f"document.getElementById('target-content').innerHTML = "
                 f"{json.dumps(target_html, ensure_ascii=False)};\n"
+                "resetDiffPaneScroll();\n"
                 "attachDiffHandlers();"
             )
             self._run_diff_js(js)
@@ -978,6 +979,7 @@ class ComparePage(QWidget):
             f"{json.dumps(baseline_html, ensure_ascii=False)};\n"
             f"document.getElementById('target-content').innerHTML = "
             f"{json.dumps(target_html, ensure_ascii=False)};\n"
+            "resetDiffPaneScroll();\n"
             "attachDiffHandlers();"
         )
         self._run_diff_js(js)

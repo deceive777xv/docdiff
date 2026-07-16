@@ -400,6 +400,47 @@
     (function () {
       'use strict';
 
+      var scrollSyncInProgress = false;
+
+      function maximumScrollTop(pane) {
+        return Math.max(0, pane.scrollHeight - pane.clientHeight);
+      }
+
+      function syncPaneScroll(sourcePane, targetPane) {
+        if (scrollSyncInProgress) {
+          return;
+        }
+
+        var sourceMaximum = maximumScrollTop(sourcePane);
+        var targetMaximum = maximumScrollTop(targetPane);
+        var progress = sourceMaximum > 0
+          ? sourcePane.scrollTop / sourceMaximum
+          : 0;
+
+        scrollSyncInProgress = true;
+        targetPane.scrollTop = progress * targetMaximum;
+        window.requestAnimationFrame(function () {
+          scrollSyncInProgress = false;
+        });
+      }
+
+      function attachPaneScrollSync() {
+        var baselinePane = document.getElementById('baseline-pane');
+        var targetPane = document.getElementById('target-pane');
+
+        baselinePane.addEventListener('scroll', function () {
+          syncPaneScroll(baselinePane, targetPane);
+        });
+        targetPane.addEventListener('scroll', function () {
+          syncPaneScroll(targetPane, baselinePane);
+        });
+      }
+
+      function resetDiffPaneScroll() {
+        document.getElementById('baseline-pane').scrollTop = 0;
+        document.getElementById('target-pane').scrollTop = 0;
+      }
+
       function matchingDiffElements(diffId) {
         var matches = [];
         document.querySelectorAll('.diff-item').forEach(function (el) {
@@ -464,6 +505,9 @@
       window.attachDiffHandlers = attachDiffHandlers;
       window.focusDiff = focusDiff;
       window.selectDiff = selectDiff;
+      window.resetDiffPaneScroll = resetDiffPaneScroll;
+
+      attachPaneScrollSync();
 
       // Initialize QWebChannel bridge when the transport is available
       if (typeof qt !== 'undefined' && qt.webChannelTransport) {
