@@ -361,6 +361,26 @@ def build_reconstruction_operations(
 ) -> list[ReconstructionOperation]:
     """Build a stable, explicit transformation trace from accepted assessments."""
     operations: list[ReconstructionOperation] = []
+    projections: dict[
+        tuple[Literal["baseline", "target"], SourceRowRef],
+        dict[int, int],
+    ] = {}
+
+    def record_projection(
+        side: Literal["baseline", "target"],
+        source: SourceRowRef,
+        mapping: Mapping[int, int],
+    ) -> None:
+        normalized = dict(sorted(mapping.items()))
+        key = (side, source)
+        existing = projections.get(key)
+        if existing is not None and existing != normalized:
+            raise ValueError(
+                "conflicting projections for source row "
+                f"{source.section_id}/{source.paragraph_id}/{source.sentence_index}"
+            )
+        projections[key] = normalized
+
     for side in ("baseline", "target"):
         side_rows = sorted(boundary_rows.get(side, set()), key=_source_row_key)
         if side_rows:
@@ -387,16 +407,19 @@ def build_reconstruction_operations(
             dict.fromkeys(source.paragraph_id for source in sources)
         )
         mapping = dict(sorted(candidate.mapping.logical_by_physical.items()))
+        logical_width = max(mapping.values(), default=-1) + 1
+        record_projection(
+            candidate.side,
+            candidate.previous_row.source,
+            _infer_row_projection(candidate.previous_row, logical_width),
+        )
+        record_projection(
+            candidate.side,
+            candidate.continuation_row.source,
+            mapping,
+        )
         operations.extend(
             (
-                ReconstructionOperation(
-                    "",
-                    candidate.side,
-                    "project_columns",
-                    [candidate.continuation_row.source],
-                    column_mapping=mapping,
-                    decision_id=candidate.candidate_id,
-                ),
                 ReconstructionOperation(
                     "",
                     candidate.side,
@@ -417,11 +440,64 @@ def build_reconstruction_operations(
                 )
             )
 
+    operations.extend(
+        ReconstructionOperation(
+            "",
+            side,
+            "project_columns",
+            [source],
+            column_mapping=mapping,
+        )
+        for (side, source), mapping in projections.items()
+    )
+
     unique: dict[str, ReconstructionOperation] = {}
     for operation in operations:
         identified = _with_stable_identity(operation)
         unique.setdefault(identified.operation_id, identified)
     return sorted(unique.values(), key=_operation_sort_key)
+
+
+def _infer_row_projection(
+    row: TableRowMatrix,
+    logical_width: int,
+) -> dict[int, int]:
+    """Infer a row-local projection without assuming fixed physical columns."""
+    if logical_width <= 0:
+        raise ValueError("logical projection width must be positive")
+    physical_width = len(row.raw_cells)
+    if physical_width < logical_width:
+        raise ValueError("source row is narrower than its logical projection")
+    if physical_width == logical_width:
+        columns = tuple(range(logical_width))
+    else:
+        occupied = tuple(
+            index
+            for index, value in enumerate(row.raw_cells)
+            if _normalize_cell(value)
+        )
+        if len(occupied) > logical_width:
+            raise ValueError("source row has too many occupied cells for logical projection")
+        selected = set(occupied)
+
+        def candidate_score(candidate: tuple[int, ...]) -> tuple[object, ...]:
+            gaps = [right - left for left, right in zip(candidate, candidate[1:])]
+            gap_variation = (
+                sum(abs(gap * len(gaps) - sum(gaps)) for gap in gaps)
+                if gaps
+                else 0
+            )
+            return gap_variation, -(candidate[-1] - candidate[0]), candidate
+
+        while len(selected) < logical_width:
+            selected.add(
+                min(
+                    (index for index in range(physical_width) if index not in selected),
+                    key=lambda index: candidate_score(tuple(sorted(selected | {index}))),
+                )
+            )
+        columns = tuple(sorted(selected))
+    return {physical: logical for logical, physical in enumerate(columns)}
 
 
 def _project_raw_cells(
@@ -480,6 +556,45 @@ def merge_logical_rows(
         else:
             result.append(f"{left}<br>{right}")
     return tuple(result)
+
+
+def _conservative_key_logical_columns(
+    previous: TableRowMatrix,
+    continuation: TableRowMatrix,
+) -> frozenset[int]:
+    """Identify replay-time key roles conservatively from logical row shape."""
+    width = max(len(previous.raw_cells), len(continuation.raw_cells))
+    jointly_occupied = [
+        logical_index
+        for logical_index in range(width)
+        if logical_index < len(previous.occupied)
+        and previous.occupied[logical_index]
+        and logical_index < len(continuation.occupied)
+        and continuation.occupied[logical_index]
+    ]
+    keys = {
+        logical_index
+        for logical_index in jointly_occupied
+        if previous.value_types[logical_index] in {"integer", "hierarchical_number"}
+        or continuation.value_types[logical_index] in {"integer", "hierarchical_number"}
+    }
+    occupied_columns = [
+        logical_index
+        for logical_index in range(width)
+        if (
+            logical_index < len(previous.occupied)
+            and previous.occupied[logical_index]
+        )
+        or (
+            logical_index < len(continuation.occupied)
+            and continuation.occupied[logical_index]
+        )
+    ]
+    if width > 1 and occupied_columns:
+        leading_role = occupied_columns[0]
+        if leading_role in jointly_occupied:
+            keys.add(leading_role)
+    return frozenset(keys)
 
 
 _BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
@@ -1661,6 +1776,12 @@ def _initialize_replay_metadata(document: DocumentIR) -> None:
                 paragraph._reconstruction_source_paragraph_ids = frozenset(
                     {paragraph.paragraph_id}
                 )
+            if not hasattr(paragraph, "_reconstruction_paragraph_ids"):
+                paragraph._reconstruction_paragraph_ids = frozenset(
+                    {paragraph.paragraph_id}
+                )
+            if not hasattr(paragraph, "_reconstruction_operations"):
+                paragraph._reconstruction_operations = frozenset()
             for sentence_index, sentence in enumerate(paragraph.sentences):
                 if not hasattr(sentence, "_reconstruction_source_rows"):
                     sentence._reconstruction_source_rows = frozenset(
@@ -1674,6 +1795,11 @@ def _initialize_replay_metadata(document: DocumentIR) -> None:
                     )
                 if not hasattr(sentence, "_reconstruction_operations"):
                     sentence._reconstruction_operations = frozenset()
+                if not hasattr(sentence, "_reconstruction_row_ids"):
+                    existing_id = getattr(sentence, "_reconstruction_row_id", "")
+                    sentence._reconstruction_row_ids = frozenset(
+                        {existing_id} if existing_id else set()
+                    )
 
 
 def _row_locations(
@@ -1765,10 +1891,13 @@ def _already_applied(
                 for section in document.sections
                 for paragraph in section.paragraphs
                 for sentence in paragraph.sentences
-                if getattr(sentence, "_reconstruction_row_id", "") == expected_id
+                if expected_id
+                in getattr(sentence, "_reconstruction_row_ids", frozenset())
                 and set(operation.source_rows).issubset(
                     getattr(sentence, "_reconstruction_source_rows", frozenset())
                 )
+                and operation.operation_id
+                in getattr(sentence, "_reconstruction_operations", frozenset())
             ]
             return len(matches) == 1
         if operation.type == "merge_fragments":
@@ -1777,7 +1906,8 @@ def _already_applied(
                 paragraph
                 for section in document.sections
                 for paragraph in section.paragraphs
-                if paragraph.paragraph_id == expected_id
+                if expected_id
+                in getattr(paragraph, "_reconstruction_paragraph_ids", frozenset())
                 and set(operation.source_paragraph_ids).issubset(
                     getattr(
                         paragraph,
@@ -1785,6 +1915,8 @@ def _already_applied(
                         frozenset(),
                     )
                 )
+                and operation.operation_id
+                in getattr(paragraph, "_reconstruction_operations", frozenset())
             ]
             return len(matches) == 1
         return False
@@ -1793,10 +1925,12 @@ def _already_applied(
     if operation.type == "merge_rows":
         expected_id = _expected_row_id(operation)
         return any(
-            getattr(sentence, "_reconstruction_row_id", "") == expected_id
+            expected_id in getattr(sentence, "_reconstruction_row_ids", frozenset())
             and set(operation.source_rows).issubset(
                 getattr(sentence, "_reconstruction_source_rows", frozenset())
             )
+            and operation.operation_id
+            in getattr(sentence, "_reconstruction_operations", frozenset())
             for section in document.sections
             for paragraph in section.paragraphs
             for sentence in paragraph.sentences
@@ -1804,10 +1938,13 @@ def _already_applied(
     if operation.type == "merge_fragments":
         expected_id = _expected_paragraph_id(operation)
         return any(
-            paragraph.paragraph_id == expected_id
+            expected_id
+            in getattr(paragraph, "_reconstruction_paragraph_ids", frozenset())
             and set(operation.source_paragraph_ids).issubset(
                 getattr(paragraph, "_reconstruction_source_paragraph_ids", frozenset())
             )
+            and operation.operation_id
+            in getattr(paragraph, "_reconstruction_operations", frozenset())
             for section in document.sections
             for paragraph in section.paragraphs
         )
@@ -1904,8 +2041,10 @@ def _apply_merge_rows(
         sentence = previous_location[3]
         provenance = getattr(sentence, "_reconstruction_source_rows", frozenset())
         if (
-            getattr(sentence, "_reconstruction_row_id", "") == expected_id
+            expected_id in getattr(sentence, "_reconstruction_row_ids", frozenset())
             and set(operation.source_rows).issubset(provenance)
+            and operation.operation_id
+            in getattr(sentence, "_reconstruction_operations", frozenset())
         ):
             return
         raise ValueError("merge_rows source rows resolve to the same non-derived row")
@@ -1923,15 +2062,24 @@ def _apply_merge_rows(
         previous_row,
         continuation_row,
         identity,
-        frozenset(),
+        _conservative_key_logical_columns(previous_row, continuation_row),
     )
     merged = Sentence(_render_table_row(merged_cells))
     merged._reconstruction_row_id = _expected_row_id(operation)
+    merged._reconstruction_row_ids = frozenset(
+        set(previous_sentence._reconstruction_row_ids)
+        | set(continuation_sentence._reconstruction_row_ids)
+        | {merged._reconstruction_row_id}
+    )
     merged._reconstruction_source_rows = frozenset(
         set(previous_sentence._reconstruction_source_rows)
         | set(continuation_sentence._reconstruction_source_rows)
     )
-    merged._reconstruction_operations = frozenset({operation.operation_id})
+    merged._reconstruction_operations = frozenset(
+        set(previous_sentence._reconstruction_operations)
+        | set(continuation_sentence._reconstruction_operations)
+        | {operation.operation_id}
+    )
 
     if previous_paragraph is continuation_paragraph:
         continuation_index = next(
@@ -1981,9 +2129,13 @@ def _apply_merge_fragments(
             "_reconstruction_source_paragraph_ids",
             frozenset(),
         )
-        if paragraph.paragraph_id == expected_id and set(
-            operation.source_paragraph_ids
-        ).issubset(provenance):
+        if (
+            expected_id
+            in getattr(paragraph, "_reconstruction_paragraph_ids", frozenset())
+            and set(operation.source_paragraph_ids).issubset(provenance)
+            and operation.operation_id
+            in getattr(paragraph, "_reconstruction_operations", frozenset())
+        ):
             return
         raise ValueError("merge_fragments sources resolve to one non-derived paragraph")
     ordered = sorted(unique.values(), key=lambda location: (location[0], location[2]))
@@ -2003,6 +2155,16 @@ def _apply_merge_fragments(
         for paragraph in paragraphs
         for source_id in paragraph._reconstruction_source_paragraph_ids
     )
+    merged._reconstruction_paragraph_ids = frozenset(
+        paragraph_id
+        for paragraph in paragraphs
+        for paragraph_id in paragraph._reconstruction_paragraph_ids
+    ) | {_expected_paragraph_id(operation)}
+    merged._reconstruction_operations = frozenset(
+        operation_id
+        for paragraph in paragraphs
+        for operation_id in paragraph._reconstruction_operations
+    ) | {operation.operation_id}
     _rebuild_paragraph(merged)
     paragraph_ids = {id(paragraph) for paragraph in paragraphs}
     section.paragraphs[:] = [

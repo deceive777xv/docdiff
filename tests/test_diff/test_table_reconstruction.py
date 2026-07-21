@@ -1041,20 +1041,153 @@ def target_only_row_text() -> str:
     return "target-only-neutral-row"
 
 
-def test_sanitized_fixture_varies_body_columns_and_contains_required_control_rows():
-    baseline, target = load_sanitized_fixture()
-    baseline_paragraphs = baseline.sections[0].paragraphs
-    target_paragraphs = target.sections[0].paragraphs
-
-    assert len(baseline_paragraphs[1].sentences[0].text.split("|")) != len(
-        baseline_paragraphs[4].sentences[1].text.split("|")
+def _fixture_row(document: DocumentIR, paragraph_id: str, sentence_index: int):
+    section = document.sections[0]
+    paragraph = next(
+        paragraph for paragraph in section.paragraphs if paragraph.paragraph_id == paragraph_id
     )
-    assert "phase-a" in baseline.plain_text and "suffix" in baseline.plain_text
-    assert baseline.plain_text.count(real_repeated_body_text()) == 2
-    assert "separate-table" in baseline.plain_text
-    assert "final | unfinished" in baseline.plain_text
-    assert "7.0" in baseline.plain_text and "7.5" in target.plain_text
-    assert target_only_row_text() in target.plain_text
+    row = split_markdown_table_row(
+        paragraph.sentences[sentence_index].text,
+        _source(section.section_id, paragraph_id, sentence_index),
+    )
+    assert row is not None
+    return row
+
+
+def _accepted_fixture_assessment(
+    side: str,
+    previous,
+    continuation,
+    mapping: ColumnMapping,
+    candidate_id: str,
+) -> CandidateAssessment:
+    candidate = ContinuationCandidate(
+        candidate_id=candidate_id,
+        side=side,
+        previous_row=previous,
+        continuation_row=continuation,
+        next_full_row=None,
+        mapping=mapping,
+        evidence=EVIDENCE_CODES[:4],
+        conflicts=(),
+        vetoes=(),
+        cross_version_rows=(),
+    )
+    assessment = assess_candidate(candidate)
+    assert assessment.final_action == "merge"
+    return assessment
+
+
+def make_fixture_assessments(
+    baseline: DocumentIR,
+    target: DocumentIR,
+) -> list[CandidateAssessment]:
+    return [
+        _accepted_fixture_assessment(
+            "baseline",
+            _fixture_row(baseline, "baseline-fragment-a", 1),
+            _fixture_row(baseline, "baseline-fragment-b", 0),
+            ColumnMapping((1, 3, 5), {1: 0, 3: 1, 5: 2}, 1.0),
+            "fixture-baseline-numbered",
+        ),
+        _accepted_fixture_assessment(
+            "baseline",
+            _fixture_row(baseline, "baseline-unnumbered-a", 0),
+            _fixture_row(baseline, "baseline-unnumbered-b", 0),
+            ColumnMapping((1, 3, 5), {1: 0, 3: 1, 5: 2}, 1.0),
+            "fixture-baseline-unnumbered",
+        ),
+        _accepted_fixture_assessment(
+            "target",
+            _fixture_row(target, "target-fragment-a", 0),
+            _fixture_row(target, "target-fragment-b", 0),
+            ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+            "fixture-target-numbered",
+        ),
+    ]
+
+
+def make_fixture_boundaries(
+    baseline: DocumentIR,
+    target: DocumentIR,
+) -> tuple[dict[str, set[SourceRowRef]], dict[str, set[str]]]:
+    del baseline, target
+    return (
+        {
+            "baseline": {
+                _source("baseline-section", "baseline-boundary-table", 0),
+                _source("baseline-section", "baseline-boundary-table", 1),
+            },
+            "target": {
+                _source("target-section", "target-boundary-table", 0),
+                _source("target-section", "target-boundary-table", 1),
+            },
+        },
+        {
+            "baseline": {"baseline-boundary-table", "baseline-boundary-note"},
+            "target": {"target-boundary-table"},
+        },
+    )
+
+
+def test_sanitized_fixture_assessment_build_and_replay_preserve_control_rows():
+    baseline, target = load_sanitized_fixture()
+    analyses = make_fixture_assessments(baseline, target)
+    boundary_rows, boundary_paragraphs = make_fixture_boundaries(baseline, target)
+
+    operations = reconstruction.build_reconstruction_operations(
+        analyses, boundary_rows, boundary_paragraphs
+    )
+    normalized_baseline, normalized_target = reconstruction.apply_reconstruction_operations(
+        baseline, target, operations
+    )
+
+    assert "0.5 s 以<br>内。" in normalized_baseline.plain_text
+    assert "| 14 | violet<br>limit. | within |" in normalized_target.plain_text
+    assert "prefix<br>suffix" in normalized_baseline.plain_text
+    assert repeated_boundary_token() not in normalized_baseline.plain_text
+    assert repeated_boundary_token() not in normalized_target.plain_text
+    assert normalized_baseline.plain_text.count(real_repeated_body_text()) == 2
+    assert "7.0" in normalized_baseline.plain_text
+    assert "7.5" in normalized_target.plain_text
+    assert target_only_row_text() in normalized_target.plain_text
+
+    baseline_by_id = {
+        paragraph.paragraph_id: paragraph
+        for paragraph in normalized_baseline.sections[0].paragraphs
+    }
+    target_by_id = {
+        paragraph.paragraph_id: paragraph
+        for paragraph in normalized_target.sections[0].paragraphs
+    }
+    assert baseline_by_id["baseline-new-table"].text == (
+        "| 90 | separate-table | begins |\n| 91 | separate-table | continues |"
+    )
+    assert target_by_id["target-new-table"].text == "| 90 | separate-table | begins |"
+    assert baseline_by_id["baseline-final-incomplete"].text == "| 99 | final | unfinished"
+    assert target_by_id["target-final-incomplete"].text == "| 99 | final | unfinished"
+
+
+def test_builder_projects_sparse_previous_row_before_replay_without_manual_operation():
+    baseline, target = load_sanitized_fixture()
+    target_assessment = make_fixture_assessments(baseline, target)[2]
+
+    operations = reconstruction.build_reconstruction_operations(
+        [target_assessment], {"baseline": set(), "target": set()}, {"baseline": set(), "target": set()}
+    )
+    projection_by_source = {
+        operation.source_rows[0]: operation.column_mapping
+        for operation in operations
+        if operation.type == "project_columns"
+    }
+
+    assert projection_by_source[
+        _source("target-section", "target-fragment-a", 0)
+    ] == {1: 0, 3: 1, 5: 2}
+    normalized_target = reconstruction.apply_reconstruction_operations(
+        baseline, target, operations
+    )[1]
+    assert "| 14 | violet<br>limit. | within |" in normalized_target.plain_text
 
 
 def test_replay_projects_drops_merges_and_consolidates_without_mutating_sources():
@@ -1103,6 +1236,100 @@ def test_replay_rejects_a_missing_source_without_exact_prior_provenance():
         reconstruction.apply_reconstruction_operations(baseline_ir, target_ir, [missing])
 
 
+def _make_chain_document() -> DocumentIR:
+    paragraphs = [
+        Paragraph("chain-a", "| 1 | neutral | part-a |", [Sentence("| 1 | neutral | part-a |")]),
+        Paragraph("chain-b", "| | | part-b |", [Sentence("| | | part-b |")]),
+        Paragraph("chain-c", "| | | part-c |", [Sentence("| | | part-c |")]),
+    ]
+    return DocumentIR(
+        "chain-document",
+        "Chain",
+        "chain-hash",
+        [Section("chain-section", "Chain", 1, paragraphs)],
+        "\n".join(paragraph.text for paragraph in paragraphs),
+    )
+
+
+def _make_chain_operations(document: DocumentIR) -> list[ReconstructionOperation]:
+    mapping = ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0)
+    row_a = _fixture_row(document, "chain-a", 0)
+    row_b = _fixture_row(document, "chain-b", 0)
+    row_c = _fixture_row(document, "chain-c", 0)
+    assessments = [
+        _accepted_fixture_assessment("baseline", row_a, row_b, mapping, "chain-ab"),
+        _accepted_fixture_assessment("baseline", row_b, row_c, mapping, "chain-bc"),
+    ]
+    return reconstruction.build_reconstruction_operations(
+        assessments,
+        {"baseline": set(), "target": set()},
+        {"baseline": set(), "target": set()},
+    )
+
+
+def test_chained_overlapping_merges_preserve_provenance_and_are_idempotent():
+    baseline = _make_chain_document()
+    target = DocumentIR("empty-target", "Empty", "empty-hash")
+    operations = _make_chain_operations(baseline)
+
+    first = reconstruction.apply_reconstruction_operations(baseline, target, operations)
+    second = reconstruction.apply_reconstruction_operations(first[0], first[1], operations)
+
+    assert "part-a<br>part-b<br>part-c" in first[0].plain_text
+    assert len(first[0].sections[0].paragraphs) == 1
+    assert second == first
+
+
+def test_chained_replay_rejects_missing_earlier_provenance():
+    baseline = _make_chain_document()
+    target = DocumentIR("empty-target", "Empty", "empty-hash")
+    operations = _make_chain_operations(baseline)
+    normalized, normalized_target = reconstruction.apply_reconstruction_operations(
+        baseline, target, operations
+    )
+    final_sentence = normalized.sections[0].paragraphs[0].sentences[0]
+    source_a = _source("chain-section", "chain-a", 0)
+    final_sentence._reconstruction_source_rows = frozenset(
+        set(final_sentence._reconstruction_source_rows) - {source_a}
+    )
+
+    with pytest.raises(ValueError, match="missing source row"):
+        reconstruction.apply_reconstruction_operations(normalized, normalized_target, operations)
+
+
+def test_replay_merge_rows_rejects_conflicting_logical_key_cells():
+    previous = Paragraph(
+        "conflict-a",
+        "| 12 | neutral | prefix |",
+        [Sentence("| 12 | neutral | prefix |")],
+    )
+    continuation = Paragraph(
+        "conflict-b",
+        "| 14 | | suffix |",
+        [Sentence("| 14 | | suffix |")],
+    )
+    baseline = DocumentIR(
+        "conflict-document",
+        "Conflict",
+        "conflict-hash",
+        [Section("conflict-section", "Conflict", 1, [previous, continuation])],
+    )
+    operation = ReconstructionOperation(
+        "conflicting-key-merge",
+        "baseline",
+        "merge_rows",
+        [
+            _source("conflict-section", "conflict-a", 0),
+            _source("conflict-section", "conflict-b", 0),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="key column conflict"):
+        reconstruction.apply_reconstruction_operations(
+            baseline, DocumentIR("empty-target", "Empty", "empty-hash"), [operation]
+        )
+
+
 def test_operation_builder_is_stable_and_uses_transformation_precedence():
     assert hasattr(reconstruction, "build_reconstruction_operations"), "operation builder is not implemented"
     left, right, mapping = make_candidate_fragments()
@@ -1128,11 +1355,12 @@ def test_operation_builder_is_stable_and_uses_transformation_precedence():
     assert first == second
     assert [operation.type for operation in first] == [
         "project_columns",
+        "project_columns",
         "drop_boundary_rows",
         "drop_boundary_paragraphs",
         "merge_rows",
         "merge_fragments",
     ]
     assert all(operation.operation_id for operation in first)
-    assert first[3].generated_row_id
-    assert first[4].generated_paragraph_id
+    assert first[4].generated_row_id
+    assert first[5].generated_paragraph_id
