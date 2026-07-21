@@ -47,6 +47,7 @@ class CompareState(TypedDict, total=False):
     _baseline_ir: Any          # DocumentIR
     _target_ir: Any            # DocumentIR
     _section_pairs: list
+    _reconstruction_trace: Any
     _para_pairs: list
 
     # ── Node outputs ────────────────────────────────────────────────────────
