@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import logging
+import re
 from dataclasses import asdict
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +16,127 @@ from app.config.settings import AppSettings
 from app.db import compare_repo, document_repo
 from app.db.schema import DDL
 from app.ui.app_context import AppContext
+
+
+def _ui_boundary_fixture_token() -> str:
+    return "ui-replay-boundary-token"
+
+
+def _make_ui_replay_fixture():
+    """Return a raw pair plus a trace that removes a repeated boundary row."""
+    from app.core.diff.reconstruction_trace import (
+        ALGORITHM_VERSION,
+        SCHEMA_VERSION,
+        DocumentTraceRef,
+        ReconstructionOperation,
+        ReconstructionTrace,
+        SourceRowRef,
+    )
+    from app.core.types import DocumentIR, Paragraph, Section, Sentence
+
+    boundary = _ui_boundary_fixture_token()
+
+    def document(side: str, response_time: str) -> DocumentIR:
+        rows = [
+            "| 服务等级 | 响应时间 |",
+            "| --- | --- |",
+            f"| 常规 | {response_time} |",
+            f"| {boundary} | {boundary} |",
+        ]
+        paragraph = Paragraph(
+            paragraph_id=f"{side}-table",
+            text="\n".join(rows),
+            sentences=[Sentence(text=row) for row in rows],
+        )
+        return DocumentIR(
+            doc_id=f"{side}-replay-doc",
+            title=side,
+            file_hash=f"{side}-replay-hash",
+            sections=[Section(f"{side}-section", "服务标准", 1, [paragraph])],
+            plain_text=paragraph.text,
+        )
+
+    baseline = document("baseline", "0.5 s 以<br>内。")
+    target = document("target", "0.8 s")
+    trace = ReconstructionTrace(
+        schema_version=SCHEMA_VERSION,
+        algorithm_version=ALGORITHM_VERSION,
+        baseline=DocumentTraceRef(baseline.doc_id, baseline.file_hash),
+        target=DocumentTraceRef(target.doc_id, target.file_hash),
+        decisions=[],
+        operations=[
+            ReconstructionOperation(
+                "baseline-drop-boundary",
+                "baseline",
+                "drop_boundary_rows",
+                [SourceRowRef("baseline-section", "baseline-table", 3)],
+            ),
+            ReconstructionOperation(
+                "target-drop-boundary",
+                "target",
+                "drop_boundary_rows",
+                [SourceRowRef("target-section", "target-table", 3)],
+            ),
+        ],
+    )
+    return baseline, target, trace
+
+
+def _write_source_irs(compare_page, tmp_path, baseline_ir, target_ir) -> tuple[str, str]:
+    """Persist raw IRs and register source versions used by ComparePage."""
+    compare_page.ctx.data_dir = str(tmp_path)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+
+    def write_ir(name: str, ir) -> str:
+        path = source_dir / f"{name}.json"
+        path.write_text(json.dumps(asdict(ir), ensure_ascii=False), encoding="utf-8")
+        return str(path)
+
+    def register_version(name: str, ir) -> str:
+        document_id = document_repo.insert_document(
+            compare_page.ctx.conn,
+            doc_name=name,
+            doc_type="docx",
+            file_path=f"/docs/{name}.docx",
+            file_hash=ir.file_hash,
+            source_type="standard",
+        )
+        return document_repo.insert_version(
+            compare_page.ctx.conn,
+            document_id=document_id,
+            version_no=1,
+            parsed_json_path=write_ir(name, ir),
+        )
+
+    return register_version("baseline", baseline_ir), register_version("target", target_ir)
+
+
+def _make_ui_replay_result(baseline_version_id: str, target_version_id: str):
+    from app.core.types import DiffItem, DiffResult
+
+    return DiffResult(
+        task_id="task-replay",
+        baseline_version_id=baseline_version_id,
+        target_version_id=target_version_id,
+        items=[
+            DiffItem(
+                diff_id="replayed-row",
+                section_path="服务标准",
+                diff_type="实质修改",
+                risk_level="medium",
+                baseline_text="| 常规 | 0.5 s 以<br>内。 |",
+                target_text="| 常规 | 0.8 s |",
+                similarity_score=0.8,
+                explanation="",
+            )
+        ],
+    )
+
+
+def _decode_injected_html(script: str) -> str:
+    payloads = re.findall(r"\.innerHTML = (.*?);\n", script)
+    return "\n".join(json.loads(payload) for payload in payloads)
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────────
@@ -641,6 +764,102 @@ def test_render_diff_uses_full_document_with_row_and_token_marks(
     assert "diff-token" in js
     assert "30天" in js
     assert "60天" in js
+
+
+def test_render_diff_replay_task_trace_before_rendering(compare_page, tmp_path):
+    """A valid task trace normalizes both full-document panes before marking rows."""
+    from app.core.diff.reconstruction_trace import (
+        reconstruction_trace_path,
+        trace_to_dict,
+        write_json_atomic,
+    )
+
+    baseline_ir, target_ir, trace = _make_ui_replay_fixture()
+    baseline_version_id, target_version_id = _write_source_irs(
+        compare_page, tmp_path, baseline_ir, target_ir
+    )
+    write_json_atomic(
+        reconstruction_trace_path(tmp_path, "task-replay"),
+        trace_to_dict(trace),
+    )
+
+    compare_page._render_diff(
+        _make_ui_replay_result(baseline_version_id, target_version_id)
+    )
+
+    script = compare_page._web_view.page().runJavaScript.call_args.args[0]
+    rendered_html = _decode_injected_html(script)
+    assert "0.5" in rendered_html
+    assert "s 以 内。" in rendered_html
+    assert _ui_boundary_fixture_token() not in rendered_html
+    assert 'data-diff-id="replayed-row"' in rendered_html
+
+
+@pytest.mark.parametrize(
+    ("failure_category", "trace_mutation"),
+    [
+        ("missing", None),
+        ("invalid JSON", "invalid_json"),
+        ("invalid", "unsupported_schema"),
+        ("invalid", "wrong_doc_id"),
+        ("invalid", "wrong_file_hash"),
+    ],
+)
+def test_render_diff_falls_back_to_raw_pair_for_invalid_reconstruction_sidecar(
+    compare_page,
+    tmp_path,
+    caplog,
+    failure_category,
+    trace_mutation,
+):
+    """Bad sidecars never partially normalize a document or invoke runtime services."""
+    from app.core.diff.reconstruction_trace import (
+        reconstruction_trace_path,
+        trace_to_dict,
+        write_json_atomic,
+    )
+
+    baseline_ir, target_ir, trace = _make_ui_replay_fixture()
+    baseline_version_id, target_version_id = _write_source_irs(
+        compare_page, tmp_path, baseline_ir, target_ir
+    )
+    trace_path = reconstruction_trace_path(tmp_path, "task-replay")
+    if trace_mutation == "invalid_json":
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text("{ not valid JSON", encoding="utf-8")
+    elif trace_mutation is not None:
+        payload = trace_to_dict(trace)
+        if trace_mutation == "unsupported_schema":
+            payload["schema_version"] = 2
+        elif trace_mutation == "wrong_doc_id":
+            payload["baseline"]["doc_id"] = "wrong-doc-id"
+        else:
+            payload["target"]["file_hash"] = "wrong-file-hash"
+        write_json_atomic(trace_path, payload)
+
+    compare_page.ctx.provider = MagicMock()
+    compare_page.ctx.embedder = MagicMock()
+    caplog.set_level(logging.WARNING, logger="app.ui.pages.compare_page")
+
+    compare_page._render_diff(
+        _make_ui_replay_result(baseline_version_id, target_version_id)
+    )
+
+    rendered_html = _decode_injected_html(
+        compare_page._web_view.page().runJavaScript.call_args.args[0]
+    )
+    assert rendered_html.count(_ui_boundary_fixture_token()) == 4
+    assert 'data-diff-id="replayed-row"' in rendered_html
+    assert compare_page.ctx.provider.method_calls == []
+    assert compare_page.ctx.embedder.method_calls == []
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "app.ui.pages.compare_page" and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "task-replay" in warnings[0].getMessage()
+    assert failure_category in warnings[0].getMessage()
 
 
 def test_diff_template_exposes_focus_diff_function():

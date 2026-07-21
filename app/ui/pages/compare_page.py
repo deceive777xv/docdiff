@@ -35,6 +35,12 @@ from app.core.markdown_utils import (
     render_markdown_fragment as _core_render_markdown_fragment,
     strip_markdown_formatting as _core_strip_markdown_formatting,
 )
+from app.core.diff.reconstruction_trace import (
+    load_reconstruction_trace,
+    reconstruction_trace_path,
+    validate_trace_documents,
+)
+from app.core.diff.table_reconstruction_pipeline import replay_reconstruction
 from app.core.types import ComparePolicy, DiffItem, DiffResult, DocumentIR, Paragraph, Section, Sentence
 from app.db import document_repo
 from app.ui.app_context import AppContext
@@ -820,6 +826,46 @@ class ComparePage(QWidget):
             logger.warning("load parsed IR failed for version %s: %s", version_id, exc)
             return None
 
+    def _load_reconstructed_ir_pair(
+        self,
+        task_id: str,
+        baseline_version_id: str,
+        target_version_id: str,
+    ) -> tuple[DocumentIR | None, DocumentIR | None]:
+        """Load raw source IRs and replay a validated task sidecar when available."""
+        baseline_ir = self._load_version_ir(baseline_version_id)
+        target_ir = self._load_version_ir(target_version_id)
+        if baseline_ir is None or target_ir is None:
+            return baseline_ir, target_ir
+
+        failure_detail = ""
+        try:
+            trace = load_reconstruction_trace(
+                reconstruction_trace_path(self.ctx.data_dir, task_id)
+            )
+            validate_trace_documents(trace, baseline_ir, target_ir)
+            return replay_reconstruction(baseline_ir, target_ir, trace)
+        except FileNotFoundError as exc:
+            category = "missing"
+            failure_detail = str(exc)
+        except json.JSONDecodeError as exc:
+            category = "invalid JSON"
+            failure_detail = str(exc)
+        except (TypeError, ValueError) as exc:
+            category = "invalid"
+            failure_detail = str(exc)
+        except OSError as exc:
+            category = "unavailable"
+            failure_detail = str(exc)
+
+        logger.warning(
+            "comparison reconstruction sidecar %s for task %s: %s",
+            category,
+            task_id,
+            failure_detail,
+        )
+        return baseline_ir, target_ir
+
     def _build_diff_lookup(self, result: DiffResult, side: str) -> dict[str, DiffItem]:
         lookup: dict[str, DiffItem] = {}
         for item in result.items:
@@ -916,8 +962,11 @@ class ComparePage(QWidget):
 
     def _render_diff(self, result: DiffResult) -> None:
         """Build highlighted HTML and inject it into the WebEngineView via JS."""
-        baseline_ir = self._load_version_ir(result.baseline_version_id)
-        target_ir = self._load_version_ir(result.target_version_id)
+        baseline_ir, target_ir = self._load_reconstructed_ir_pair(
+            result.task_id,
+            result.baseline_version_id,
+            result.target_version_id,
+        )
         if baseline_ir is not None and target_ir is not None:
             baseline_html = self._render_full_document(
                 baseline_ir,
