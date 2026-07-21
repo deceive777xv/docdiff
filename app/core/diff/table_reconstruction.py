@@ -38,6 +38,12 @@ class RegionInferenceConfig:
     unstable_predecessor_similarity: float = 0.60
     stable_pattern_min_rows: int = 2
     schema_compatibility_threshold: float = 0.70
+    candidate_stability_weight: float = 0.65
+    candidate_body_structure_weight: float = 0.35
+    body_key_role_weight: float = 0.35
+    body_column_stability_weight: float = 0.20
+    body_value_diversity_weight: float = 0.20
+    body_low_row_repetition_weight: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -290,6 +296,53 @@ def _segment_stability(rows: Sequence[TableRowMatrix]) -> float:
     )
 
 
+def _body_structure_score(
+    rows: Sequence[TableRowMatrix],
+    config: RegionInferenceConfig,
+) -> float:
+    if not rows:
+        return 0.0
+    width = max(len(row.raw_cells) for row in rows)
+    key_role_strength = 0.0
+    column_stabilities: list[float] = []
+    column_diversities: list[float] = []
+    for physical_index in range(width):
+        values = [
+            row.normalized_cells[physical_index]
+            for row in rows
+            if physical_index < len(row.normalized_cells) and row.occupied[physical_index]
+        ]
+        value_types = [
+            row.value_types[physical_index]
+            for row in rows
+            if physical_index < len(row.value_types) and row.occupied[physical_index]
+        ]
+        if not values:
+            continue
+        type_counts = Counter(value_types)
+        key_type_ratio = (
+            type_counts.get("integer", 0) + type_counts.get("hierarchical_number", 0)
+        ) / len(value_types)
+        distinct_ratio = len(set(values)) / len(values)
+        key_role_strength = max(key_role_strength, key_type_ratio * distinct_ratio)
+        column_stabilities.append(max(type_counts.values()) / len(value_types))
+        column_diversities.append(distinct_ratio)
+
+    row_repetition_ratios = []
+    for row in rows:
+        values = [cell for cell in row.normalized_cells if cell]
+        row_repetition_ratios.append(1.0 - len(set(values)) / len(values) if values else 0.0)
+    column_stability = sum(column_stabilities) / len(column_stabilities) if column_stabilities else 0.0
+    value_diversity = sum(column_diversities) / len(column_diversities) if column_diversities else 0.0
+    low_row_repetition = 1.0 - sum(row_repetition_ratios) / len(row_repetition_ratios)
+    return (
+        config.body_key_role_weight * key_role_strength
+        + config.body_column_stability_weight * column_stability
+        + config.body_value_diversity_weight * value_diversity
+        + config.body_low_row_repetition_weight * low_row_repetition
+    )
+
+
 def _segment_schema_similarity(
     rows: Sequence[TableRowMatrix], body_rows: Sequence[TableRowMatrix]
 ) -> float:
@@ -321,9 +374,14 @@ def infer_regions(
             len(rows) >= REGION_CONFIG.stable_pattern_min_rows
             and all(row.kind == "content" for row in rows)
         ):
-            candidates.append((len(rows) * (0.5 + _segment_stability(rows)), segment_index))
+            evidence_score = len(rows) * (
+                REGION_CONFIG.candidate_stability_weight * _segment_stability(rows)
+                + REGION_CONFIG.candidate_body_structure_weight
+                * _body_structure_score(rows, REGION_CONFIG)
+            )
+            candidates.append((evidence_score, -segment_index))
 
-    body_segment_index = max(candidates)[1] if candidates else None
+    body_segment_index = -max(candidates)[1] if candidates else None
     body_rows = (
         fragment.rows[segments[body_segment_index][0] : segments[body_segment_index][1]]
         if body_segment_index is not None

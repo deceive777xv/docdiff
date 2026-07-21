@@ -216,6 +216,68 @@ def test_repeated_multirow_edge_boundary_drops_every_region_row():
     assert dropped == {row.source for fragment in fragments for row in fragment.regions[0].rows}
 
 
+def make_unclassified_fragments_with_trailing_boundary() -> tuple[TableFragment, ...]:
+    trailing_rows = (
+        ("alpha", "beta", "alpha", "gamma", "alpha"),
+        ("delta", "epsilon", "delta", "zeta", "delta"),
+    )
+    fragments = []
+    for fragment_index in range(3):
+        paragraph_id = f"inferred-trailing-boundary-{fragment_index}"
+        rows = (
+            make_row((str(701 + fragment_index * 2), "open", "4.0"), 0, paragraph_id),
+            make_row((str(702 + fragment_index * 2), "close", "4.5"), 1, paragraph_id),
+            make_row(trailing_rows[0], 2, paragraph_id),
+            make_row(trailing_rows[1], 3, paragraph_id),
+        )
+        fragments.append(
+            TableFragment("section-1", paragraph_id, fragment_index, rows, (), (), ())
+        )
+    return tuple(fragments)
+
+
+def infer_fragment_structure(fragments: tuple[TableFragment, ...]) -> tuple[TableFragment, ...]:
+    with_regions = tuple(
+        replace(
+            fragment,
+            regions=infer_regions(fragment, tuple(peer for peer in fragments if peer is not fragment)),
+        )
+        for fragment in fragments
+    )
+    with_body_indexes = tuple(
+        replace(
+            fragment,
+            body_region_indexes=tuple(
+                index for index, region in enumerate(fragment.regions) if region.role == "body"
+            ),
+        )
+        for fragment in with_regions
+    )
+    return tuple(
+        replace(
+            fragment,
+            active_columns=infer_active_columns(
+                fragment,
+                tuple(peer for peer in with_body_indexes if peer is not fragment),
+            ),
+        )
+        for fragment in with_body_indexes
+    )
+
+
+def test_inferred_trailing_multirow_boundary_keeps_structured_body_and_drops_footer():
+    fragments = infer_fragment_structure(make_unclassified_fragments_with_trailing_boundary())
+
+    assert [[region.role for region in fragment.regions] for fragment in fragments] == [
+        ["body", "boundary"],
+        ["body", "boundary"],
+        ["body", "boundary"],
+    ]
+    assert classify_repeated_boundary_regions(fragments) == {
+        row.source for fragment in fragments for row in fragment.regions[1].rows
+    }
+
+
 def make_fragments_with_repeated_body_row() -> tuple[TableFragment, ...]:
     fragments = []
     for fragment_index in range(3):
