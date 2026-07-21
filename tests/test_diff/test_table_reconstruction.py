@@ -755,3 +755,80 @@ def test_candidate_keeps_legitimate_unnumbered_continuation_with_blank_textual_k
     assert "blank_key_cells" in candidate.evidence
     assert assessment.rule_confidence == "high"
     assert assessment.final_action == "merge"
+
+
+def make_small_left_text_key_candidate_fragments(
+    left_row_count: int,
+    continuation_key: str,
+    *,
+    right_complete_rows: int = 2,
+) -> tuple[TableFragment, TableFragment, ColumnMapping]:
+    left_values = (
+        ("key-a", "group-a", "complete-a"),
+        ("key-b", "group-b", "prefix"),
+    )[-left_row_count:]
+    complete_values = (
+        ("key-c", "group-c", "complete-c"),
+        ("key-d", "group-d", "complete-d"),
+    )[:right_complete_rows]
+    return make_candidate_fragments(
+        left_values=left_values,
+        right_values=((continuation_key, "", "suffix"),) + complete_values,
+    )
+
+
+@pytest.mark.parametrize("left_row_count", [1, 2])
+def test_candidate_vetoes_new_textual_key_with_small_left_fragment(left_row_count):
+    left, right, mapping = make_small_left_text_key_candidate_fragments(
+        left_row_count, "key-z"
+    )
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert "new_key_value" in candidate.vetoes
+    assert assessment.rule_confidence == "low"
+    assert assessment.final_action == "keep_separate"
+
+
+@pytest.mark.parametrize("left_row_count", [1, 2])
+def test_candidate_vetoes_conflicting_textual_keys_with_small_left_fragment(left_row_count):
+    left, right, mapping = make_small_left_text_key_candidate_fragments(
+        left_row_count, "key-z"
+    )
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert "conflicting_key_cells" in candidate.vetoes
+    assert assessment.rule_confidence == "low"
+    assert assessment.final_action == "keep_separate"
+
+
+@pytest.mark.parametrize("left_row_count", [1, 2])
+def test_candidate_keeps_blank_textual_key_eligible_with_small_left_fragment(left_row_count):
+    left, right, mapping = make_small_left_text_key_candidate_fragments(left_row_count, "")
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert candidate.vetoes == ()
+    assert candidate.conflicts == ()
+    assert "blank_key_cells" in candidate.evidence
+    assert assessment.rule_confidence == "high"
+    assert assessment.final_action == "merge"
+
+
+def test_candidate_fails_closed_when_pooled_textual_key_profile_is_insufficient():
+    left, right, mapping = make_small_left_text_key_candidate_fragments(
+        1, "", right_complete_rows=1
+    )
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert candidate.vetoes == ()
+    assert candidate.evidence == ()
+    assert candidate.conflicts == ("insufficient_key_profile",)
+    assert assessment.rule_confidence == "low"
+    assert assessment.final_action == "keep_separate"

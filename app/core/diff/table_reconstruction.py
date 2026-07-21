@@ -195,7 +195,13 @@ def generate_continuation_candidates(
 
     previous_row = left_body_rows[-1]
     continuation_row = right_body_rows[0]
-    key_logical_columns = _key_logical_columns(left)
+    key_logical_columns, key_profile_sufficient = _key_logical_columns(
+        left,
+        right,
+        mapping,
+        left_body_rows,
+        right_body_rows,
+    )
     next_full_row = next(
         (
             row
@@ -214,8 +220,9 @@ def generate_continuation_candidates(
         key_logical_columns,
     )
     evidence: tuple[EvidenceCode, ...] = ()
+    conflicts = () if key_profile_sufficient or vetoes else ("insufficient_key_profile",)
     cross_version_rows: tuple[TableRowMatrix, ...] = ()
-    if not vetoes:
+    if not vetoes and not conflicts:
         evidence, cross_version_rows = _candidate_evidence(
             left,
             right,
@@ -235,7 +242,7 @@ def generate_continuation_candidates(
         next_full_row=next_full_row,
         mapping=mapping,
         evidence=evidence,
-        conflicts=(),
+        conflicts=conflicts,
         vetoes=vetoes,
         cross_version_rows=cross_version_rows,
     )
@@ -963,24 +970,100 @@ def _active_columns(fragment: TableFragment) -> tuple[int, ...]:
     return fragment.active_columns or infer_active_columns(fragment, ())
 
 
-def _key_logical_columns(fragment: TableFragment) -> frozenset[int]:
-    body_rows = _body_rows(fragment)
-    profiles = _column_profiles(body_rows)
-    active_columns = _active_columns(fragment)
-    return frozenset(
+def _key_logical_columns(
+    left: TableFragment,
+    right: TableFragment,
+    mapping: ColumnMapping,
+    left_body_rows: Sequence[TableRowMatrix],
+    right_body_rows: Sequence[TableRowMatrix],
+) -> tuple[frozenset[int], bool]:
+    left_profiles = _column_profiles(left_body_rows)
+    active_columns = _active_columns(left)
+    numeric_keys = frozenset(
         logical_index
         for logical_index, physical_index in enumerate(active_columns)
-        if physical_index in profiles
-        and (
-            _is_key_profile(profiles[physical_index])
-            or _is_textual_key_profile(
-                profiles[physical_index],
-                row_count=len(body_rows),
-                logical_column_count=len(active_columns),
-                logical_rank=logical_index / max(len(active_columns) - 1, 1),
-            )
+        if physical_index in left_profiles and _is_key_profile(left_profiles[physical_index])
+    )
+    if numeric_keys:
+        return numeric_keys, True
+    if _mapping_is_incompatible(left, right, mapping):
+        return frozenset(), False
+
+    logical_columns = frozenset(mapping.logical_by_physical.values())
+    pooled_rows = _pooled_complete_logical_rows(
+        left,
+        mapping,
+        left_body_rows,
+        right_body_rows[1:],
+        logical_columns,
+    )
+    profile_sufficient = len(pooled_rows) >= COLUMN_CONFIG.text_key_min_rows
+    if not profile_sufficient:
+        return frozenset(), False
+    profiles = _logical_column_profiles(pooled_rows, logical_columns)
+    textual_keys = frozenset(
+        logical_index
+        for logical_index in logical_columns
+        if logical_index in profiles
+        and _is_textual_key_profile(
+            profiles[logical_index],
+            row_count=len(pooled_rows),
+            logical_column_count=len(logical_columns),
+            logical_rank=logical_index / max(len(logical_columns) - 1, 1),
         )
     )
+    return textual_keys, True
+
+
+def _pooled_complete_logical_rows(
+    left: TableFragment,
+    mapping: ColumnMapping,
+    left_rows: Sequence[TableRowMatrix],
+    right_context_rows: Sequence[TableRowMatrix],
+    logical_columns: frozenset[int],
+) -> tuple[dict[int, str], ...]:
+    projected_rows = (
+        *(_left_logical_cells(row, left) for row in left_rows if row.kind == "content"),
+        *(
+            _mapped_logical_cells(row, mapping)
+            for row in right_context_rows
+            if row.kind == "content"
+        ),
+    )
+    return tuple(
+        cells
+        for cells in projected_rows
+        if logical_columns and all(cells.get(column, "") for column in logical_columns)
+    )
+
+
+def _logical_column_profiles(
+    rows: Sequence[dict[int, str]],
+    logical_columns: frozenset[int],
+) -> dict[int, ColumnProfile]:
+    profiles: dict[int, ColumnProfile] = {}
+    for logical_index in logical_columns:
+        values = [cells.get(logical_index, "") for cells in rows]
+        occupied_values = [value for value in values if value]
+        value_types = [_value_type(value) for value in occupied_values]
+        type_counts = Counter(value_types)
+        profiles[logical_index] = ColumnProfile(
+            physical_index=logical_index,
+            non_empty_ratio=len(occupied_values) / len(rows) if rows else 0.0,
+            type_ratios={
+                value_type: count / len(value_types)
+                for value_type, count in type_counts.items()
+            }
+            if value_types
+            else {},
+            median_length=float(median(map(len, occupied_values))) if occupied_values else 0.0,
+            repetition_ratio=(
+                1.0 - len(set(occupied_values)) / len(occupied_values)
+                if occupied_values
+                else 0.0
+            ),
+        )
+    return profiles
 
 
 def _is_textual_key_profile(
