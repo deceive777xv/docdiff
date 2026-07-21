@@ -69,6 +69,13 @@ class ColumnInferenceConfig:
     minimum_mapping_coverage: float = 0.66
     key_type_ratio_threshold: float = 0.60
     key_max_repetition_ratio: float = 0.50
+    text_key_min_rows: int = 3
+    text_key_min_logical_columns: int = 2
+    text_key_non_empty_ratio: float = 0.90
+    text_key_short_text_ratio: float = 0.90
+    text_key_max_median_length: float = 24.0
+    text_key_max_repetition_ratio: float = 0.10
+    text_key_max_logical_rank: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -957,11 +964,41 @@ def _active_columns(fragment: TableFragment) -> tuple[int, ...]:
 
 
 def _key_logical_columns(fragment: TableFragment) -> frozenset[int]:
-    profiles = _column_profiles(_body_rows(fragment))
+    body_rows = _body_rows(fragment)
+    profiles = _column_profiles(body_rows)
+    active_columns = _active_columns(fragment)
     return frozenset(
         logical_index
-        for logical_index, physical_index in enumerate(_active_columns(fragment))
-        if physical_index in profiles and _is_key_profile(profiles[physical_index])
+        for logical_index, physical_index in enumerate(active_columns)
+        if physical_index in profiles
+        and (
+            _is_key_profile(profiles[physical_index])
+            or _is_textual_key_profile(
+                profiles[physical_index],
+                row_count=len(body_rows),
+                logical_column_count=len(active_columns),
+                logical_rank=logical_index / max(len(active_columns) - 1, 1),
+            )
+        )
+    )
+
+
+def _is_textual_key_profile(
+    profile: ColumnProfile,
+    *,
+    row_count: int,
+    logical_column_count: int,
+    logical_rank: float,
+) -> bool:
+    return (
+        row_count >= COLUMN_CONFIG.text_key_min_rows
+        and logical_column_count >= COLUMN_CONFIG.text_key_min_logical_columns
+        and logical_rank <= COLUMN_CONFIG.text_key_max_logical_rank
+        and profile.non_empty_ratio >= COLUMN_CONFIG.text_key_non_empty_ratio
+        and profile.type_ratios.get("short_text", 0.0)
+        >= COLUMN_CONFIG.text_key_short_text_ratio
+        and 0.0 < profile.median_length <= COLUMN_CONFIG.text_key_max_median_length
+        and profile.repetition_ratio <= COLUMN_CONFIG.text_key_max_repetition_ratio
     )
 
 

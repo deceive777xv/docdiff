@@ -705,3 +705,53 @@ def test_candidate_id_is_stable_for_text_changes_and_mapping_order():
     )[0]
 
     assert changed.candidate_id == original.candidate_id
+
+
+def make_text_key_candidate_fragments(
+    continuation_key: str,
+) -> tuple[TableFragment, TableFragment, ColumnMapping]:
+    return make_candidate_fragments(
+        left_values=(
+            ("item-a", "phase-a", "complete-a"),
+            ("item-b", "phase-b", "complete-b"),
+            ("item-c", "phase-c", "prefix"),
+        ),
+        right_values=(
+            (continuation_key, "", "suffix"),
+            ("item-d", "phase-d", "complete-d"),
+        ),
+    )
+
+
+def test_candidate_vetoes_new_stable_textual_key_value():
+    left, right, mapping = make_text_key_candidate_fragments("item-z")
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert "new_key_value" in candidate.vetoes
+    assert assessment.rule_confidence == "low"
+    assert assessment.final_action == "keep_separate"
+
+
+def test_candidate_vetoes_conflicting_stable_textual_key_cells():
+    left, right, mapping = make_text_key_candidate_fragments("item-z")
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert "conflicting_key_cells" in candidate.vetoes
+    assert assessment.rule_confidence == "low"
+    assert assessment.final_action == "keep_separate"
+
+
+def test_candidate_keeps_legitimate_unnumbered_continuation_with_blank_textual_key():
+    left, right, mapping = make_text_key_candidate_fragments("")
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert candidate.vetoes == ()
+    assert "blank_key_cells" in candidate.evidence
+    assert assessment.rule_confidence == "high"
+    assert assessment.final_action == "merge"
