@@ -200,12 +200,23 @@ def generate_continuation_candidates(
         return []
 
     previous_row = left_body_rows[-1]
+    first_right_body_position = min(
+        (_row_position(right, row.source) for row in right_body_rows),
+        default=0,
+    )
+    has_leading_sparse_content = any(
+        row.kind == "content"
+        and row.source not in boundary_rows
+        and not all(_mapped_logical_cells(row, mapping).values())
+        for row in right.rows[:first_right_body_position]
+    )
     key_logical_columns, key_profile_sufficient = _key_logical_columns(
         left,
         right,
         mapping,
         left_body_rows,
         right_body_rows,
+        include_first_right_body_row=has_leading_sparse_content,
     )
     previous_types = _left_logical_types(previous_row, left)
     first_full_row = next(
@@ -264,6 +275,7 @@ def generate_continuation_candidates(
         continuation_row,
         mapping,
         boundary_rows,
+        cross_version_fragments,
         key_logical_columns,
         allow_leading_header=bool(leading_content_rows),
         allow_non_table_gap=allow_non_table_gap,
@@ -1358,6 +1370,8 @@ def _key_logical_columns(
     mapping: ColumnMapping,
     left_body_rows: Sequence[TableRowMatrix],
     right_body_rows: Sequence[TableRowMatrix],
+    *,
+    include_first_right_body_row: bool = False,
 ) -> tuple[frozenset[int], bool]:
     left_profiles = _column_profiles(left_body_rows)
     active_columns = _active_columns(left)
@@ -1376,7 +1390,7 @@ def _key_logical_columns(
         left,
         mapping,
         left_body_rows,
-        right_body_rows[1:],
+        right_body_rows if include_first_right_body_row else right_body_rows[1:],
         logical_columns,
     )
     profile_sufficient = len(pooled_rows) >= COLUMN_CONFIG.text_key_min_rows
@@ -1573,27 +1587,38 @@ def _intervening_row_role(
     return "unknown"
 
 
-def _row_matches_previous_key_pattern(
+def _is_repeated_structural_header(
+    row: TableRowMatrix,
     left: TableFragment,
     right: TableFragment,
-    row: TableRowMatrix,
     mapping: ColumnMapping,
-    key_logical_columns: frozenset[int],
-    previous_types: Mapping[int, str],
+    cross_version_fragments: Sequence[TableFragment],
 ) -> bool:
-    if not key_logical_columns:
-        return True
-    row_types = (
-        _left_logical_types(row, left)
-        if row.source.paragraph_id == left.paragraph_id
-        else _mapped_logical_types(row, mapping)
-    )
-    return all(
-        _key_type_family(previous_types.get(column, "empty"))
-        == _key_type_family(row_types.get(column, "empty"))
-        != "empty"
-        for column in key_logical_columns
-    )
+    """Recognize a body-misclassified header only with independent peer structure."""
+    if row.kind != "content":
+        return False
+    mapped_cells = _mapped_logical_cells(row, mapping)
+    if mapped_cells and all(mapped_cells.values()):
+        for left_row in left.rows:
+            if _row_role(left, left_row.source) not in {"header", "boundary"}:
+                continue
+            left_cells = _left_logical_cells(left_row, left)
+            if {
+                column: value.casefold() for column, value in left_cells.items()
+            } == {
+                column: value.casefold() for column, value in mapped_cells.items()
+            }:
+                return True
+    fingerprint = _row_fingerprint(row)
+    for fragment in (right, *cross_version_fragments):
+        for peer_row in fragment.rows:
+            if peer_row.source == row.source:
+                continue
+            if _row_fingerprint(peer_row) != fingerprint:
+                continue
+            if _row_role(fragment, peer_row.source) in {"header", "boundary"}:
+                return True
+    return False
 
 
 def _mapping_is_incompatible(
@@ -1623,6 +1648,7 @@ def _candidate_vetoes(
     continuation: TableRowMatrix,
     mapping: ColumnMapping,
     boundary_rows: set[SourceRowRef],
+    cross_version_fragments: Sequence[TableFragment],
     key_logical_columns: frozenset[int],
     *,
     allow_leading_header: bool = False,
@@ -1655,18 +1681,11 @@ def _candidate_vetoes(
     if any(
         row.kind == "content"
         and row.source not in boundary_rows
+        and (role := _intervening_row_role(left, right, row)) not in {"header", "boundary"}
         and (
-            (role := _intervening_row_role(left, right, row)) == "unknown"
-            or (
-                role == "body"
-                and _row_matches_previous_key_pattern(
-                    left,
-                    right,
-                    row,
-                    mapping,
-                    key_logical_columns,
-                    _left_logical_types(previous, left),
-                )
+            role == "unknown"
+            or not _is_repeated_structural_header(
+                row, left, right, mapping, cross_version_fragments
             )
         )
         for row in intervening
@@ -1764,6 +1783,7 @@ def _boundary_artifacts_only_evidence(
     continuation: TableRowMatrix,
     mapping: ColumnMapping,
     boundary_rows: set[SourceRowRef],
+    cross_version_fragments: Sequence[TableFragment],
     key_logical_columns: frozenset[int],
     *,
     allow_non_table_gap: bool = False,
@@ -1777,19 +1797,13 @@ def _boundary_artifacts_only_evidence(
     ):
         return False
     intervening = _intervening_rows(left, right, previous, continuation)
-    previous_types = _left_logical_types(previous, left)
     return all(
         row.source in boundary_rows
         or _intervening_row_role(left, right, row) in {"header", "boundary"}
         or (
             _intervening_row_role(left, right, row) == "body"
-            and not _row_matches_previous_key_pattern(
-                left,
-                right,
-                row,
-                mapping,
-                key_logical_columns,
-                previous_types,
+            and _is_repeated_structural_header(
+                row, left, right, mapping, cross_version_fragments
             )
         )
         for row in intervening
@@ -1880,6 +1894,7 @@ def _candidate_evidence(
         continuation,
         mapping,
         boundary_rows,
+        cross_version_fragments,
         key_logical_columns,
         allow_non_table_gap=allow_non_table_gap,
     ):

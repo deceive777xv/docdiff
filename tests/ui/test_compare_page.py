@@ -56,7 +56,7 @@ def _make_ui_replay_fixture():
             plain_text=paragraph.text,
         )
 
-    baseline = document("baseline", "0.5 s 以<br>内。")
+    baseline = document("baseline", "cedar pre<br>lude-complete")
     target = document("target", "0.8 s")
     trace = ReconstructionTrace(
         schema_version=SCHEMA_VERSION,
@@ -125,7 +125,7 @@ def _make_ui_replay_result(baseline_version_id: str, target_version_id: str):
                 section_path="服务标准",
                 diff_type="实质修改",
                 risk_level="medium",
-                baseline_text="| 常规 | 0.5 s 以<br>内。 |",
+                baseline_text="| 常规 | cedar pre<br>lude-complete |",
                 target_text="| 常规 | 0.8 s |",
                 similarity_score=0.8,
                 explanation="",
@@ -789,8 +789,8 @@ def test_render_diff_replay_task_trace_before_rendering(compare_page, tmp_path):
 
     script = compare_page._web_view.page().runJavaScript.call_args.args[0]
     rendered_html = _decode_injected_html(script)
-    assert "0.5" in rendered_html
-    assert "s 以 内。" in rendered_html
+    assert "cedar" in rendered_html
+    assert "pre lude-complete" in rendered_html
     assert _ui_boundary_fixture_token() not in rendered_html
     assert 'data-diff-id="replayed-row"' in rendered_html
 

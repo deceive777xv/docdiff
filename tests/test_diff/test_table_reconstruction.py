@@ -34,8 +34,8 @@ def make_source_ref(index: int = 0, paragraph_id: str = "paragraph-1") -> Source
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("| 12 | drive | 0.5 s 以 |", ("12", "drive", "0.5 s 以")),
-        ("| | | 内。 | |", ("", "", "内。", "")),
+        ("| unit-cobalt | drive | cedar pre |", ("unit-cobalt", "drive", "cedar pre")),
+        ("| | | lude-complete | |", ("", "", "lude-complete", "")),
         ("|---|:---:|---|", ("---", ":---:", "---")),
     ],
 )
@@ -630,6 +630,70 @@ def test_candidate_collects_boundary_artifacts_only_evidence():
     assert "boundary_artifacts_only" in candidate.evidence
 
 
+@pytest.mark.parametrize(
+    "intervening_values",
+    [
+        ("", "detached-body", "payload"),
+        ("foreign-key", "detached-body", "payload"),
+    ],
+    ids=("blank-key", "different-key-family"),
+)
+def test_candidate_fails_closed_for_intervening_body_rows(intervening_values):
+    left, right, mapping = make_candidate_fragments(
+        right_values=(
+            intervening_values,
+            ("", "", "suffix"),
+            ("102", "next", "complete"),
+            ("103", "later", "complete"),
+        )
+    )
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert candidate.continuation_row.source == right.rows[1].source
+    assert "crosses_real_body_row" in candidate.vetoes
+    assert "boundary_artifacts_only" not in candidate.evidence
+    assert assessment.final_action == "keep_separate"
+
+
+def test_repeated_structural_header_can_precede_a_continuation():
+    left, right, mapping = make_candidate_fragments(
+        right_values=(
+            ("alpha-column", "beta-column", "detail-column"),
+            ("", "", "suffix"),
+            ("102", "next", "complete"),
+            ("103", "later", "complete"),
+        )
+    )
+    peer_header = make_row(
+        ("alpha-column", "beta-column", "detail-column"), 0, "peer-fragment"
+    )
+    peer_body = make_row(("201", "peer", "complete"), 1, "peer-fragment")
+    peer = TableFragment(
+        "section-1",
+        "peer-fragment",
+        0,
+        (peer_header, peer_body),
+        (
+            TableRegion((peer_header,), 0, 1, "header"),
+            TableRegion((peer_body,), 1, 2, "body"),
+        ),
+        (1,),
+        (0, 1, 2),
+    )
+
+    candidate = generate_continuation_candidates(
+        left, right, mapping, set(), (peer,), "baseline"
+    )[0]
+    assessment = assess_candidate(candidate)
+
+    assert candidate.continuation_row.source == right.rows[1].source
+    assert candidate.vetoes == ()
+    assert "boundary_artifacts_only" in candidate.evidence
+    assert assessment.final_action == "merge"
+
+
 def test_cross_version_support_evidence_uses_logical_mapping_not_physical_indexes():
     left, right, mapping = make_candidate_fragments(
         left_columns=(0, 2, 4),
@@ -838,6 +902,44 @@ def test_candidate_fails_closed_when_pooled_textual_key_profile_is_insufficient(
     assert assessment.final_action == "keep_separate"
 
 
+def test_pre_body_continuation_keeps_first_textual_body_row_in_key_profile():
+    left_row = make_row(("key-a", "group-a", "prefix"), 0, "text-left")
+    left = TableFragment(
+        "section-1",
+        "text-left",
+        0,
+        (left_row,),
+        (TableRegion((left_row,), 0, 1, "body"),),
+        (0,),
+        (0, 1, 2),
+    )
+    continuation = make_row(("", "", "suffix"), 0, "text-right")
+    first_body = make_row(("key-b", "group-b", "complete-b"), 1, "text-right")
+    second_body = make_row(("key-c", "group-c", "complete-c"), 2, "text-right")
+    right = TableFragment(
+        "section-1",
+        "text-right",
+        1,
+        (continuation, first_body, second_body),
+        (
+            TableRegion((continuation,), 0, 1, "header"),
+            TableRegion((first_body, second_body), 1, 3, "body"),
+        ),
+        (1,),
+        (0, 1, 2),
+    )
+    mapping = ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0)
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    assessment = assess_candidate(candidate)
+
+    assert candidate.continuation_row.source == continuation.source
+    assert candidate.conflicts == ()
+    assert candidate.vetoes == ()
+    assert "blank_key_cells" in candidate.evidence
+    assert assessment.final_action == "merge"
+
+
 def make_split_rows(
     previous_content: str,
     continuation_content: str,
@@ -857,12 +959,12 @@ def make_conflicting_key_rows() -> tuple:
 
 def test_merge_logical_rows_preserves_raw_text_and_joins_content_only():
     assert hasattr(reconstruction, "merge_logical_rows"), "merge_logical_rows is not implemented"
-    previous, continuation, mapping = make_split_rows("0.5 s 以", "内。")
+    previous, continuation, mapping = make_split_rows("cedar pre", "lude-complete")
 
     cells = reconstruction.merge_logical_rows(previous, continuation, mapping, frozenset({0}))
 
     assert cells[0] == "12"
-    assert cells[2] == "0.5 s 以<br>内。"
+    assert cells[2] == "cedar pre<br>lude-complete"
 
 
 def test_merge_logical_rows_rejects_conflicting_non_empty_key_cells():
@@ -1142,7 +1244,7 @@ def test_sanitized_fixture_assessment_build_and_replay_preserve_control_rows():
         baseline, target, operations
     )
 
-    assert "0.5 s 以<br>内。" in normalized_baseline.plain_text
+    assert "cedar pre<br>lude-complete" in normalized_baseline.plain_text
     assert "| 14 | violet<br>limit. | within |" in normalized_target.plain_text
     assert "prefix<br>suffix" in normalized_baseline.plain_text
     assert repeated_boundary_token() not in normalized_baseline.plain_text
@@ -1203,7 +1305,7 @@ def test_replay_projects_drops_merges_and_consolidates_without_mutating_sources(
 
     assert baseline_ir == baseline_before
     assert target_ir == target_before
-    assert "0.5 s 以<br>内。" in normalized_baseline.plain_text
+    assert "cedar pre<br>lude-complete" in normalized_baseline.plain_text
     assert "prefix<br>suffix" in normalized_baseline.plain_text
     assert repeated_boundary_token() not in normalized_baseline.plain_text
     assert normalized_baseline.plain_text.count(real_repeated_body_text()) == 2

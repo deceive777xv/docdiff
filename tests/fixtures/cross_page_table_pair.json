@@ -16,10 +16,10 @@
           },
           {
             "paragraph_id": "baseline-fragment-a",
-            "text": "| 11 | amber | ready |\n| 12 | blue | 0.5 s 以 |",
+            "text": "| 11 | amber | ready |\n| 12 | blue | cedar pre |",
             "sentences": [
               {"text": "| 11 | amber | ready |"},
-              {"text": "| 12 | blue | 0.5 s 以 |"}
+              {"text": "| 12 | blue | cedar pre |"}
             ]
           },
           {
@@ -37,9 +37,9 @@
           },
           {
             "paragraph_id": "baseline-fragment-b",
-            "text": "| | | | | | 内。 |\n| | 13 | | green | | stable |\n| | 31 | | duplicate-stays | | 7.0 |\n| | 31 | | duplicate-stays | | 7.0 |",
+            "text": "| | | | | | lude-complete |\n| | 13 | | green | | stable |\n| | 31 | | duplicate-stays | | 7.0 |\n| | 31 | | duplicate-stays | | 7.0 |",
             "sentences": [
-              {"text": "| | | | | | 内。 |"},
+              {"text": "| | | | | | lude-complete |"},
               {"text": "| | 13 | | green | | stable |"},
               {"text": "| | 31 | | duplicate-stays | | 7.0 |"},
               {"text": "| | 31 | | duplicate-stays | | 7.0 |"}
@@ -74,7 +74,7 @@
         ]
       }
     ],
-    "plain_text": "Invented sample content.\n| 11 | amber | ready |\n| 12 | blue | 0.5 s 以 |\n| repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary |\n| --- | --- | --- | --- | --- |\nrepeated-neutral-boundary\n| | | | | | 内。 |\n| | 13 | | green | | stable |\n| | 31 | | duplicate-stays | | 7.0 |\n| | 31 | | duplicate-stays | | 7.0 |\n| phase-a | neutral | prefix |\n| | | | | | suffix |\n| | phase-b | | neutral | | complete |\n| 90 | separate-table | begins |\n| 91 | separate-table | continues |\n| 99 | final | unfinished"
+    "plain_text": "Invented sample content.\n| 11 | amber | ready |\n| 12 | blue | cedar pre |\n| repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary |\n| --- | --- | --- | --- | --- |\nrepeated-neutral-boundary\n| | | | | | lude-complete |\n| | 13 | | green | | stable |\n| | 31 | | duplicate-stays | | 7.0 |\n| | 31 | | duplicate-stays | | 7.0 |\n| phase-a | neutral | prefix |\n| | | | | | suffix |\n| | phase-b | | neutral | | complete |\n| 90 | separate-table | begins |\n| 91 | separate-table | continues |\n| 99 | final | unfinished"
   },
   "target": {
     "doc_id": "target-neutral-document",

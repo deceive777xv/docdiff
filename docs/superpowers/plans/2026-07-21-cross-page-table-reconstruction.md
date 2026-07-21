@@ -203,8 +203,8 @@ git commit -m "feat: add reconstruction trace contract"
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("| 12 | drive | 0.5 s 以 |", ("12", "drive", "0.5 s 以")),
-        ("| | | 内。 | |", ("", "", "内。", "")),
+        ("| unit-cobalt | drive | cedar pre |", ("unit-cobalt", "drive", "cedar pre")),
+        ("| | | lude-complete | |", ("", "", "lude-complete", "")),
         ("|---|:---:|---|", ("---", ":---:", "---")),
     ],
 )
@@ -436,7 +436,7 @@ git commit -m "feat: score table continuation candidates"
 
 Create a two-document fixture containing only invented neutral text with these structural cases:
 
-- baseline row `12` split as `0.5 s 以` and `内。` around a repeated wider boundary table;
+- an invented baseline row split as `cedar pre` and `lude-complete` around a repeated wider boundary table;
 - target row `14` split at a different fragment boundary;
 - an unnumbered table continuation;
 - a real duplicated body row that must remain;
@@ -450,12 +450,12 @@ The fixture contains `baseline` and `target` objects in the existing parsed JSON
 
 ```python
 def test_merge_logical_rows_preserves_raw_text_and_joins_content_only():
-    previous, continuation, mapping = make_split_rows("0.5 s 以", "内。")
+    previous, continuation, mapping = make_split_rows("cedar pre", "lude-complete")
 
     cells = merge_logical_rows(previous, continuation, mapping, frozenset({0}))
 
     assert cells[0] == "12"
-    assert cells[2] == "0.5 s 以<br>内。"
+    assert cells[2] == "cedar pre<br>lude-complete"
 
 
 def test_merge_logical_rows_rejects_conflicting_non_empty_key_cells():
@@ -482,7 +482,7 @@ def test_replay_projects_drops_merges_and_consolidates_without_mutating_sources(
 
     assert baseline_ir == baseline_before
     assert target_ir == target_before
-    assert "0.5 s 以<br>内。" in normalized_baseline.plain_text
+    assert "cedar pre<br>lude-complete" in normalized_baseline.plain_text
     assert repeated_boundary_token() not in normalized_baseline.plain_text
     assert real_repeated_body_text() in normalized_baseline.plain_text
     assert target_only_row_text() in normalized_target.plain_text
@@ -839,7 +839,7 @@ def test_render_diff_replays_task_trace_before_rendering(compare_page, tmp_path)
     compare_page._render_diff(make_result("task-replay"))
 
     script = compare_page._web_view.page().runJavaScript.call_args.args[0]
-    assert "0.5 s 以<br>内。" in decode_injected_html(script)
+    assert "cedar pre<br>lude-complete" in decode_injected_html(script)
     assert boundary_fixture_token() not in decode_injected_html(script)
 ```
 
@@ -923,7 +923,7 @@ Document that `app/core/retrieval/searcher.py`, `Chunk.faiss_index_id`, and stor
 - [ ] **Step 2: Run static non-hardcoding checks**
 
 ```powershell
-rg -n "文件名称|文件编号|第\s*[0-9一二三四五六七八九十]+\s*页|cffede6e|17a473c2" app tests
+rg -n "<known-external-label-patterns>|<known-external-id-prefixes>" app tests docs
 rg -n "faiss|faiss_index_id|core\.retrieval" app/core/diff -g 'table_reconstruction*.py' -g 'reconstruction_trace.py'
 ```
 
@@ -980,8 +980,8 @@ def compact(text: str) -> str:
     return re.sub(r"\s+|<br\s*/?>", "", text)
 
 
-baseline_path = Path(r"E:\Project\test\cffede6e-93d7-4f1a-907d-0a31d8085826.json")
-target_path = Path(r"E:\Project\test\17a473c2-754a-440b-8ff0-be34bfab8243.json")
+baseline_path = Path(r"<external-baseline-json>")
+target_path = Path(r"<external-target-json>")
 baseline_ir = load_ir(baseline_path)
 target_ir = load_ir(target_path)
 baseline_before = deepcopy(baseline_ir)
@@ -997,7 +997,7 @@ baseline_text = compact(result.baseline_ir.plain_text)
 target_text = compact(result.target_ir.plain_text)
 combined_text = baseline_text + target_text
 
-assert "0.5s以内。" in combined_text
+assert any(operation.type == "merge_rows" for operation in result.trace.operations)
 assert baseline_ir == baseline_before
 assert target_ir == target_before
 assert all(
@@ -1023,7 +1023,12 @@ report = {
             "merge_fragments",
         }
     },
-    "contains_joined_timing_text": "0.5s以内。" in combined_text,
+    "contains_joined_split_text": any(
+        "<br>" in sentence.text
+        for section in (*result.baseline_ir.sections, *result.target_ir.sections)
+        for paragraph in section.paragraphs
+        for sentence in paragraph.sentences
+    ),
 }
 Path(tempfile.gettempdir(), "cross_page_reconstruction_report.json").write_text(
     json.dumps(report, ensure_ascii=False, indent=2),
@@ -1044,10 +1049,10 @@ Manually inspect the trace and normalized row texts for the seven approved accep
 
 1. Logical columns are inferred from varying physical layouts.
 2. Repeated wide page-header rows do not appear as business rows.
-3. `0.5 s 以` and `内。` are joined without invented wording.
-4. Business rows 12, 14, 17, and 18 are each whole in the version where a continuation exists.
-5. Target row 33 remains incomplete when no continuation exists.
-6. Real numeric changes and the target-only row 9 remain present.
+3. The approved split row is joined without invented wording; tracked examples use only `cedar pre` and `lude-complete`.
+4. Each approved split business row is whole in the version where a continuation exists.
+5. The terminal incomplete row remains incomplete when no continuation exists.
+6. Real numeric changes and the target-only business row remain present.
 7. Replay of the emitted trace equals both normalized IR values.
 
 If a medium-confidence candidate invokes the configured provider, record the candidate ID, bounded input size, decision, and confidence in the local report; never copy source row text into the repository.

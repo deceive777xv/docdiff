@@ -343,16 +343,16 @@ def test_pipeline_reconstructs_leading_continuation_before_body_across_non_table
     left_lines = [
         "| item | group | detail | limit |",
         "| --- | --- | --- | --- |",
-        "| 10 | amber | stable | ready |",
-        "| 11 | blue | prefix | 0.5 s 以 |",
+        "| 70101 | amber | stable | ready |",
+        "| 70102 | blue | prefix | cedar pre |",
     ]
     right_lines = [
         "| neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         "| | item | group | detail | | limit | | | |",
-        "| | | | | | 内。 | | | |",
-        "| | 12 | cyan | next | | complete | | | |",
-        "| | 13 | green | later | | complete | | | |",
+        "| | | | | | lude-complete | | | |",
+        "| | 70103 | cyan | next | | complete | | | |",
+        "| | 70104 | green | later | | complete | | | |",
     ]
 
     def paragraph(paragraph_id: str, lines: list[str]) -> Paragraph:
@@ -384,5 +384,5 @@ def test_pipeline_reconstructs_leading_continuation_before_body_across_non_table
     result = pipeline.reconstruct_table_pairs(
         [SectionPair(section, None, 0.0)], baseline, target, None
     )
-    assert "0.5 s 以<br>内。" in result.baseline_ir.plain_text
+    assert "cedar pre<br>lude-complete" in result.baseline_ir.plain_text
     assert any(decision.final_action == "merge" for decision in result.trace.decisions)
