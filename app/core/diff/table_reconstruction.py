@@ -627,6 +627,13 @@ def infer_monotonic_column_mapping(
                     )
 
     aligned_pairs = pairs[left_count][right_count]
+    key_pair_aligned = any(
+        _is_key_profile(left_profiles[left_columns[left_index]])
+        and _is_key_profile(right_profiles[right_columns[right_index]])
+        for left_index, right_index in aligned_pairs
+    )
+    if left_has_key and right_has_key and not key_pair_aligned:
+        return None
     coverage = len(aligned_pairs) / max(left_count, right_count)
     normalized_score = max(0.0, scores[left_count][right_count] / max(left_count, right_count))
     if (
@@ -642,6 +649,10 @@ def infer_monotonic_column_mapping(
 
 def _row_fingerprint(row: TableRowMatrix) -> tuple[str, ...]:
     return row.normalized_cells
+
+
+def _region_fingerprint(region: TableRegion) -> tuple[tuple[str, ...], ...]:
+    return tuple(_row_fingerprint(row) for row in region.rows)
 
 
 def _within_row_repetition_ratio(row: TableRowMatrix) -> float:
@@ -685,13 +696,24 @@ def _key_discontinuity(row: TableRowMatrix, fragment: TableFragment) -> bool:
 def classify_repeated_boundary_regions(
     fragments: Sequence[TableFragment],
 ) -> set[SourceRowRef]:
-    """Return repeated edge rows only when multiple independent signals agree."""
+    """Return every row in repeated edge regions when independent signals agree."""
     if not fragments:
         return set()
-    fingerprint_fragments: dict[tuple[str, ...], set[int]] = {}
+    edge_regions_by_fragment: list[tuple[TableRegion, ...]] = []
+    fingerprint_fragments: dict[tuple[tuple[str, ...], ...], set[int]] = {}
     for fragment_index, fragment in enumerate(fragments):
-        for row in fragment.rows:
-            fingerprint_fragments.setdefault(_row_fingerprint(row), set()).add(fragment_index)
+        edge_regions = tuple(
+            region
+            for region in fragment.regions
+            if region.role == "boundary"
+            and (
+                region.start_index < BOUNDARY_CONFIG.edge_row_count
+                or region.end_index > len(fragment.rows) - BOUNDARY_CONFIG.edge_row_count
+            )
+        )
+        edge_regions_by_fragment.append(edge_regions)
+        for region in edge_regions:
+            fingerprint_fragments.setdefault(_region_fingerprint(region), set()).add(fragment_index)
 
     minimum_fragments = max(
         2,
@@ -703,19 +725,25 @@ def classify_repeated_boundary_regions(
         if len(fragment_indexes) >= minimum_fragments
     }
     dropped: set[SourceRowRef] = set()
-    for fragment in fragments:
-        for row_index, row in enumerate(fragment.rows):
-            repeated = _row_fingerprint(row) in repeated_fingerprints
+    for fragment, edge_regions in zip(fragments, edge_regions_by_fragment):
+        for region in edge_regions:
+            repeated = _region_fingerprint(region) in repeated_fingerprints
             at_boundary = (
-                row_index < BOUNDARY_CONFIG.edge_row_count
-                or row_index >= len(fragment.rows) - BOUNDARY_CONFIG.edge_row_count
+                region.start_index < BOUNDARY_CONFIG.edge_row_count
+                or region.end_index > len(fragment.rows) - BOUNDARY_CONFIG.edge_row_count
             )
-            schema_incompatible = _body_schema_incompatible(row, fragment)
-            key_discontinuous = _key_discontinuity(row, fragment)
-            abnormal_repetition = (
-                _within_row_repetition_ratio(row)
-                >= BOUNDARY_CONFIG.within_row_repetition_threshold
+            schema_incompatible = bool(region.rows) and all(
+                _body_schema_incompatible(row, fragment) for row in region.rows
             )
+            key_discontinuous = bool(region.rows) and all(
+                _key_discontinuity(row, fragment) for row in region.rows
+            )
+            mean_repetition = (
+                sum(_within_row_repetition_ratio(row) for row in region.rows) / len(region.rows)
+                if region.rows
+                else 0.0
+            )
+            abnormal_repetition = mean_repetition >= BOUNDARY_CONFIG.within_row_repetition_threshold
             signal_count = sum(
                 (repeated, at_boundary, schema_incompatible, key_discontinuous, abnormal_repetition)
             )
@@ -725,5 +753,5 @@ def classify_repeated_boundary_regions(
                 and schema_incompatible
                 and signal_count >= BOUNDARY_CONFIG.minimum_signal_families
             ):
-                dropped.add(row.source)
+                dropped.update(row.source for row in region.rows)
     return dropped

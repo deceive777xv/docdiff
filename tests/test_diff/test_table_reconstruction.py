@@ -176,6 +176,46 @@ def test_repeated_wide_boundary_is_detected_without_matching_fixed_text():
     assert dropped == boundary_source_refs(fragments)
 
 
+def make_fragments_with_repeated_two_row_boundary() -> tuple[TableFragment, ...]:
+    boundary_rows = (
+        ("alpha", "beta", "alpha", "gamma", "alpha"),
+        ("delta", "epsilon", "delta", "zeta", "delta"),
+    )
+    fragments = []
+    for fragment_index in range(3):
+        paragraph_id = f"two-row-boundary-{fragment_index}"
+        rows = (
+            make_row(boundary_rows[0], 0, paragraph_id),
+            make_row(boundary_rows[1], 1, paragraph_id),
+            make_row((str(601 + fragment_index * 2), "open", "3.0"), 2, paragraph_id),
+            make_row((str(602 + fragment_index * 2), "close", "3.5"), 3, paragraph_id),
+        )
+        regions = (
+            TableRegion(rows[:2], 0, 2, "boundary"),
+            TableRegion(rows[2:], 2, 4, "body"),
+        )
+        fragments.append(
+            TableFragment(
+                "section-1",
+                paragraph_id,
+                fragment_index,
+                rows,
+                regions,
+                (1,),
+                (0, 1, 2),
+            )
+        )
+    return tuple(fragments)
+
+
+def test_repeated_multirow_edge_boundary_drops_every_region_row():
+    fragments = make_fragments_with_repeated_two_row_boundary()
+
+    dropped = classify_repeated_boundary_regions(fragments)
+
+    assert dropped == {row.source for fragment in fragments for row in fragment.regions[0].rows}
+
+
 def make_fragments_with_repeated_body_row() -> tuple[TableFragment, ...]:
     fragments = []
     for fragment_index in range(3):
@@ -247,8 +287,46 @@ def make_unkeyed_matrix_fragment() -> TableFragment:
     )
 
 
+def make_fragment_from_rows(
+    paragraph_id: str,
+    values: tuple[tuple[str, ...], ...],
+) -> TableFragment:
+    rows = tuple(make_row(row_values, index, paragraph_id) for index, row_values in enumerate(values))
+    region = TableRegion(rows, 0, len(rows), "body")
+    return TableFragment(
+        "section-1",
+        paragraph_id,
+        0,
+        rows,
+        (region,),
+        (0,),
+        tuple(range(len(values[0]))),
+    )
+
+
 def test_infer_mapping_rejects_incompatible_body_schemas():
     left = make_numeric_keyed_fragment()
     right = make_unkeyed_matrix_fragment()
+
+    assert infer_monotonic_column_mapping(left, right, ()) is None
+
+
+def test_infer_mapping_rejects_alignment_that_skips_both_key_roles():
+    left = make_fragment_from_rows(
+        "left-reordered-key",
+        (
+            ("501", "north", "0.1", "ready"),
+            ("502", "south", "0.2", "waiting"),
+            ("503", "east", "0.3", "paused"),
+        ),
+    )
+    right = make_fragment_from_rows(
+        "right-reordered-key",
+        (
+            ("north", "0.1", "ready", "801"),
+            ("south", "0.2", "waiting", "802"),
+            ("east", "0.3", "paused", "803"),
+        ),
+    )
 
     assert infer_monotonic_column_mapping(left, right, ()) is None
