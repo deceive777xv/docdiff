@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, replace
+import hashlib
+import json
 from math import exp
 from statistics import median
 import re
 from typing import Literal, Sequence
 
-from app.core.diff.reconstruction_trace import SourceRowRef
+from app.core.diff.reconstruction_trace import ALGORITHM_VERSION, SourceRowRef
 from app.core.types import Section
 
 
@@ -130,6 +132,118 @@ class ColumnMapping:
     source_columns: tuple[int, ...]
     logical_by_physical: dict[int, int]
     score: float
+
+
+EvidenceCode = Literal[
+    "blank_key_cells",
+    "next_row_restores_key_pattern",
+    "complementary_content_cells",
+    "textual_continuity",
+    "boundary_artifacts_only",
+    "cross_version_support",
+]
+VetoCode = Literal[
+    "new_key_value",
+    "header_or_separator",
+    "incompatible_schema",
+    "new_section_or_table",
+    "crosses_real_body_row",
+    "conflicting_key_cells",
+]
+
+
+@dataclass(frozen=True)
+class ContinuationCandidate:
+    candidate_id: str
+    side: Literal["baseline", "target"]
+    previous_row: TableRowMatrix
+    continuation_row: TableRowMatrix
+    next_full_row: TableRowMatrix | None
+    mapping: ColumnMapping
+    evidence: tuple[EvidenceCode, ...]
+    conflicts: tuple[str, ...]
+    vetoes: tuple[VetoCode, ...]
+    cross_version_rows: tuple[TableRowMatrix, ...]
+
+
+@dataclass(frozen=True)
+class CandidateAssessment:
+    candidate: ContinuationCandidate
+    rule_confidence: Literal["high", "medium", "low"]
+    final_action: Literal["merge", "keep_separate", "needs_llm"]
+
+
+def generate_continuation_candidates(
+    left: TableFragment,
+    right: TableFragment,
+    mapping: ColumnMapping,
+    boundary_rows: set[SourceRowRef],
+    cross_version_fragments: Sequence[TableFragment],
+    side: Literal["baseline", "target"],
+) -> list[ContinuationCandidate]:
+    left_body_rows = tuple(row for row in _body_rows(left) if row.source not in boundary_rows)
+    right_body_rows = tuple(row for row in _body_rows(right) if row.source not in boundary_rows)
+    if not left_body_rows or not right_body_rows:
+        return []
+
+    previous_row = left_body_rows[-1]
+    continuation_row = right_body_rows[0]
+    key_logical_columns = _key_logical_columns(left)
+    next_full_row = next(
+        (
+            row
+            for row in right_body_rows[1:]
+            if _is_complete_logical_row(row, mapping, key_logical_columns)
+        ),
+        None,
+    )
+    vetoes = _candidate_vetoes(
+        left,
+        right,
+        previous_row,
+        continuation_row,
+        mapping,
+        boundary_rows,
+        key_logical_columns,
+    )
+    evidence: tuple[EvidenceCode, ...] = ()
+    cross_version_rows: tuple[TableRowMatrix, ...] = ()
+    if not vetoes:
+        evidence, cross_version_rows = _candidate_evidence(
+            left,
+            right,
+            previous_row,
+            continuation_row,
+            next_full_row,
+            mapping,
+            boundary_rows,
+            cross_version_fragments,
+            key_logical_columns,
+        )
+    candidate = ContinuationCandidate(
+        candidate_id=_candidate_id(side, previous_row.source, continuation_row.source, mapping),
+        side=side,
+        previous_row=previous_row,
+        continuation_row=continuation_row,
+        next_full_row=next_full_row,
+        mapping=mapping,
+        evidence=evidence,
+        conflicts=(),
+        vetoes=vetoes,
+        cross_version_rows=cross_version_rows,
+    )
+    return [candidate]
+
+
+def assess_candidate(candidate: ContinuationCandidate) -> CandidateAssessment:
+    if candidate.vetoes or candidate.conflicts:
+        return CandidateAssessment(candidate, "low", "keep_separate")
+    evidence_count = len(set(candidate.evidence))
+    if evidence_count >= 4:
+        return CandidateAssessment(candidate, "high", "merge")
+    if evidence_count >= 2:
+        return CandidateAssessment(candidate, "medium", "needs_llm")
+    return CandidateAssessment(candidate, "low", "keep_separate")
 
 
 _BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
@@ -813,3 +927,368 @@ def classify_repeated_boundary_regions(
             ):
                 dropped.update(row.source for row in region.rows)
     return dropped
+
+
+def _candidate_id(
+    side: Literal["baseline", "target"],
+    previous: SourceRowRef,
+    continuation: SourceRowRef,
+    mapping: ColumnMapping,
+) -> str:
+    payload = {
+        "algorithm_version": ALGORITHM_VERSION,
+        "side": side,
+        "previous": (previous.section_id, previous.paragraph_id, previous.sentence_index),
+        "continuation": (
+            continuation.section_id,
+            continuation.paragraph_id,
+            continuation.sentence_index,
+        ),
+        "mapping": sorted(mapping.logical_by_physical.items()),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"candidate-{digest[:24]}"
+
+
+def _active_columns(fragment: TableFragment) -> tuple[int, ...]:
+    return fragment.active_columns or infer_active_columns(fragment, ())
+
+
+def _key_logical_columns(fragment: TableFragment) -> frozenset[int]:
+    profiles = _column_profiles(_body_rows(fragment))
+    return frozenset(
+        logical_index
+        for logical_index, physical_index in enumerate(_active_columns(fragment))
+        if physical_index in profiles and _is_key_profile(profiles[physical_index])
+    )
+
+
+def _left_logical_cells(
+    row: TableRowMatrix,
+    fragment: TableFragment,
+) -> dict[int, str]:
+    return {
+        logical_index: row.normalized_cells[physical_index]
+        if physical_index < len(row.normalized_cells)
+        else ""
+        for logical_index, physical_index in enumerate(_active_columns(fragment))
+    }
+
+
+def _left_logical_types(
+    row: TableRowMatrix,
+    fragment: TableFragment,
+) -> dict[int, str]:
+    return {
+        logical_index: row.value_types[physical_index]
+        if physical_index < len(row.value_types)
+        else "empty"
+        for logical_index, physical_index in enumerate(_active_columns(fragment))
+    }
+
+
+def _mapped_logical_cells(
+    row: TableRowMatrix,
+    mapping: ColumnMapping,
+) -> dict[int, str]:
+    return {
+        logical_index: row.normalized_cells[physical_index]
+        if physical_index < len(row.normalized_cells)
+        else ""
+        for physical_index, logical_index in mapping.logical_by_physical.items()
+    }
+
+
+def _mapped_logical_types(
+    row: TableRowMatrix,
+    mapping: ColumnMapping,
+) -> dict[int, str]:
+    return {
+        logical_index: row.value_types[physical_index]
+        if physical_index < len(row.value_types)
+        else "empty"
+        for physical_index, logical_index in mapping.logical_by_physical.items()
+    }
+
+
+def _is_complete_logical_row(
+    row: TableRowMatrix,
+    mapping: ColumnMapping,
+    key_logical_columns: frozenset[int],
+) -> bool:
+    cells = _mapped_logical_cells(row, mapping)
+    if key_logical_columns:
+        return all(cells.get(column, "") for column in key_logical_columns) and any(
+            value for column, value in cells.items() if column not in key_logical_columns
+        )
+    occupied_count = sum(bool(value) for value in cells.values())
+    minimum_occupied = max(1, (2 * len(cells) + 2) // 3)
+    return occupied_count >= minimum_occupied
+
+
+def _row_position(fragment: TableFragment, source: SourceRowRef) -> int:
+    return next(
+        (index for index, row in enumerate(fragment.rows) if row.source == source),
+        -1,
+    )
+
+
+def _intervening_rows(
+    left: TableFragment,
+    right: TableFragment,
+    previous: TableRowMatrix,
+    continuation: TableRowMatrix,
+) -> tuple[TableRowMatrix, ...]:
+    left_index = _row_position(left, previous.source)
+    right_index = _row_position(right, continuation.source)
+    trailing = left.rows[left_index + 1 :] if left_index >= 0 else ()
+    leading = right.rows[:right_index] if right_index >= 0 else ()
+    return trailing + leading
+
+
+def _row_role(fragment: TableFragment, source: SourceRowRef) -> RegionRole:
+    return next(
+        (
+            region.role
+            for region in fragment.regions
+            if any(row.source == source for row in region.rows)
+        ),
+        "unknown",
+    )
+
+
+def _mapping_is_incompatible(
+    left: TableFragment,
+    right: TableFragment,
+    mapping: ColumnMapping,
+) -> bool:
+    left_columns = _active_columns(left)
+    right_columns = _active_columns(right)
+    mapped_columns = set(mapping.logical_by_physical)
+    coverage = len(mapped_columns & set(right_columns)) / max(
+        len(left_columns), len(right_columns), 1
+    )
+    logical_indexes = tuple(mapping.logical_by_physical.values())
+    return (
+        mapping.score < COLUMN_CONFIG.mapping_compatibility_threshold
+        or coverage < COLUMN_CONFIG.minimum_mapping_coverage
+        or len(set(logical_indexes)) != len(logical_indexes)
+        or any(index < 0 or index >= len(left_columns) for index in logical_indexes)
+    )
+
+
+def _candidate_vetoes(
+    left: TableFragment,
+    right: TableFragment,
+    previous: TableRowMatrix,
+    continuation: TableRowMatrix,
+    mapping: ColumnMapping,
+    boundary_rows: set[SourceRowRef],
+    key_logical_columns: frozenset[int],
+) -> tuple[VetoCode, ...]:
+    previous_cells = _left_logical_cells(previous, left)
+    continuation_cells = _mapped_logical_cells(continuation, mapping)
+    intervening = _intervening_rows(left, right, previous, continuation)
+    vetoes: list[VetoCode] = []
+    if any(continuation_cells.get(column, "") for column in key_logical_columns):
+        vetoes.append("new_key_value")
+    if (
+        continuation.kind != "content"
+        or continuation.source in boundary_rows
+        or _row_role(right, continuation.source) in {"header", "boundary"}
+    ):
+        vetoes.append("header_or_separator")
+    if _mapping_is_incompatible(left, right, mapping):
+        vetoes.append("incompatible_schema")
+    if (
+        left.section_id != right.section_id
+        or right.paragraph_index != left.paragraph_index + 1
+    ):
+        vetoes.append("new_section_or_table")
+    if any(row.kind == "content" and row.source not in boundary_rows for row in intervening):
+        vetoes.append("crosses_real_body_row")
+    if any(
+        previous_cells.get(column, "")
+        and continuation_cells.get(column, "")
+        and previous_cells[column].casefold() != continuation_cells[column].casefold()
+        for column in key_logical_columns
+    ):
+        vetoes.append("conflicting_key_cells")
+    return tuple(vetoes)
+
+
+def _blank_key_cells_evidence(
+    continuation_cells: dict[int, str],
+    key_logical_columns: frozenset[int],
+) -> bool:
+    return bool(key_logical_columns) and all(
+        not continuation_cells.get(column, "") for column in key_logical_columns
+    )
+
+
+def _key_type_family(value_type: str) -> str:
+    if value_type in {"integer", "hierarchical_number"}:
+        return "numbered_key"
+    return value_type
+
+
+def _next_row_restores_key_pattern_evidence(
+    previous: TableRowMatrix,
+    next_full_row: TableRowMatrix | None,
+    left: TableFragment,
+    mapping: ColumnMapping,
+    key_logical_columns: frozenset[int],
+) -> bool:
+    if next_full_row is None or not key_logical_columns:
+        return False
+    previous_types = _left_logical_types(previous, left)
+    next_types = _mapped_logical_types(next_full_row, mapping)
+    return all(
+        _key_type_family(previous_types.get(column, "empty"))
+        == _key_type_family(next_types.get(column, "empty"))
+        != "empty"
+        for column in key_logical_columns
+    )
+
+
+def _complementary_content_cells_evidence(
+    previous_cells: dict[int, str],
+    continuation_cells: dict[int, str],
+    key_logical_columns: frozenset[int],
+) -> bool:
+    content_columns = (previous_cells.keys() | continuation_cells.keys()) - key_logical_columns
+    previous_only = any(
+        previous_cells.get(column, "") and not continuation_cells.get(column, "")
+        for column in content_columns
+    )
+    continuation_only = any(
+        continuation_cells.get(column, "") and not previous_cells.get(column, "")
+        for column in content_columns
+    )
+    return previous_only and continuation_only
+
+
+_TERMINAL_PUNCTUATION = frozenset(".!?;:。！？；：")
+
+
+def _starts_like_continuation(value: str) -> bool:
+    if not value:
+        return False
+    first = value[0]
+    return first.islower() or "\u3400" <= first <= "\u9fff"
+
+
+def _textual_continuity_evidence(
+    previous_cells: dict[int, str],
+    continuation_cells: dict[int, str],
+    key_logical_columns: frozenset[int],
+) -> bool:
+    return any(
+        previous_cells.get(column, "")
+        and continuation_cells.get(column, "")
+        and previous_cells[column][-1] not in _TERMINAL_PUNCTUATION
+        and _starts_like_continuation(continuation_cells[column])
+        for column in (previous_cells.keys() | continuation_cells.keys()) - key_logical_columns
+    )
+
+
+def _boundary_artifacts_only_evidence(
+    left: TableFragment,
+    right: TableFragment,
+    previous: TableRowMatrix,
+    continuation: TableRowMatrix,
+    boundary_rows: set[SourceRowRef],
+) -> bool:
+    if (
+        left.section_id != right.section_id
+        or right.paragraph_index != left.paragraph_index + 1
+    ):
+        return False
+    intervening = _intervening_rows(left, right, previous, continuation)
+    return all(row.source in boundary_rows for row in intervening)
+
+
+def _candidate_cell_options(previous: str, continuation: str) -> frozenset[str]:
+    if previous and continuation:
+        return frozenset(
+            {
+                f"{previous}{continuation}".casefold(),
+                f"{previous} {continuation}".casefold(),
+            }
+        )
+    return frozenset({(previous or continuation).casefold()})
+
+
+def _cross_version_support_rows(
+    left: TableFragment,
+    previous: TableRowMatrix,
+    continuation: TableRowMatrix,
+    mapping: ColumnMapping,
+    cross_version_fragments: Sequence[TableFragment],
+) -> tuple[TableRowMatrix, ...]:
+    previous_cells = _left_logical_cells(previous, left)
+    continuation_cells = _mapped_logical_cells(continuation, mapping)
+    logical_columns = previous_cells.keys() | continuation_cells.keys()
+    matches: list[TableRowMatrix] = []
+    for fragment in cross_version_fragments:
+        peer_mapping = infer_monotonic_column_mapping(left, fragment, ())
+        if peer_mapping is None:
+            continue
+        for row in _body_rows(fragment):
+            peer_cells = _mapped_logical_cells(row, peer_mapping)
+            if all(
+                peer_cells.get(column, "").casefold()
+                in _candidate_cell_options(
+                    previous_cells.get(column, ""),
+                    continuation_cells.get(column, ""),
+                )
+                for column in logical_columns
+            ):
+                matches.append(row)
+                if len(matches) == 3:
+                    return tuple(matches)
+    return tuple(matches)
+
+
+def _candidate_evidence(
+    left: TableFragment,
+    right: TableFragment,
+    previous: TableRowMatrix,
+    continuation: TableRowMatrix,
+    next_full_row: TableRowMatrix | None,
+    mapping: ColumnMapping,
+    boundary_rows: set[SourceRowRef],
+    cross_version_fragments: Sequence[TableFragment],
+    key_logical_columns: frozenset[int],
+) -> tuple[tuple[EvidenceCode, ...], tuple[TableRowMatrix, ...]]:
+    previous_cells = _left_logical_cells(previous, left)
+    continuation_cells = _mapped_logical_cells(continuation, mapping)
+    cross_version_rows = _cross_version_support_rows(
+        left,
+        previous,
+        continuation,
+        mapping,
+        cross_version_fragments,
+    )
+    evidence: list[EvidenceCode] = []
+    if _blank_key_cells_evidence(continuation_cells, key_logical_columns):
+        evidence.append("blank_key_cells")
+    if _next_row_restores_key_pattern_evidence(
+        previous, next_full_row, left, mapping, key_logical_columns
+    ):
+        evidence.append("next_row_restores_key_pattern")
+    if _complementary_content_cells_evidence(
+        previous_cells, continuation_cells, key_logical_columns
+    ):
+        evidence.append("complementary_content_cells")
+    if _textual_continuity_evidence(previous_cells, continuation_cells, key_logical_columns):
+        evidence.append("textual_continuity")
+    if _boundary_artifacts_only_evidence(
+        left, right, previous, continuation, boundary_rows
+    ):
+        evidence.append("boundary_artifacts_only")
+    if cross_version_rows:
+        evidence.append("cross_version_support")
+    return tuple(evidence), cross_version_rows

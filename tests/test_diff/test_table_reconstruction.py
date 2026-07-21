@@ -6,10 +6,15 @@ import pytest
 
 from app.core.diff.reconstruction_trace import SourceRowRef
 from app.core.diff.table_reconstruction import (
+    CandidateAssessment,
+    ColumnMapping,
+    ContinuationCandidate,
     TableFragment,
     TableRegion,
+    assess_candidate,
     classify_repeated_boundary_regions,
     collect_table_fragments,
+    generate_continuation_candidates,
     infer_active_columns,
     infer_monotonic_column_mapping,
     infer_regions,
@@ -392,3 +397,311 @@ def test_infer_mapping_rejects_alignment_that_skips_both_key_roles():
     )
 
     assert infer_monotonic_column_mapping(left, right, ()) is None
+
+
+EVIDENCE_CODES = (
+    "blank_key_cells",
+    "next_row_restores_key_pattern",
+    "complementary_content_cells",
+    "textual_continuity",
+    "boundary_artifacts_only",
+    "cross_version_support",
+)
+
+
+def make_candidate(
+    *,
+    evidence: tuple[str, ...] = (),
+    vetoes: tuple[str, ...] = (),
+) -> ContinuationCandidate:
+    previous = make_row(("101", "lead", "prefix"), 0, "candidate-left")
+    continuation = make_row(("", "", "suffix"), 0, "candidate-right")
+    return ContinuationCandidate(
+        candidate_id="candidate-test",
+        side="baseline",
+        previous_row=previous,
+        continuation_row=continuation,
+        next_full_row=None,
+        mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        evidence=evidence,
+        conflicts=(),
+        vetoes=vetoes,
+        cross_version_rows=(),
+    )
+
+
+def make_candidate_fragments(
+    *,
+    left_values: tuple[tuple[str, ...], ...] = (
+        ("100", "start", "complete"),
+        ("101", "lead", "prefix"),
+    ),
+    right_values: tuple[tuple[str, ...], ...] = (
+        ("", "", "suffix"),
+        ("102", "next", "complete"),
+        ("", "inner", "sparse"),
+    ),
+    left_columns: tuple[int, ...] = (0, 1, 2),
+    right_columns: tuple[int, ...] = (0, 1, 2),
+    left_width: int = 3,
+    right_width: int = 3,
+    left_paragraph_index: int = 0,
+    right_paragraph_index: int = 1,
+) -> tuple[TableFragment, TableFragment, ColumnMapping]:
+    def build(
+        paragraph_id: str,
+        values: tuple[tuple[str, ...], ...],
+        columns: tuple[int, ...],
+        width: int,
+        paragraph_index: int,
+    ) -> TableFragment:
+        rows = []
+        for index, logical_values in enumerate(values):
+            cells = [""] * width
+            for physical_index, value in zip(columns, logical_values):
+                cells[physical_index] = value
+            rows.append(make_row(tuple(cells), index, paragraph_id))
+        row_tuple = tuple(rows)
+        return TableFragment(
+            "section-1",
+            paragraph_id,
+            paragraph_index,
+            row_tuple,
+            (TableRegion(row_tuple, 0, len(row_tuple), "body"),),
+            (0,),
+            columns,
+        )
+
+    left = build("candidate-left", left_values, left_columns, left_width, left_paragraph_index)
+    right = build("candidate-right", right_values, right_columns, right_width, right_paragraph_index)
+    mapping = ColumnMapping(
+        right_columns,
+        {physical: logical for logical, physical in enumerate(right_columns)},
+        1.0,
+    )
+    return left, right, mapping
+
+
+@pytest.mark.parametrize(
+    "left_values,right_values",
+    [
+        (
+            (("100", "start", "complete"), ("101", "lead", "prefix")),
+            (("", "", "suffix"), ("102", "next", "complete"), ("", "inner", "sparse")),
+        ),
+        (
+            (("north", "lead", "prefix"), ("south", "body", "partial")),
+            (("", "tail", "suffix"), ("east", "next", "complete"), ("", "inner", "sparse")),
+        ),
+    ],
+    ids=("numbered", "unnumbered"),
+)
+def test_candidate_is_limited_to_adjacent_fragment_boundary(left_values, right_values):
+    left, right, mapping = make_candidate_fragments(
+        left_values=left_values,
+        right_values=right_values,
+    )
+
+    candidates = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")
+
+    assert [candidate.previous_row.source for candidate in candidates] == [left.rows[-1].source]
+    assert [candidate.continuation_row.source for candidate in candidates] == [right.rows[0].source]
+    assert candidates[0].next_full_row is not None
+    assert candidates[0].next_full_row.source == right.rows[1].source
+
+
+def test_candidate_boundary_rows_are_excluded_before_selecting_adjacent_rows():
+    left, right, mapping = make_candidate_fragments()
+    boundary_rows = {left.rows[-1].source, right.rows[0].source}
+
+    candidate = generate_continuation_candidates(
+        left, right, mapping, boundary_rows, (), "baseline"
+    )[0]
+
+    assert candidate.previous_row.source == left.rows[-2].source
+    assert candidate.continuation_row.source == right.rows[1].source
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "new_key_value",
+        "header_or_separator",
+        "incompatible_schema",
+        "new_section_or_table",
+        "crosses_real_body_row",
+        "conflicting_key_cells",
+    ],
+)
+def test_hard_veto_never_requests_llm(case):
+    candidate = make_candidate(evidence=EVIDENCE_CODES, vetoes=(case,))
+
+    assessment = assess_candidate(candidate)
+
+    assert assessment == CandidateAssessment(candidate, "low", "keep_separate")
+
+
+@pytest.mark.parametrize(
+    ("evidence_count", "expected_confidence", "expected_action"),
+    [
+        (4, "high", "merge"),
+        (5, "high", "merge"),
+        (6, "high", "merge"),
+        (2, "medium", "needs_llm"),
+        (3, "medium", "needs_llm"),
+        (0, "low", "keep_separate"),
+        (1, "low", "keep_separate"),
+    ],
+)
+def test_assess_candidate_uses_approved_confidence_tiers(
+    evidence_count, expected_confidence, expected_action
+):
+    candidate = make_candidate(evidence=EVIDENCE_CODES[:evidence_count])
+
+    assessment = assess_candidate(candidate)
+
+    assert assessment.rule_confidence == expected_confidence
+    assert assessment.final_action == expected_action
+
+
+def test_textual_continuity_alone_remains_low_confidence():
+    candidate = make_candidate(evidence=("textual_continuity",))
+
+    assessment = assess_candidate(candidate)
+
+    assert assessment.rule_confidence == "low"
+    assert assessment.final_action == "keep_separate"
+
+
+def test_candidate_conflict_forces_low_confidence():
+    candidate = replace(
+        make_candidate(evidence=EVIDENCE_CODES),
+        conflicts=("ambiguous_content_overlap",),
+    )
+
+    assessment = assess_candidate(candidate)
+
+    assert assessment.rule_confidence == "low"
+    assert assessment.final_action == "keep_separate"
+
+
+def test_candidate_collects_blank_key_next_pattern_and_textual_evidence():
+    left, right, mapping = make_candidate_fragments()
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+
+    assert "blank_key_cells" in candidate.evidence
+    assert "next_row_restores_key_pattern" in candidate.evidence
+    assert "textual_continuity" in candidate.evidence
+
+
+def test_candidate_collects_complementary_content_cells_evidence():
+    left, right, mapping = make_candidate_fragments(
+        left_values=(("100", "start", "complete"), ("101", "lead", "")),
+        right_values=(("", "", "tail"), ("102", "next", "complete")),
+    )
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+
+    assert "complementary_content_cells" in candidate.evidence
+
+
+def test_candidate_collects_boundary_artifacts_only_evidence():
+    left, right, mapping = make_candidate_fragments()
+    left_boundary = make_row(("repeated", "repeated", "repeated"), 2, left.paragraph_id)
+    right_boundary = make_row(("repeated", "repeated", "repeated"), 99, right.paragraph_id)
+    left = replace(left, rows=left.rows + (left_boundary,))
+    shifted_right_rows = (right_boundary,) + right.rows
+    right = replace(right, rows=shifted_right_rows)
+
+    candidate = generate_continuation_candidates(
+        left,
+        right,
+        mapping,
+        {left_boundary.source, right_boundary.source},
+        (),
+        "baseline",
+    )[0]
+
+    assert "boundary_artifacts_only" in candidate.evidence
+
+
+def test_cross_version_support_evidence_uses_logical_mapping_not_physical_indexes():
+    left, right, mapping = make_candidate_fragments(
+        left_columns=(0, 2, 4),
+        right_columns=(1, 3, 5),
+        left_width=5,
+        right_width=6,
+    )
+    peer, _, _ = make_candidate_fragments(
+        left_values=(("101", "lead", "prefixsuffix"), ("102", "next", "complete")),
+        right_values=(("", "", "unused"), ("103", "later", "complete")),
+        left_columns=(1, 4, 6),
+        left_width=7,
+    )
+
+    candidate = generate_continuation_candidates(
+        left, right, mapping, set(), (peer,), "baseline"
+    )[0]
+
+    assert "cross_version_support" in candidate.evidence
+    assert peer.rows[0] in candidate.cross_version_rows
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "new_key_value",
+        "header_or_separator",
+        "incompatible_schema",
+        "new_section_or_table",
+        "crosses_real_body_row",
+        "conflicting_key_cells",
+    ],
+)
+def test_candidate_generation_records_each_hard_veto(case):
+    left, right, mapping = make_candidate_fragments()
+    if case in {"new_key_value", "conflicting_key_cells"}:
+        replacement = make_row(("999", "", "suffix"), 0, right.paragraph_id)
+        right = replace(
+            right,
+            rows=(replacement,) + right.rows[1:],
+            regions=(TableRegion((replacement,) + right.rows[1:], 0, len(right.rows), "body"),),
+        )
+    elif case == "header_or_separator":
+        replacement = make_row(("---", "---", "---"), 0, right.paragraph_id)
+        right = replace(
+            right,
+            rows=(replacement,) + right.rows[1:],
+            regions=(TableRegion((replacement,) + right.rows[1:], 0, len(right.rows), "body"),),
+        )
+    elif case == "incompatible_schema":
+        mapping = replace(mapping, score=0.1)
+    elif case == "new_section_or_table":
+        right = replace(right, paragraph_index=3)
+    elif case == "crosses_real_body_row":
+        intervening = make_row(("150", "real", "row"), 50, left.paragraph_id)
+        left = replace(left, rows=left.rows + (intervening,))
+
+    candidate = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+
+    assert case in candidate.vetoes
+    assert candidate.evidence == ()
+
+
+def test_candidate_id_is_stable_for_text_changes_and_mapping_order():
+    left, right, mapping = make_candidate_fragments()
+    original = generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0]
+    changed_row = make_row(("101", "changed", "content"), 1, left.paragraph_id)
+    changed_left = replace(
+        left,
+        rows=(left.rows[0], changed_row),
+        regions=(TableRegion((left.rows[0], changed_row), 0, 2, "body"),),
+    )
+    reordered_mapping = ColumnMapping((0, 1, 2), {2: 2, 0: 0, 1: 1}, 1.0)
+
+    changed = generate_continuation_candidates(
+        changed_left, right, reordered_mapping, set(), (), "baseline"
+    )[0]
+
+    assert changed.candidate_id == original.candidate_id
