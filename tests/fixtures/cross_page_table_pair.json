@@ -1,0 +1,128 @@
+{
+  "baseline": {
+    "doc_id": "baseline-neutral-document",
+    "title": "Baseline neutral table sample",
+    "file_hash": "baseline-neutral-hash",
+    "sections": [
+      {
+        "section_id": "baseline-section",
+        "title": "Neutral observations",
+        "level": 1,
+        "paragraphs": [
+          {
+            "paragraph_id": "baseline-intro",
+            "text": "Invented sample content.",
+            "sentences": [{"text": "Invented sample content."}]
+          },
+          {
+            "paragraph_id": "baseline-fragment-a",
+            "text": "| 11 | amber | ready |\n| 12 | blue | 0.5 s 以 |",
+            "sentences": [
+              {"text": "| 11 | amber | ready |"},
+              {"text": "| 12 | blue | 0.5 s 以 |"}
+            ]
+          },
+          {
+            "paragraph_id": "baseline-boundary-table",
+            "text": "| repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary |\n| --- | --- | --- | --- | --- |",
+            "sentences": [
+              {"text": "| repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary |"},
+              {"text": "| --- | --- | --- | --- | --- |"}
+            ]
+          },
+          {
+            "paragraph_id": "baseline-boundary-note",
+            "text": "repeated-neutral-boundary",
+            "sentences": [{"text": "repeated-neutral-boundary"}]
+          },
+          {
+            "paragraph_id": "baseline-fragment-b",
+            "text": "| | | | | | 内。 |\n| | 13 | | green | | stable |\n| | 31 | | duplicate-stays | | 7.0 |\n| | 31 | | duplicate-stays | | 7.0 |",
+            "sentences": [
+              {"text": "| | | | | | 内。 |"},
+              {"text": "| | 13 | | green | | stable |"},
+              {"text": "| | 31 | | duplicate-stays | | 7.0 |"},
+              {"text": "| | 31 | | duplicate-stays | | 7.0 |"}
+            ]
+          },
+          {
+            "paragraph_id": "baseline-unnumbered-a",
+            "text": "| phase-a | neutral | prefix |",
+            "sentences": [{"text": "| phase-a | neutral | prefix |"}]
+          },
+          {
+            "paragraph_id": "baseline-unnumbered-b",
+            "text": "| | | | | | suffix |\n| | phase-b | | neutral | | complete |",
+            "sentences": [
+              {"text": "| | | | | | suffix |"},
+              {"text": "| | phase-b | | neutral | | complete |"}
+            ]
+          },
+          {
+            "paragraph_id": "baseline-new-table",
+            "text": "| 90 | separate-table | begins |\n| 91 | separate-table | continues |",
+            "sentences": [
+              {"text": "| 90 | separate-table | begins |"},
+              {"text": "| 91 | separate-table | continues |"}
+            ]
+          },
+          {
+            "paragraph_id": "baseline-final-incomplete",
+            "text": "| 99 | final | unfinished",
+            "sentences": [{"text": "| 99 | final | unfinished"}]
+          }
+        ]
+      }
+    ],
+    "plain_text": "Invented sample content.\n| 11 | amber | ready |\n| 12 | blue | 0.5 s 以 |\n| repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary |\n| --- | --- | --- | --- | --- |\nrepeated-neutral-boundary\n| | | | | | 内。 |\n| | 13 | | green | | stable |\n| | 31 | | duplicate-stays | | 7.0 |\n| | 31 | | duplicate-stays | | 7.0 |\n| phase-a | neutral | prefix |\n| | | | | | suffix |\n| | phase-b | | neutral | | complete |\n| 90 | separate-table | begins |\n| 91 | separate-table | continues |\n| 99 | final | unfinished"
+  },
+  "target": {
+    "doc_id": "target-neutral-document",
+    "title": "Target neutral table sample",
+    "file_hash": "target-neutral-hash",
+    "sections": [
+      {
+        "section_id": "target-section",
+        "title": "Neutral observations",
+        "level": 1,
+        "paragraphs": [
+          {
+            "paragraph_id": "target-fragment-a",
+            "text": "| | 14 | | violet | | within |",
+            "sentences": [{"text": "| | 14 | | violet | | within |"}]
+          },
+          {
+            "paragraph_id": "target-boundary-table",
+            "text": "| repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary |\n| --- | --- | --- | --- |",
+            "sentences": [
+              {"text": "| repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary |"},
+              {"text": "| --- | --- | --- | --- |"}
+            ]
+          },
+          {
+            "paragraph_id": "target-fragment-b",
+            "text": "| | limit. | |\n| 15 | teal | 0.8 |\n| 16 | silver | 1.2 |\n| 31 | duplicate-stays | 7.5 |\n| 32 | target-only-neutral-row | 2.0 |",
+            "sentences": [
+              {"text": "| | limit. | |"},
+              {"text": "| 15 | teal | 0.8 |"},
+              {"text": "| 16 | silver | 1.2 |"},
+              {"text": "| 31 | duplicate-stays | 7.5 |"},
+              {"text": "| 32 | target-only-neutral-row | 2.0 |"}
+            ]
+          },
+          {
+            "paragraph_id": "target-new-table",
+            "text": "| 90 | separate-table | begins |",
+            "sentences": [{"text": "| 90 | separate-table | begins |"}]
+          },
+          {
+            "paragraph_id": "target-final-incomplete",
+            "text": "| 99 | final | unfinished",
+            "sentences": [{"text": "| 99 | final | unfinished"}]
+          }
+        ]
+      }
+    ],
+    "plain_text": "| | 14 | | violet | | within |\n| repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary | repeated-neutral-boundary |\n| --- | --- | --- | --- |\n| | limit. | |\n| 15 | teal | 0.8 |\n| 16 | silver | 1.2 |\n| 31 | duplicate-stays | 7.5 |\n| 32 | target-only-neutral-row | 2.0 |\n| 90 | separate-table | begins |\n| 99 | final | unfinished"
+  }
+}

@@ -7,16 +7,21 @@ depend on document-specific labels, row numbers, or physical column positions.
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import hashlib
 import json
 from math import exp
 from statistics import median
 import re
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 
-from app.core.diff.reconstruction_trace import ALGORITHM_VERSION, SourceRowRef
-from app.core.types import Section
+from app.core.diff.reconstruction_trace import (
+    ALGORITHM_VERSION,
+    ReconstructionOperation,
+    SourceRowRef,
+)
+from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 
 RowKind = Literal["content", "separator", "empty"]
@@ -258,6 +263,223 @@ def assess_candidate(candidate: ContinuationCandidate) -> CandidateAssessment:
     if evidence_count >= 2:
         return CandidateAssessment(candidate, "medium", "needs_llm")
     return CandidateAssessment(candidate, "low", "keep_separate")
+
+
+_OPERATION_PRECEDENCE = {
+    "project_columns": 0,
+    "drop_boundary_rows": 1,
+    "drop_boundary_paragraphs": 2,
+    "merge_rows": 3,
+    "merge_fragments": 4,
+}
+
+
+def _source_row_key(source: SourceRowRef) -> tuple[str, str, int]:
+    return source.section_id, source.paragraph_id, source.sentence_index
+
+
+def _operation_payload(operation: ReconstructionOperation) -> dict[str, object]:
+    return {
+        "side": operation.side,
+        "type": operation.type,
+        "source_rows": [
+            [source.section_id, source.paragraph_id, source.sentence_index]
+            for source in operation.source_rows
+        ],
+        "source_paragraph_ids": list(operation.source_paragraph_ids),
+        "column_mapping": sorted(operation.column_mapping.items()),
+        "decision_id": operation.decision_id,
+    }
+
+
+def _stable_digest(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def _operation_id(operation: ReconstructionOperation) -> str:
+    return f"operation-{_stable_digest(_operation_payload(operation))}"
+
+
+def derived_row_id(operation: ReconstructionOperation) -> str:
+    """Return the stable row ID implied by an operation's source provenance."""
+    payload = {
+        "side": operation.side,
+        "type": operation.type,
+        "source_rows": [
+            [source.section_id, source.paragraph_id, source.sentence_index]
+            for source in operation.source_rows
+        ],
+    }
+    return f"reconstructed-row-{_stable_digest(payload)}"
+
+
+def derived_paragraph_id(operation: ReconstructionOperation) -> str:
+    """Return the stable paragraph ID implied by an operation's sources."""
+    payload = {
+        "side": operation.side,
+        "type": operation.type,
+        "source_paragraph_ids": list(operation.source_paragraph_ids),
+    }
+    return f"reconstructed-table-{_stable_digest(payload)}"
+
+
+def _with_stable_identity(operation: ReconstructionOperation) -> ReconstructionOperation:
+    operation = replace(operation, operation_id=_operation_id(operation))
+    if operation.type == "merge_rows":
+        operation = replace(operation, generated_row_id=derived_row_id(operation))
+    if operation.type == "merge_fragments":
+        operation = replace(operation, generated_paragraph_id=derived_paragraph_id(operation))
+    return operation
+
+
+def _operation_sort_key(operation: ReconstructionOperation) -> tuple[object, ...]:
+    source_key: tuple[object, ...]
+    if operation.source_rows:
+        source_key = min(_source_row_key(source) for source in operation.source_rows)
+    elif operation.source_paragraph_ids:
+        source_key = ("", min(operation.source_paragraph_ids), -1)
+    else:
+        source_key = ("", "", -1)
+    return (
+        0 if operation.side == "baseline" else 1,
+        _OPERATION_PRECEDENCE[operation.type],
+        source_key,
+        operation.operation_id,
+    )
+
+
+def build_reconstruction_operations(
+    analyses: Sequence[CandidateAssessment],
+    boundary_rows: Mapping[str, set[SourceRowRef]],
+    boundary_paragraph_ids: Mapping[str, set[str]],
+) -> list[ReconstructionOperation]:
+    """Build a stable, explicit transformation trace from accepted assessments."""
+    operations: list[ReconstructionOperation] = []
+    for side in ("baseline", "target"):
+        side_rows = sorted(boundary_rows.get(side, set()), key=_source_row_key)
+        if side_rows:
+            operations.append(
+                ReconstructionOperation("", side, "drop_boundary_rows", side_rows)
+            )
+        side_paragraphs = sorted(boundary_paragraph_ids.get(side, set()))
+        if side_paragraphs:
+            operations.append(
+                ReconstructionOperation(
+                    "",
+                    side,
+                    "drop_boundary_paragraphs",
+                    source_paragraph_ids=side_paragraphs,
+                )
+            )
+
+    for assessment in analyses:
+        if assessment.final_action != "merge":
+            continue
+        candidate = assessment.candidate
+        sources = [candidate.previous_row.source, candidate.continuation_row.source]
+        source_paragraph_ids = list(
+            dict.fromkeys(source.paragraph_id for source in sources)
+        )
+        mapping = dict(sorted(candidate.mapping.logical_by_physical.items()))
+        operations.extend(
+            (
+                ReconstructionOperation(
+                    "",
+                    candidate.side,
+                    "project_columns",
+                    [candidate.continuation_row.source],
+                    column_mapping=mapping,
+                    decision_id=candidate.candidate_id,
+                ),
+                ReconstructionOperation(
+                    "",
+                    candidate.side,
+                    "merge_rows",
+                    sources,
+                    decision_id=candidate.candidate_id,
+                ),
+            )
+        )
+        if len(source_paragraph_ids) > 1:
+            operations.append(
+                ReconstructionOperation(
+                    "",
+                    candidate.side,
+                    "merge_fragments",
+                    source_paragraph_ids=source_paragraph_ids,
+                    decision_id=candidate.candidate_id,
+                )
+            )
+
+    unique: dict[str, ReconstructionOperation] = {}
+    for operation in operations:
+        identified = _with_stable_identity(operation)
+        unique.setdefault(identified.operation_id, identified)
+    return sorted(unique.values(), key=_operation_sort_key)
+
+
+def _project_raw_cells(
+    row: TableRowMatrix,
+    mapping: Mapping[int, int],
+) -> tuple[str, ...]:
+    if not mapping:
+        return row.raw_cells
+    logical_width = max(mapping.values(), default=-1) + 1
+    projected = [""] * logical_width
+    assigned: set[int] = set()
+    for physical_index, logical_index in sorted(mapping.items()):
+        if physical_index < 0 or logical_index < 0:
+            raise ValueError("column mapping indexes must be non-negative")
+        if logical_index in assigned:
+            raise ValueError("column mapping contains duplicate logical columns")
+        assigned.add(logical_index)
+        if physical_index < len(row.raw_cells):
+            projected[logical_index] = row.raw_cells[physical_index]
+    return tuple(projected)
+
+
+_BREAK_AT_END_RE = re.compile(r"<br\s*/?>\s*$", re.IGNORECASE)
+_BREAK_AT_START_RE = re.compile(r"^\s*<br\s*/?>", re.IGNORECASE)
+
+
+def merge_logical_rows(
+    previous: TableRowMatrix,
+    continuation: TableRowMatrix,
+    mapping: ColumnMapping,
+    key_logical_columns: frozenset[int],
+) -> tuple[str, ...]:
+    """Merge raw logical cells without inventing content or punctuation."""
+    previous_cells = previous.raw_cells
+    continuation_cells = _project_raw_cells(
+        continuation,
+        mapping.logical_by_physical,
+    )
+    width = max(len(previous_cells), len(continuation_cells))
+    result: list[str] = []
+    for logical_index in range(width):
+        left = previous_cells[logical_index] if logical_index < len(previous_cells) else ""
+        right = (
+            continuation_cells[logical_index]
+            if logical_index < len(continuation_cells)
+            else ""
+        )
+        if logical_index in key_logical_columns and left and right:
+            if _normalize_cell(left).casefold() != _normalize_cell(right).casefold():
+                raise ValueError(f"key column conflict at logical column {logical_index}")
+            result.append(left)
+        elif not left or not right:
+            result.append(left or right)
+        elif _BREAK_AT_END_RE.search(left) or _BREAK_AT_START_RE.search(right):
+            result.append(f"{left}{right}")
+        else:
+            result.append(f"{left}<br>{right}")
+    return tuple(result)
 
 
 _BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
@@ -1412,3 +1634,416 @@ def _candidate_evidence(
     if cross_version_rows:
         evidence.append("cross_version_support")
     return tuple(evidence), cross_version_rows
+
+
+def _render_table_row(cells: Sequence[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _rebuild_paragraph(paragraph: Paragraph) -> None:
+    paragraph.text = "\n".join(sentence.text for sentence in paragraph.sentences)
+
+
+def _rebuild_plain_text(document: DocumentIR) -> None:
+    document.plain_text = "\n".join(
+        paragraph.text
+        for section in document.sections
+        for paragraph in section.paragraphs
+    )
+
+
+def _initialize_replay_metadata(document: DocumentIR) -> None:
+    if not hasattr(document, "_reconstruction_registry"):
+        document._reconstruction_registry = {}
+    for section in document.sections:
+        for paragraph in section.paragraphs:
+            if not hasattr(paragraph, "_reconstruction_source_paragraph_ids"):
+                paragraph._reconstruction_source_paragraph_ids = frozenset(
+                    {paragraph.paragraph_id}
+                )
+            for sentence_index, sentence in enumerate(paragraph.sentences):
+                if not hasattr(sentence, "_reconstruction_source_rows"):
+                    sentence._reconstruction_source_rows = frozenset(
+                        {
+                            SourceRowRef(
+                                section.section_id,
+                                paragraph.paragraph_id,
+                                sentence_index,
+                            )
+                        }
+                    )
+                if not hasattr(sentence, "_reconstruction_operations"):
+                    sentence._reconstruction_operations = frozenset()
+
+
+def _row_locations(
+    document: DocumentIR,
+    source: SourceRowRef,
+) -> list[tuple[Section, Paragraph, int, Sentence]]:
+    locations: list[tuple[Section, Paragraph, int, Sentence]] = []
+    for section in document.sections:
+        for paragraph in section.paragraphs:
+            for sentence_index, sentence in enumerate(paragraph.sentences):
+                provenance = getattr(sentence, "_reconstruction_source_rows", frozenset())
+                if source in provenance:
+                    locations.append((section, paragraph, sentence_index, sentence))
+    return locations
+
+
+def _resolve_row(
+    document: DocumentIR,
+    source: SourceRowRef,
+) -> tuple[Section, Paragraph, int, Sentence]:
+    locations = _row_locations(document, source)
+    if not locations:
+        raise ValueError(
+            "missing source row "
+            f"{source.section_id}/{source.paragraph_id}/{source.sentence_index}"
+        )
+    if len(locations) != 1:
+        raise ValueError(
+            "ambiguous source row "
+            f"{source.section_id}/{source.paragraph_id}/{source.sentence_index}"
+        )
+    return locations[0]
+
+
+def _paragraph_locations(
+    document: DocumentIR,
+    source_paragraph_id: str,
+) -> list[tuple[int, Section, int, Paragraph]]:
+    locations: list[tuple[int, Section, int, Paragraph]] = []
+    for section_index, section in enumerate(document.sections):
+        for paragraph_index, paragraph in enumerate(section.paragraphs):
+            provenance = getattr(
+                paragraph,
+                "_reconstruction_source_paragraph_ids",
+                frozenset({paragraph.paragraph_id}),
+            )
+            if source_paragraph_id in provenance:
+                locations.append((section_index, section, paragraph_index, paragraph))
+    return locations
+
+
+def _resolve_paragraph(
+    document: DocumentIR,
+    source_paragraph_id: str,
+) -> tuple[int, Section, int, Paragraph]:
+    locations = _paragraph_locations(document, source_paragraph_id)
+    if not locations:
+        raise ValueError(f"missing source paragraph {source_paragraph_id}")
+    if len(locations) != 1:
+        raise ValueError(f"ambiguous source paragraph {source_paragraph_id}")
+    return locations[0]
+
+
+def _expected_row_id(operation: ReconstructionOperation) -> str:
+    expected = derived_row_id(operation)
+    if operation.generated_row_id and operation.generated_row_id != expected:
+        raise ValueError("generated row ID does not match operation provenance")
+    return expected
+
+
+def _expected_paragraph_id(operation: ReconstructionOperation) -> str:
+    expected = derived_paragraph_id(operation)
+    if operation.generated_paragraph_id and operation.generated_paragraph_id != expected:
+        raise ValueError("generated paragraph ID does not match operation provenance")
+    return expected
+
+
+def _already_applied(
+    document: DocumentIR,
+    operation: ReconstructionOperation,
+) -> bool:
+    registry = document._reconstruction_registry
+    recorded = registry.get(operation.operation_id)
+    if recorded is None:
+        if operation.type == "merge_rows":
+            expected_id = _expected_row_id(operation)
+            matches = [
+                sentence
+                for section in document.sections
+                for paragraph in section.paragraphs
+                for sentence in paragraph.sentences
+                if getattr(sentence, "_reconstruction_row_id", "") == expected_id
+                and set(operation.source_rows).issubset(
+                    getattr(sentence, "_reconstruction_source_rows", frozenset())
+                )
+            ]
+            return len(matches) == 1
+        if operation.type == "merge_fragments":
+            expected_id = _expected_paragraph_id(operation)
+            matches = [
+                paragraph
+                for section in document.sections
+                for paragraph in section.paragraphs
+                if paragraph.paragraph_id == expected_id
+                and set(operation.source_paragraph_ids).issubset(
+                    getattr(
+                        paragraph,
+                        "_reconstruction_source_paragraph_ids",
+                        frozenset(),
+                    )
+                )
+            ]
+            return len(matches) == 1
+        return False
+    if recorded != _operation_payload(operation):
+        raise ValueError(f"operation ID collision for {operation.operation_id}")
+    if operation.type == "merge_rows":
+        expected_id = _expected_row_id(operation)
+        return any(
+            getattr(sentence, "_reconstruction_row_id", "") == expected_id
+            and set(operation.source_rows).issubset(
+                getattr(sentence, "_reconstruction_source_rows", frozenset())
+            )
+            for section in document.sections
+            for paragraph in section.paragraphs
+            for sentence in paragraph.sentences
+        )
+    if operation.type == "merge_fragments":
+        expected_id = _expected_paragraph_id(operation)
+        return any(
+            paragraph.paragraph_id == expected_id
+            and set(operation.source_paragraph_ids).issubset(
+                getattr(paragraph, "_reconstruction_source_paragraph_ids", frozenset())
+            )
+            for section in document.sections
+            for paragraph in section.paragraphs
+        )
+    return True
+
+
+def _record_operation(document: DocumentIR, operation: ReconstructionOperation) -> None:
+    document._reconstruction_registry[operation.operation_id] = _operation_payload(operation)
+
+
+def _parse_replay_row(sentence: Sentence, source: SourceRowRef) -> TableRowMatrix:
+    row = split_markdown_table_row(sentence.text, source)
+    if row is None:
+        raise ValueError(
+            "source row is not a Markdown table row: "
+            f"{source.section_id}/{source.paragraph_id}/{source.sentence_index}"
+        )
+    return row
+
+
+def _apply_project_columns(
+    document: DocumentIR,
+    operation: ReconstructionOperation,
+) -> None:
+    if not operation.source_rows:
+        raise ValueError("project_columns requires source rows")
+    locations = [(_resolve_row(document, source), source) for source in operation.source_rows]
+    for (_, paragraph, _, sentence), source in locations:
+        row = _parse_replay_row(sentence, source)
+        sentence.text = _render_table_row(
+            _project_raw_cells(row, operation.column_mapping)
+        )
+        sentence._reconstruction_operations = frozenset(
+            set(sentence._reconstruction_operations) | {operation.operation_id}
+        )
+        _rebuild_paragraph(paragraph)
+
+
+def _apply_drop_boundary_rows(
+    document: DocumentIR,
+    operation: ReconstructionOperation,
+) -> None:
+    if not operation.source_rows:
+        raise ValueError("drop_boundary_rows requires source rows")
+    locations = [_resolve_row(document, source) for source in operation.source_rows]
+    by_paragraph: dict[int, tuple[Paragraph, list[Sentence]]] = {}
+    for _, paragraph, _, sentence in locations:
+        entry = by_paragraph.setdefault(id(paragraph), (paragraph, []))
+        if all(existing is not sentence for existing in entry[1]):
+            entry[1].append(sentence)
+    for paragraph, sentences in by_paragraph.values():
+        sentence_ids = {id(sentence) for sentence in sentences}
+        paragraph.sentences[:] = [
+            sentence
+            for sentence in paragraph.sentences
+            if id(sentence) not in sentence_ids
+        ]
+        _rebuild_paragraph(paragraph)
+
+
+def _apply_drop_boundary_paragraphs(
+    document: DocumentIR,
+    operation: ReconstructionOperation,
+) -> None:
+    if not operation.source_paragraph_ids:
+        raise ValueError("drop_boundary_paragraphs requires paragraph IDs")
+    locations = [
+        _resolve_paragraph(document, paragraph_id)
+        for paragraph_id in operation.source_paragraph_ids
+    ]
+    removals: dict[int, tuple[Section, set[int]]] = {}
+    for _, section, _, paragraph in locations:
+        entry = removals.setdefault(id(section), (section, set()))
+        entry[1].add(id(paragraph))
+    for section, paragraph_ids in removals.values():
+        section.paragraphs[:] = [
+            paragraph
+            for paragraph in section.paragraphs
+            if id(paragraph) not in paragraph_ids
+        ]
+
+
+def _apply_merge_rows(
+    document: DocumentIR,
+    operation: ReconstructionOperation,
+) -> None:
+    if len(operation.source_rows) != 2:
+        raise ValueError("merge_rows requires exactly two source rows")
+    previous_source, continuation_source = operation.source_rows
+    previous_location = _resolve_row(document, previous_source)
+    continuation_location = _resolve_row(document, continuation_source)
+    if previous_location[3] is continuation_location[3]:
+        expected_id = _expected_row_id(operation)
+        sentence = previous_location[3]
+        provenance = getattr(sentence, "_reconstruction_source_rows", frozenset())
+        if (
+            getattr(sentence, "_reconstruction_row_id", "") == expected_id
+            and set(operation.source_rows).issubset(provenance)
+        ):
+            return
+        raise ValueError("merge_rows source rows resolve to the same non-derived row")
+
+    _, previous_paragraph, previous_index, previous_sentence = previous_location
+    _, continuation_paragraph, _, continuation_sentence = continuation_location
+    previous_row = _parse_replay_row(previous_sentence, previous_source)
+    continuation_row = _parse_replay_row(continuation_sentence, continuation_source)
+    identity = ColumnMapping(
+        tuple(range(len(continuation_row.raw_cells))),
+        {index: index for index in range(len(continuation_row.raw_cells))},
+        1.0,
+    )
+    merged_cells = merge_logical_rows(
+        previous_row,
+        continuation_row,
+        identity,
+        frozenset(),
+    )
+    merged = Sentence(_render_table_row(merged_cells))
+    merged._reconstruction_row_id = _expected_row_id(operation)
+    merged._reconstruction_source_rows = frozenset(
+        set(previous_sentence._reconstruction_source_rows)
+        | set(continuation_sentence._reconstruction_source_rows)
+    )
+    merged._reconstruction_operations = frozenset({operation.operation_id})
+
+    if previous_paragraph is continuation_paragraph:
+        continuation_index = next(
+            index
+            for index, sentence in enumerate(previous_paragraph.sentences)
+            if sentence is continuation_sentence
+        )
+        insert_index = previous_index - int(continuation_index < previous_index)
+        removed_ids = {id(previous_sentence), id(continuation_sentence)}
+        previous_paragraph.sentences[:] = [
+            sentence
+            for sentence in previous_paragraph.sentences
+            if id(sentence) not in removed_ids
+        ]
+        previous_paragraph.sentences.insert(insert_index, merged)
+        _rebuild_paragraph(previous_paragraph)
+        return
+
+    previous_paragraph.sentences[previous_index] = merged
+    continuation_paragraph.sentences[:] = [
+        sentence
+        for sentence in continuation_paragraph.sentences
+        if sentence is not continuation_sentence
+    ]
+    _rebuild_paragraph(previous_paragraph)
+    _rebuild_paragraph(continuation_paragraph)
+
+
+def _apply_merge_fragments(
+    document: DocumentIR,
+    operation: ReconstructionOperation,
+) -> None:
+    if len(operation.source_paragraph_ids) < 2:
+        raise ValueError("merge_fragments requires at least two paragraph IDs")
+    locations = [
+        _resolve_paragraph(document, paragraph_id)
+        for paragraph_id in operation.source_paragraph_ids
+    ]
+    unique: dict[int, tuple[int, Section, int, Paragraph]] = {
+        id(location[3]): location for location in locations
+    }
+    if len(unique) == 1:
+        paragraph = next(iter(unique.values()))[3]
+        expected_id = _expected_paragraph_id(operation)
+        provenance = getattr(
+            paragraph,
+            "_reconstruction_source_paragraph_ids",
+            frozenset(),
+        )
+        if paragraph.paragraph_id == expected_id and set(
+            operation.source_paragraph_ids
+        ).issubset(provenance):
+            return
+        raise ValueError("merge_fragments sources resolve to one non-derived paragraph")
+    ordered = sorted(unique.values(), key=lambda location: (location[0], location[2]))
+    section_ids = {id(location[1]) for location in ordered}
+    if len(section_ids) != 1:
+        raise ValueError("merge_fragments cannot cross sections")
+    _, section, insert_index, _ = ordered[0]
+    paragraphs = [location[3] for location in ordered]
+    sentences = [sentence for paragraph in paragraphs for sentence in paragraph.sentences]
+    merged = Paragraph(
+        paragraph_id=_expected_paragraph_id(operation),
+        text="",
+        sentences=sentences,
+    )
+    merged._reconstruction_source_paragraph_ids = frozenset(
+        source_id
+        for paragraph in paragraphs
+        for source_id in paragraph._reconstruction_source_paragraph_ids
+    )
+    _rebuild_paragraph(merged)
+    paragraph_ids = {id(paragraph) for paragraph in paragraphs}
+    section.paragraphs[:] = [
+        paragraph
+        for paragraph in section.paragraphs
+        if id(paragraph) not in paragraph_ids
+    ]
+    section.paragraphs.insert(insert_index, merged)
+
+
+def _apply_operation(
+    document: DocumentIR,
+    operation: ReconstructionOperation,
+) -> None:
+    if _already_applied(document, operation):
+        _record_operation(document, operation)
+        return
+    handlers = {
+        "project_columns": _apply_project_columns,
+        "drop_boundary_rows": _apply_drop_boundary_rows,
+        "drop_boundary_paragraphs": _apply_drop_boundary_paragraphs,
+        "merge_rows": _apply_merge_rows,
+        "merge_fragments": _apply_merge_fragments,
+    }
+    handlers[operation.type](document, operation)
+    _record_operation(document, operation)
+
+
+def apply_reconstruction_operations(
+    baseline_ir: DocumentIR,
+    target_ir: DocumentIR,
+    operations: Sequence[ReconstructionOperation],
+) -> tuple[DocumentIR, DocumentIR]:
+    """Replay an explicit reconstruction trace on deep-copied documents."""
+    baseline = deepcopy(baseline_ir)
+    target = deepcopy(target_ir)
+    documents = {"baseline": baseline, "target": target}
+    for document in documents.values():
+        _initialize_replay_metadata(document)
+    for operation in sorted(operations, key=_operation_sort_key):
+        _apply_operation(documents[operation.side], operation)
+    for document in documents.values():
+        _rebuild_plain_text(document)
+    return baseline, target

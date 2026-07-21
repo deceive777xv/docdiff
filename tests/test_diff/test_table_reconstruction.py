@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
+import json
+from pathlib import Path
 
 import pytest
 
-from app.core.diff.reconstruction_trace import SourceRowRef
+from app.core.diff import table_reconstruction as reconstruction
+from app.core.diff.reconstruction_trace import ReconstructionOperation, SourceRowRef
 from app.core.diff.table_reconstruction import (
     CandidateAssessment,
     ColumnMapping,
@@ -20,7 +24,7 @@ from app.core.diff.table_reconstruction import (
     infer_regions,
     split_markdown_table_row,
 )
-from app.core.types import Paragraph, Section, Sentence
+from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 
 def make_source_ref(index: int = 0, paragraph_id: str = "paragraph-1") -> SourceRowRef:
@@ -832,3 +836,303 @@ def test_candidate_fails_closed_when_pooled_textual_key_profile_is_insufficient(
     assert candidate.conflicts == ("insufficient_key_profile",)
     assert assessment.rule_confidence == "low"
     assert assessment.final_action == "keep_separate"
+
+
+def make_split_rows(
+    previous_content: str,
+    continuation_content: str,
+) -> tuple:
+    previous = make_row(("12", "drive", previous_content), 1, "merge-left")
+    continuation = make_row(("", "", "", "", "", continuation_content), 0, "merge-right")
+    mapping = ColumnMapping((1, 3, 5), {1: 0, 3: 1, 5: 2}, 1.0)
+    return previous, continuation, mapping
+
+
+def make_conflicting_key_rows() -> tuple:
+    previous = make_row(("12", "drive", "prefix"), 1, "merge-left")
+    continuation = make_row(("", "14", "", "", "", "suffix"), 0, "merge-right")
+    mapping = ColumnMapping((1, 3, 5), {1: 0, 3: 1, 5: 2}, 1.0)
+    return previous, continuation, mapping
+
+
+def test_merge_logical_rows_preserves_raw_text_and_joins_content_only():
+    assert hasattr(reconstruction, "merge_logical_rows"), "merge_logical_rows is not implemented"
+    previous, continuation, mapping = make_split_rows("0.5 s 以", "内。")
+
+    cells = reconstruction.merge_logical_rows(previous, continuation, mapping, frozenset({0}))
+
+    assert cells[0] == "12"
+    assert cells[2] == "0.5 s 以<br>内。"
+
+
+def test_merge_logical_rows_rejects_conflicting_non_empty_key_cells():
+    assert hasattr(reconstruction, "merge_logical_rows"), "merge_logical_rows is not implemented"
+    previous, continuation, mapping = make_conflicting_key_rows()
+
+    with pytest.raises(ValueError, match="key column conflict"):
+        reconstruction.merge_logical_rows(previous, continuation, mapping, frozenset({0}))
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "expected"),
+    [
+        ("prefix<br>", "suffix", "prefix<br>suffix"),
+        ("prefix", "<br>suffix", "prefix<br>suffix"),
+        ("prefix<br/>", "<br />suffix", "prefix<br/><br />suffix"),
+    ],
+)
+def test_merge_logical_rows_does_not_invent_duplicate_breaks(left, right, expected):
+    assert hasattr(reconstruction, "merge_logical_rows"), "merge_logical_rows is not implemented"
+    previous, continuation, mapping = make_split_rows(left, right)
+
+    cells = reconstruction.merge_logical_rows(previous, continuation, mapping, frozenset({0}))
+
+    assert cells[2] == expected
+
+
+def _document_from_fixture(data: dict) -> DocumentIR:
+    return DocumentIR(
+        doc_id=data["doc_id"],
+        title=data["title"],
+        file_hash=data["file_hash"],
+        sections=[
+            Section(
+                section_id=section["section_id"],
+                title=section["title"],
+                level=section["level"],
+                paragraphs=[
+                    Paragraph(
+                        paragraph_id=paragraph["paragraph_id"],
+                        text=paragraph["text"],
+                        sentences=[Sentence(sentence["text"]) for sentence in paragraph["sentences"]],
+                    )
+                    for paragraph in section["paragraphs"]
+                ],
+            )
+            for section in data["sections"]
+        ],
+        plain_text=data["plain_text"],
+    )
+
+
+def load_sanitized_fixture() -> tuple[DocumentIR, DocumentIR]:
+    fixture_path = Path(__file__).parents[1] / "fixtures" / "cross_page_table_pair.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    return _document_from_fixture(payload["baseline"]), _document_from_fixture(payload["target"])
+
+
+def _source(section_id: str, paragraph_id: str, sentence_index: int) -> SourceRowRef:
+    return SourceRowRef(section_id, paragraph_id, sentence_index)
+
+
+def make_fixture_operations() -> list[ReconstructionOperation]:
+    return [
+        ReconstructionOperation(
+            "baseline-project",
+            "baseline",
+            "project_columns",
+            [_source("baseline-section", "baseline-fragment-b", 0)],
+            column_mapping={1: 0, 3: 1, 5: 2},
+        ),
+        ReconstructionOperation(
+            "baseline-drop-rows",
+            "baseline",
+            "drop_boundary_rows",
+            [
+                _source("baseline-section", "baseline-boundary-table", 0),
+                _source("baseline-section", "baseline-boundary-table", 1),
+            ],
+        ),
+        ReconstructionOperation(
+            "baseline-drop-paragraphs",
+            "baseline",
+            "drop_boundary_paragraphs",
+            source_paragraph_ids=["baseline-boundary-table", "baseline-boundary-note"],
+        ),
+        ReconstructionOperation(
+            "baseline-merge-row",
+            "baseline",
+            "merge_rows",
+            [
+                _source("baseline-section", "baseline-fragment-a", 1),
+                _source("baseline-section", "baseline-fragment-b", 0),
+            ],
+            decision_id="baseline-decision",
+        ),
+        ReconstructionOperation(
+            "baseline-merge-fragments",
+            "baseline",
+            "merge_fragments",
+            source_paragraph_ids=["baseline-fragment-a", "baseline-fragment-b"],
+        ),
+        ReconstructionOperation(
+            "baseline-project-unnumbered",
+            "baseline",
+            "project_columns",
+            [_source("baseline-section", "baseline-unnumbered-b", 0)],
+            column_mapping={1: 0, 3: 1, 5: 2},
+        ),
+        ReconstructionOperation(
+            "baseline-merge-unnumbered-row",
+            "baseline",
+            "merge_rows",
+            [
+                _source("baseline-section", "baseline-unnumbered-a", 0),
+                _source("baseline-section", "baseline-unnumbered-b", 0),
+            ],
+            decision_id="baseline-unnumbered-decision",
+        ),
+        ReconstructionOperation(
+            "baseline-merge-unnumbered-fragments",
+            "baseline",
+            "merge_fragments",
+            source_paragraph_ids=["baseline-unnumbered-a", "baseline-unnumbered-b"],
+        ),
+        ReconstructionOperation(
+            "target-project",
+            "target",
+            "project_columns",
+            [_source("target-section", "target-fragment-a", 0)],
+            column_mapping={1: 0, 3: 1, 5: 2},
+        ),
+        ReconstructionOperation(
+            "target-drop-rows",
+            "target",
+            "drop_boundary_rows",
+            [
+                _source("target-section", "target-boundary-table", 0),
+                _source("target-section", "target-boundary-table", 1),
+            ],
+        ),
+        ReconstructionOperation(
+            "target-drop-paragraph",
+            "target",
+            "drop_boundary_paragraphs",
+            source_paragraph_ids=["target-boundary-table"],
+        ),
+        ReconstructionOperation(
+            "target-merge-row",
+            "target",
+            "merge_rows",
+            [
+                _source("target-section", "target-fragment-a", 0),
+                _source("target-section", "target-fragment-b", 0),
+            ],
+            decision_id="target-decision",
+        ),
+        ReconstructionOperation(
+            "target-merge-fragments",
+            "target",
+            "merge_fragments",
+            source_paragraph_ids=["target-fragment-a", "target-fragment-b"],
+        ),
+    ]
+
+
+def repeated_boundary_token() -> str:
+    return "repeated-neutral-boundary"
+
+
+def real_repeated_body_text() -> str:
+    return "duplicate-stays"
+
+
+def target_only_row_text() -> str:
+    return "target-only-neutral-row"
+
+
+def test_sanitized_fixture_varies_body_columns_and_contains_required_control_rows():
+    baseline, target = load_sanitized_fixture()
+    baseline_paragraphs = baseline.sections[0].paragraphs
+    target_paragraphs = target.sections[0].paragraphs
+
+    assert len(baseline_paragraphs[1].sentences[0].text.split("|")) != len(
+        baseline_paragraphs[4].sentences[1].text.split("|")
+    )
+    assert "phase-a" in baseline.plain_text and "suffix" in baseline.plain_text
+    assert baseline.plain_text.count(real_repeated_body_text()) == 2
+    assert "separate-table" in baseline.plain_text
+    assert "final | unfinished" in baseline.plain_text
+    assert "7.0" in baseline.plain_text and "7.5" in target.plain_text
+    assert target_only_row_text() in target.plain_text
+
+
+def test_replay_projects_drops_merges_and_consolidates_without_mutating_sources():
+    assert hasattr(reconstruction, "apply_reconstruction_operations"), "replay is not implemented"
+    baseline_ir, target_ir = load_sanitized_fixture()
+    baseline_before = deepcopy(baseline_ir)
+    target_before = deepcopy(target_ir)
+    untouched_before = deepcopy(baseline_ir.sections[0].paragraphs[0])
+
+    normalized_baseline, normalized_target = reconstruction.apply_reconstruction_operations(
+        baseline_ir, target_ir, make_fixture_operations()
+    )
+
+    assert baseline_ir == baseline_before
+    assert target_ir == target_before
+    assert "0.5 s 以<br>内。" in normalized_baseline.plain_text
+    assert "prefix<br>suffix" in normalized_baseline.plain_text
+    assert repeated_boundary_token() not in normalized_baseline.plain_text
+    assert normalized_baseline.plain_text.count(real_repeated_body_text()) == 2
+    assert target_only_row_text() in normalized_target.plain_text
+    assert normalized_baseline.sections[0].paragraphs[0] == untouched_before
+
+
+def test_replay_is_idempotent_for_same_operations():
+    assert hasattr(reconstruction, "apply_reconstruction_operations"), "replay is not implemented"
+    baseline_ir, target_ir = load_sanitized_fixture()
+    operations = make_fixture_operations()
+
+    first = reconstruction.apply_reconstruction_operations(baseline_ir, target_ir, operations)
+    second = reconstruction.apply_reconstruction_operations(first[0], first[1], operations)
+
+    assert second == first
+
+
+def test_replay_rejects_a_missing_source_without_exact_prior_provenance():
+    assert hasattr(reconstruction, "apply_reconstruction_operations"), "replay is not implemented"
+    baseline_ir, target_ir = load_sanitized_fixture()
+    missing = ReconstructionOperation(
+        "missing-source",
+        "baseline",
+        "drop_boundary_rows",
+        [_source("baseline-section", "does-not-exist", 0)],
+    )
+
+    with pytest.raises(ValueError, match="missing source row"):
+        reconstruction.apply_reconstruction_operations(baseline_ir, target_ir, [missing])
+
+
+def test_operation_builder_is_stable_and_uses_transformation_precedence():
+    assert hasattr(reconstruction, "build_reconstruction_operations"), "operation builder is not implemented"
+    left, right, mapping = make_candidate_fragments()
+    merge = CandidateAssessment(
+        generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0],
+        "high",
+        "merge",
+    )
+    keep = replace(merge, final_action="keep_separate")
+    boundaries = {
+        "baseline": {left.rows[0].source},
+        "target": set(),
+    }
+    boundary_paragraphs = {"baseline": {"boundary-note"}, "target": set()}
+
+    first = reconstruction.build_reconstruction_operations(
+        [keep, merge], boundaries, boundary_paragraphs
+    )
+    second = reconstruction.build_reconstruction_operations(
+        [merge, keep], boundaries, boundary_paragraphs
+    )
+
+    assert first == second
+    assert [operation.type for operation in first] == [
+        "project_columns",
+        "drop_boundary_rows",
+        "drop_boundary_paragraphs",
+        "merge_rows",
+        "merge_fragments",
+    ]
+    assert all(operation.operation_id for operation in first)
+    assert first[3].generated_row_id
+    assert first[4].generated_paragraph_id
