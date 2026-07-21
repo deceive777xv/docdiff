@@ -21,6 +21,15 @@ _SYSTEM_MESSAGE = (
 )
 
 
+def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    data: dict[str, object] = {}
+    for key, value in pairs:
+        if key in data:
+            raise ValueError(f"duplicate JSON member: {key}")
+        data[key] = value
+    return data
+
+
 def _previous_mapping(candidate: ContinuationCandidate) -> dict[int, int]:
     logical_width = max(candidate.mapping.logical_by_physical.values(), default=-1) + 1
     physical_width = len(candidate.previous_row.normalized_cells)
@@ -153,7 +162,7 @@ def _parse_response(
     candidate: ContinuationCandidate,
     provider: BaseProvider,
 ) -> LLMJudgment | None:
-    data = json.loads(response)
+    data = json.loads(response, object_pairs_hook=_reject_duplicate_members)
     if not isinstance(data, dict) or set(data) != _RESPONSE_FIELDS:
         return None
     if data["candidate_id"] != candidate.candidate_id:

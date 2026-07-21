@@ -210,6 +210,26 @@ def test_pipeline_records_sub_threshold_llm_merge_but_keeps_separate(monkeypatch
     assert decision.final_action == "keep_separate"
 
 
+def test_pipeline_keeps_medium_separate_for_duplicate_response_member(monkeypatch):
+    _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
+    baseline, target, pairs = _documents()
+    duplicate_response = (
+        '{"candidate_id":"other","candidate_id":"medium","decision":"merge",'
+        '"confidence":0.99,"reason":"duplicate"}'
+    )
+
+    result = pipeline.reconstruct_table_pairs(
+        pairs,
+        baseline,
+        target,
+        QueueProvider([duplicate_response]),
+    )
+
+    decision = result.trace.decisions[0]
+    assert decision.llm is None
+    assert decision.final_action == "keep_separate"
+
+
 def test_pipeline_supplies_opposite_version_fragments_as_joint_context(monkeypatch):
     seen = _stub_candidates(monkeypatch, [])
     baseline, target, pairs = _documents()
