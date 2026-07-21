@@ -129,6 +129,7 @@ def _side_candidates(
                 boundary_rows,
                 cross_version_fragments,
                 side,
+                allow_non_table_gap=True,
             )
         )
     return candidates

@@ -324,12 +324,12 @@ DOCX、PPTX、XLSX、HTML、CSV、EPUB、TXT 等由 `MarkItDown` 转 Markdown。
 比对工作流定义在 `app/agent/compare_graph.py`。
 
 ```text
-create_task
-  -> ensure_parsed
-  -> do_align
-  -> do_semantic_compare
-  -> do_classify
-  -> persist_result
+parsed DocumentIR pair
+  -> align_sections
+  -> reconstruct_table_pairs
+  -> match_paragraphs (fresh embeddings of reconstructed in-memory text)
+  -> classify
+  -> persist diff JSON + reconstruction sidecar
 ```
 
 ### 12.1 create_task
@@ -354,7 +354,19 @@ create_task
 
 `structure_aligner.align_sections()` 用章节标题相似度对齐两个文档结构。未匹配章节会保留为一侧为空的 section pair，用于生成新增或删减。
 
-### 12.4 do_semantic_compare
+### 12.4 do_reconstruct_tables
+
+`table_reconstruction_pipeline.reconstruct_table_pairs()` 在章节对齐之后、语义匹配之前联合分析两个版本的跨页表格片段。它识别逻辑列、重复页眉/页脚边界和跨页续行；高置信度规则直接作出合并或保留决定，中置信度候选在 provider 可用时才交给 LLM 裁决。provider 不可用、裁决失败或返回无效结果时，中置信度候选保守地保持分离，不会猜测或补写原文。
+
+重建只在 `DocumentIR` 的深拷贝上执行，并重新对齐重建后的章节。原始解析 JSON 和传入的 `DocumentIR` 不会被修改。后续 `match_paragraphs()` 针对重建后的内存文本重新计算 embedding，不复用导入阶段保存的 chunk 向量。
+
+每个候选决定和实际变换都会记录在版本化、可重放的 sidecar：`exports/<task_id>.reconstruction.json`。sidecar 包含 schema/algorithm 版本、两侧 `doc_id` 与 `file_hash`、候选 ID、规则证据和冲突、可选 LLM 裁决，以及按顺序执行的列投影、边界删除、行/片段合并操作。差异 JSON 与 sidecar 先分别写入同目录临时文件，再发布正式文件；任一发布失败都会令对比任务标记为 `failed`，不会标记为完成。
+
+对比页先加载原始 `DocumentIR`，校验 sidecar 的版本和两侧文档来源，再重放操作用于完整文档双栏。sidecar 缺失、不可读、JSON 无效、版本/来源不匹配或操作无效时，对比页记录带类别的 warning，并整体回退到两侧原始 IR；不会部分应用重建，也不会在展示时调用模型或检索服务。
+
+表格重建与检索基础设施明确隔离：`app/core/retrieval/searcher.py`、`Chunk.faiss_index_id` 和磁盘中保存的 FAISS 索引仅供 retrieval/QA 使用。comparison reconstruction 不读取这些对象，不加载或重建已保存的 FAISS 索引，也不依赖检索 chunk。
+
+### 12.5 do_semantic_compare
 
 `semantic_matcher.match_paragraphs()` 在已对齐章节内匹配段落。
 
@@ -369,7 +381,7 @@ create_task
   - 否定词
   - 义务词，如“应、须、必须、不得、禁止”
 
-### 12.5 do_classify
+### 12.6 do_classify
 
 `diff_classifier.classify()` 将段落/句子/表格行 pair 转成结构化差异。
 
@@ -392,12 +404,13 @@ LLM prompt 要求只输出 JSON：
 
 如果 LLM 调用失败或未配置 provider，会使用规则 fallback。
 
-### 12.6 persist_result
+### 12.7 persist_result
 
 持久化内容：
 
 - `diff_items` 表保存结构化差异。
 - `exports/<task_id>.json` 保存差异 JSON。
+- `exports/<task_id>.reconstruction.json` 保存可校验、可重放的表格重建 sidecar。
 - `compare_tasks` 状态更新为 `completed`，并保存结果路径。
 
 失败时任务状态更新为 `failed`。

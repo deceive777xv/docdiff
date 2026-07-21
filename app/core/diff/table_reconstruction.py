@@ -192,6 +192,7 @@ def generate_continuation_candidates(
     boundary_rows: set[SourceRowRef],
     cross_version_fragments: Sequence[TableFragment],
     side: Literal["baseline", "target"],
+    allow_non_table_gap: bool = False,
 ) -> list[ContinuationCandidate]:
     left_body_rows = tuple(row for row in _body_rows(left) if row.source not in boundary_rows)
     right_body_rows = tuple(row for row in _body_rows(right) if row.source not in boundary_rows)
@@ -199,7 +200,6 @@ def generate_continuation_candidates(
         return []
 
     previous_row = left_body_rows[-1]
-    continuation_row = right_body_rows[0]
     key_logical_columns, key_profile_sufficient = _key_logical_columns(
         left,
         right,
@@ -207,13 +207,55 @@ def generate_continuation_candidates(
         left_body_rows,
         right_body_rows,
     )
-    next_full_row = next(
+    previous_types = _left_logical_types(previous_row, left)
+    first_full_row = next(
         (
             row
-            for row in right_body_rows[1:]
+            for row in right_body_rows
             if _is_complete_logical_row(row, mapping, key_logical_columns)
+            and all(
+                _key_type_family(previous_types.get(column, "empty"))
+                == _key_type_family(
+                    _mapped_logical_types(row, mapping).get(column, "empty")
+                )
+                != "empty"
+                for column in key_logical_columns
+            )
         ),
-        None,
+        right_body_rows[0],
+    )
+    first_full_position = _row_position(right, first_full_row.source)
+    leading_content_rows = tuple(
+        row
+        for row in right.rows[:first_full_position]
+        if row.kind == "content" and row.source not in boundary_rows
+        and (
+            not key_logical_columns
+            or all(
+                not _mapped_logical_cells(row, mapping).get(column, "")
+                for column in key_logical_columns
+            )
+        )
+    )
+    continuation_row = (
+        leading_content_rows[-1] if leading_content_rows else right_body_rows[0]
+    )
+    candidate_context_rows = (
+        (continuation_row, *right_body_rows)
+        if leading_content_rows
+        else right_body_rows
+    )
+    next_full_row = (
+        first_full_row
+        if leading_content_rows
+        else next(
+            (
+                row
+                for row in candidate_context_rows[1:]
+                if _is_complete_logical_row(row, mapping, key_logical_columns)
+            ),
+            None,
+        )
     )
     vetoes = _candidate_vetoes(
         left,
@@ -223,6 +265,8 @@ def generate_continuation_candidates(
         mapping,
         boundary_rows,
         key_logical_columns,
+        allow_leading_header=bool(leading_content_rows),
+        allow_non_table_gap=allow_non_table_gap,
     )
     evidence: tuple[EvidenceCode, ...] = ()
     conflicts = () if key_profile_sufficient or vetoes else ("insufficient_key_profile",)
@@ -238,6 +282,7 @@ def generate_continuation_candidates(
             boundary_rows,
             cross_version_fragments,
             key_logical_columns,
+            allow_non_table_gap=allow_non_table_gap,
         )
     candidate = ContinuationCandidate(
         candidate_id=_candidate_id(side, previous_row.source, continuation_row.source, mapping),
@@ -1516,6 +1561,41 @@ def _row_role(fragment: TableFragment, source: SourceRowRef) -> RegionRole:
     )
 
 
+def _intervening_row_role(
+    left: TableFragment,
+    right: TableFragment,
+    row: TableRowMatrix,
+) -> RegionRole:
+    if row.source.paragraph_id == left.paragraph_id:
+        return _row_role(left, row.source)
+    if row.source.paragraph_id == right.paragraph_id:
+        return _row_role(right, row.source)
+    return "unknown"
+
+
+def _row_matches_previous_key_pattern(
+    left: TableFragment,
+    right: TableFragment,
+    row: TableRowMatrix,
+    mapping: ColumnMapping,
+    key_logical_columns: frozenset[int],
+    previous_types: Mapping[int, str],
+) -> bool:
+    if not key_logical_columns:
+        return True
+    row_types = (
+        _left_logical_types(row, left)
+        if row.source.paragraph_id == left.paragraph_id
+        else _mapped_logical_types(row, mapping)
+    )
+    return all(
+        _key_type_family(previous_types.get(column, "empty"))
+        == _key_type_family(row_types.get(column, "empty"))
+        != "empty"
+        for column in key_logical_columns
+    )
+
+
 def _mapping_is_incompatible(
     left: TableFragment,
     right: TableFragment,
@@ -1544,6 +1624,9 @@ def _candidate_vetoes(
     mapping: ColumnMapping,
     boundary_rows: set[SourceRowRef],
     key_logical_columns: frozenset[int],
+    *,
+    allow_leading_header: bool = False,
+    allow_non_table_gap: bool = False,
 ) -> tuple[VetoCode, ...]:
     previous_cells = _left_logical_cells(previous, left)
     continuation_cells = _mapped_logical_cells(continuation, mapping)
@@ -1551,20 +1634,43 @@ def _candidate_vetoes(
     vetoes: list[VetoCode] = []
     if any(continuation_cells.get(column, "") for column in key_logical_columns):
         vetoes.append("new_key_value")
+    continuation_role = _row_role(right, continuation.source)
     if (
         continuation.kind != "content"
         or continuation.source in boundary_rows
-        or _row_role(right, continuation.source) in {"header", "boundary"}
+        or continuation_role == "boundary"
+        or (continuation_role == "header" and not allow_leading_header)
     ):
         vetoes.append("header_or_separator")
     if _mapping_is_incompatible(left, right, mapping):
         vetoes.append("incompatible_schema")
     if (
         left.section_id != right.section_id
-        or right.paragraph_index != left.paragraph_index + 1
+        or (
+            right.paragraph_index != left.paragraph_index + 1
+            and not allow_non_table_gap
+        )
     ):
         vetoes.append("new_section_or_table")
-    if any(row.kind == "content" and row.source not in boundary_rows for row in intervening):
+    if any(
+        row.kind == "content"
+        and row.source not in boundary_rows
+        and (
+            (role := _intervening_row_role(left, right, row)) == "unknown"
+            or (
+                role == "body"
+                and _row_matches_previous_key_pattern(
+                    left,
+                    right,
+                    row,
+                    mapping,
+                    key_logical_columns,
+                    _left_logical_types(previous, left),
+                )
+            )
+        )
+        for row in intervening
+    ):
         vetoes.append("crosses_real_body_row")
     if any(
         previous_cells.get(column, "")
@@ -1656,15 +1762,38 @@ def _boundary_artifacts_only_evidence(
     right: TableFragment,
     previous: TableRowMatrix,
     continuation: TableRowMatrix,
+    mapping: ColumnMapping,
     boundary_rows: set[SourceRowRef],
+    key_logical_columns: frozenset[int],
+    *,
+    allow_non_table_gap: bool = False,
 ) -> bool:
     if (
         left.section_id != right.section_id
-        or right.paragraph_index != left.paragraph_index + 1
+        or (
+            right.paragraph_index != left.paragraph_index + 1
+            and not allow_non_table_gap
+        )
     ):
         return False
     intervening = _intervening_rows(left, right, previous, continuation)
-    return all(row.source in boundary_rows for row in intervening)
+    previous_types = _left_logical_types(previous, left)
+    return all(
+        row.source in boundary_rows
+        or _intervening_row_role(left, right, row) in {"header", "boundary"}
+        or (
+            _intervening_row_role(left, right, row) == "body"
+            and not _row_matches_previous_key_pattern(
+                left,
+                right,
+                row,
+                mapping,
+                key_logical_columns,
+                previous_types,
+            )
+        )
+        for row in intervening
+    )
 
 
 def _candidate_cell_options(previous: str, continuation: str) -> frozenset[str]:
@@ -1719,6 +1848,8 @@ def _candidate_evidence(
     boundary_rows: set[SourceRowRef],
     cross_version_fragments: Sequence[TableFragment],
     key_logical_columns: frozenset[int],
+    *,
+    allow_non_table_gap: bool = False,
 ) -> tuple[tuple[EvidenceCode, ...], tuple[TableRowMatrix, ...]]:
     previous_cells = _left_logical_cells(previous, left)
     continuation_cells = _mapped_logical_cells(continuation, mapping)
@@ -1743,7 +1874,14 @@ def _candidate_evidence(
     if _textual_continuity_evidence(previous_cells, continuation_cells, key_logical_columns):
         evidence.append("textual_continuity")
     if _boundary_artifacts_only_evidence(
-        left, right, previous, continuation, boundary_rows
+        left,
+        right,
+        previous,
+        continuation,
+        mapping,
+        boundary_rows,
+        key_logical_columns,
+        allow_non_table_gap=allow_non_table_gap,
     ):
         evidence.append("boundary_artifacts_only")
     if cross_version_rows:

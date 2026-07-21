@@ -115,7 +115,16 @@ def _stub_candidates(monkeypatch, candidates: list[ContinuationCandidate]):
 
     seen_cross_version: list[tuple[str, tuple[str, ...]]] = []
 
-    def generate(left, right, mapping, boundary_rows, cross_version_fragments, side):
+    def generate(
+        left,
+        right,
+        mapping,
+        boundary_rows,
+        cross_version_fragments,
+        side,
+        allow_non_table_gap=False,
+    ):
+        del allow_non_table_gap
         seen_cross_version.append((side, tuple(fragment.section_id for fragment in cross_version_fragments)))
         if side == "target":
             return []
@@ -266,7 +275,8 @@ def test_pipeline_skips_fully_dropped_boundary_fragment_when_pairing_neighbors(m
         lambda *args: ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
     )
 
-    def record_pair(left, right, *args):
+    def record_pair(left, right, *args, **kwargs):
+        del kwargs
         paired.append((left.paragraph_id, right.paragraph_id))
         return []
 
@@ -327,3 +337,52 @@ def test_pipeline_has_no_retrieval_or_faiss_dependency():
 
     assert "app.core.retrieval.searcher" not in source
     assert "faiss_index_id" not in source
+
+
+def test_pipeline_reconstructs_leading_continuation_before_body_across_non_table_gap():
+    left_lines = [
+        "| item | group | detail | limit |",
+        "| --- | --- | --- | --- |",
+        "| 10 | amber | stable | ready |",
+        "| 11 | blue | prefix | 0.5 s 以 |",
+    ]
+    right_lines = [
+        "| neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary | neutral-boundary |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| | item | group | detail | | limit | | | |",
+        "| | | | | | 内。 | | | |",
+        "| | 12 | cyan | next | | complete | | | |",
+        "| | 13 | green | later | | complete | | | |",
+    ]
+
+    def paragraph(paragraph_id: str, lines: list[str]) -> Paragraph:
+        return Paragraph(
+            paragraph_id,
+            "\n".join(lines),
+            [Sentence(line) for line in lines],
+        )
+
+    section = Section(
+        "section-neutral",
+        "Neutral table",
+        1,
+        [
+            paragraph("fragment-left", left_lines),
+            paragraph("neutral-gap", ["Neutral non-table marker."]),
+            paragraph("fragment-right", right_lines),
+        ],
+    )
+    baseline = DocumentIR(
+        "baseline-neutral",
+        "Baseline neutral",
+        "baseline-neutral-hash",
+        [section],
+        "\n".join(paragraph.text for paragraph in section.paragraphs),
+    )
+    target = DocumentIR("target-neutral", "Target neutral", "target-neutral-hash", [])
+
+    result = pipeline.reconstruct_table_pairs(
+        [SectionPair(section, None, 0.0)], baseline, target, None
+    )
+    assert "0.5 s 以<br>内。" in result.baseline_ir.plain_text
+    assert any(decision.final_action == "merge" for decision in result.trace.decisions)
