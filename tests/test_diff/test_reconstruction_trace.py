@@ -161,3 +161,23 @@ def test_persist_compare_artifacts_raises_when_result_replace_fails(tmp_path, mo
 
     exports = tmp_path / "exports"
     assert not any(exports.glob("*.tmp"))
+
+
+def test_persist_compare_artifacts_stops_before_result_replace_when_sidecar_replace_fails(tmp_path, monkeypatch):
+    original_replace = Path.replace
+    replace_targets: list[str] = []
+
+    def failing_sidecar_replace(path: Path, target: Path):
+        replace_targets.append(target.name)
+        if target.name == "task-1.reconstruction.json":
+            raise OSError("sidecar replacement failed")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", failing_sidecar_replace)
+
+    with pytest.raises(OSError, match="sidecar replacement failed"):
+        persist_compare_artifacts(tmp_path, "task-1", [make_diff_item()], make_trace_with_every_operation())
+
+    exports = tmp_path / "exports"
+    assert replace_targets == ["task-1.reconstruction.json"]
+    assert not any(exports.glob("*.tmp"))
