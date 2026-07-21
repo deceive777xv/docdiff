@@ -84,13 +84,18 @@ def _candidate(
         "complementary_content_cells",
         "textual_continuity",
     )[:evidence_count]
+    previous = _row(("12", "drive", "prefix"), 0, f"{candidate_id}-left")
+    continuation = _row(("", "", "suffix"), 0, f"{candidate_id}-right")
     return ContinuationCandidate(
         candidate_id=candidate_id,
         side=side,
-        previous_row=_row(("12", "drive", "prefix"), 0, f"{candidate_id}-left"),
-        continuation_row=_row(("", "", "suffix"), 0, f"{candidate_id}-right"),
+        previous_row=previous,
+        continuation_row=continuation,
         next_full_row=None,
         mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        previous_mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        previous_fragment_rows=(previous,),
+        continuation_fragment_rows=(continuation,),
         evidence=evidence,
         conflicts=(),
         vetoes=("new_key_value",) if vetoed else (),
@@ -339,7 +344,15 @@ def test_pipeline_has_no_retrieval_or_faiss_dependency():
     assert "faiss_index_id" not in source
 
 
-def test_pipeline_reconstructs_leading_continuation_before_body_across_non_table_gap():
+def _paragraph(paragraph_id: str, lines: list[str]) -> Paragraph:
+    return Paragraph(
+        paragraph_id,
+        "\n".join(lines),
+        [Sentence(line) for line in lines],
+    )
+
+
+def _continuation_gap_fragments() -> tuple[list[str], list[str]]:
     left_lines = [
         "| item | group | detail | limit |",
         "| --- | --- | --- | --- |",
@@ -354,24 +367,19 @@ def test_pipeline_reconstructs_leading_continuation_before_body_across_non_table
         "| | 70103 | cyan | next | | complete | | | |",
         "| | 70104 | green | later | | complete | | | |",
     ]
+    return left_lines, right_lines
 
-    def paragraph(paragraph_id: str, lines: list[str]) -> Paragraph:
-        return Paragraph(
-            paragraph_id,
-            "\n".join(lines),
-            [Sentence(line) for line in lines],
-        )
 
-    section = Section(
-        "section-neutral",
-        "Neutral table",
-        1,
-        [
-            paragraph("fragment-left", left_lines),
-            paragraph("neutral-gap", ["Neutral non-table marker."]),
-            paragraph("fragment-right", right_lines),
-        ],
-    )
+def _supporting_table_lines(start: int) -> list[str]:
+    return [
+        "| item | group | detail | limit |",
+        "| --- | --- | --- | --- |",
+        f"| {start} | bronze | steady | ready |",
+        f"| {start + 1} | silver | steady | complete |",
+    ]
+
+
+def _run_single_side_section(section: Section):
     baseline = DocumentIR(
         "baseline-neutral",
         "Baseline neutral",
@@ -380,9 +388,192 @@ def test_pipeline_reconstructs_leading_continuation_before_body_across_non_table
         "\n".join(paragraph.text for paragraph in section.paragraphs),
     )
     target = DocumentIR("target-neutral", "Target neutral", "target-neutral-hash", [])
-
-    result = pipeline.reconstruct_table_pairs(
+    return baseline, pipeline.reconstruct_table_pairs(
         [SectionPair(section, None, 0.0)], baseline, target, None
     )
+
+
+def test_pipeline_allows_repeated_stable_boundary_paragraphs_and_replays_their_removal():
+    left_lines, right_lines = _continuation_gap_fragments()
+    section = Section(
+        "section-neutral",
+        "Neutral table",
+        1,
+        [
+            _paragraph("fragment-left", left_lines),
+            _paragraph("boundary-note-a", ["Repeated boundary note."]),
+            _paragraph("fragment-right", right_lines),
+            _paragraph("support-left", _supporting_table_lines(80101)),
+            _paragraph("boundary-note-b", ["  repeated   BOUNDARY note.  "]),
+            _paragraph("support-right", _supporting_table_lines(80103)),
+        ],
+    )
+    baseline, result = _run_single_side_section(section)
+
     assert "cedar pre<br>lude-complete" in result.baseline_ir.plain_text
-    assert any(decision.final_action == "merge" for decision in result.trace.decisions)
+    dropped_paragraph_ids = {
+        paragraph_id
+        for operation in result.trace.operations
+        if operation.type == "drop_boundary_paragraphs"
+        for paragraph_id in operation.source_paragraph_ids
+    }
+    assert dropped_paragraph_ids == {"boundary-note-a", "boundary-note-b"}
+    assert all(
+        paragraph_id not in {
+            paragraph.paragraph_id
+            for paragraph in result.baseline_ir.sections[0].paragraphs
+        }
+        for paragraph_id in dropped_paragraph_ids
+    )
+    assert dropped_paragraph_ids.issubset(
+        {
+            paragraph.paragraph_id
+            for paragraph in baseline.sections[0].paragraphs
+        }
+    )
+    replayed = pipeline.replay_reconstruction(
+        baseline,
+        DocumentIR("target-neutral", "Target neutral", "target-neutral-hash", []),
+        result.trace,
+    )
+    assert replayed == (result.baseline_ir, result.target_ir)
+
+
+def test_pipeline_keeps_fragments_separate_across_unique_prose_and_preserves_order():
+    left_lines, right_lines = _continuation_gap_fragments()
+    section = Section(
+        "section-neutral",
+        "Neutral table",
+        1,
+        [
+            _paragraph("fragment-left", left_lines),
+            _paragraph("unique-prose", ["A unique explanatory sentence remains here."]),
+            _paragraph("fragment-right", right_lines),
+        ],
+    )
+    expected_order = [paragraph.paragraph_id for paragraph in section.paragraphs]
+    _, result = _run_single_side_section(section)
+
+    assert "cedar pre<br>lude-complete" not in result.baseline_ir.plain_text
+    assert any(
+        decision.final_action == "keep_separate"
+        and "new_section_or_table" in decision.rule_conflicts
+        for decision in result.trace.decisions
+    )
+    assert not any(
+        operation.type == "drop_boundary_paragraphs"
+        for operation in result.trace.operations
+    )
+    assert [
+        paragraph.paragraph_id
+        for paragraph in result.baseline_ir.sections[0].paragraphs
+    ] == expected_order
+
+
+def test_pipeline_keeps_fragments_separate_when_repeated_prose_has_unstable_position():
+    left_lines, right_lines = _continuation_gap_fragments()
+    section = Section(
+        "section-neutral",
+        "Neutral table",
+        1,
+        [
+            _paragraph("unstable-prose-outside", ["Repeated explanatory prose."]),
+            _paragraph("fragment-left", left_lines),
+            _paragraph("unstable-prose-gap", [" repeated   explanatory PROSE. "]),
+            _paragraph("fragment-right", right_lines),
+        ],
+    )
+    _, result = _run_single_side_section(section)
+
+    assert "cedar pre<br>lude-complete" not in result.baseline_ir.plain_text
+    assert any(
+        decision.final_action == "keep_separate"
+        and "new_section_or_table" in decision.rule_conflicts
+        for decision in result.trace.decisions
+    )
+    assert not any(
+        operation.type == "drop_boundary_paragraphs"
+        for operation in result.trace.operations
+    )
+
+
+def test_pipeline_rejects_repeated_prose_at_different_positions_inside_table_gaps():
+    section = Section(
+        "section-neutral",
+        "Neutral table",
+        1,
+        [
+            _paragraph("support-a", _supporting_table_lines(81101)),
+            _paragraph("unstable-note-a", ["Repeated positional note."]),
+            _paragraph("support-b", _supporting_table_lines(81103)),
+            _paragraph("support-c", _supporting_table_lines(81105)),
+            _paragraph("gap-filler", ["Unrelated retained paragraph."]),
+            _paragraph("unstable-note-b", [" repeated   positional NOTE. "]),
+            _paragraph("support-d", _supporting_table_lines(81107)),
+        ],
+    )
+    _, result = _run_single_side_section(section)
+
+    dropped_paragraph_ids = {
+        paragraph_id
+        for operation in result.trace.operations
+        if operation.type == "drop_boundary_paragraphs"
+        for paragraph_id in operation.source_paragraph_ids
+    }
+    assert dropped_paragraph_ids.isdisjoint(
+        {"unstable-note-a", "unstable-note-b"}
+    )
+
+
+def test_pipeline_rejects_repeated_boundary_paragraphs_over_the_shortness_limit():
+    long_note = "x" * (
+        pipeline._MAX_BOUNDARY_PARAGRAPH_NORMALIZED_LENGTH + 1
+    )
+    section = Section(
+        "section-neutral",
+        "Neutral table",
+        1,
+        [
+            _paragraph("support-a", _supporting_table_lines(82101)),
+            _paragraph("long-note-a", [long_note]),
+            _paragraph("support-b", _supporting_table_lines(82103)),
+            _paragraph("support-c", _supporting_table_lines(82105)),
+            _paragraph("long-note-b", [long_note]),
+            _paragraph("support-d", _supporting_table_lines(82107)),
+        ],
+    )
+    _, result = _run_single_side_section(section)
+
+    dropped_paragraph_ids = {
+        paragraph_id
+        for operation in result.trace.operations
+        if operation.type == "drop_boundary_paragraphs"
+        for paragraph_id in operation.source_paragraph_ids
+    }
+    assert dropped_paragraph_ids.isdisjoint({"long-note-a", "long-note-b"})
+
+
+def test_pipeline_requires_every_paragraph_in_a_gap_to_be_confirmed_boundary_material():
+    left_lines, right_lines = _continuation_gap_fragments()
+    section = Section(
+        "section-neutral",
+        "Neutral table",
+        1,
+        [
+            _paragraph("fragment-left", left_lines),
+            _paragraph("boundary-note-a", ["Repeated boundary note."]),
+            _paragraph("unknown-gap-prose", ["An unrelated body paragraph blocks merging."]),
+            _paragraph("fragment-right", right_lines),
+            _paragraph("support-left", _supporting_table_lines(80101)),
+            _paragraph("boundary-note-b", ["repeated boundary note."]),
+            _paragraph("support-right", _supporting_table_lines(80103)),
+        ],
+    )
+    _, result = _run_single_side_section(section)
+
+    merge_by_source = {
+        tuple(source.paragraph_id for source in decision.source_rows): decision.final_action
+        for decision in result.trace.decisions
+    }
+    assert merge_by_source[("fragment-left", "fragment-right")] == "keep_separate"
+    assert "cedar pre<br>lude-complete" not in result.baseline_ir.plain_text

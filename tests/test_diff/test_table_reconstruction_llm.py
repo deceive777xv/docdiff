@@ -49,13 +49,18 @@ def make_medium_candidate(candidate_id: str = "candidate-1") -> ContinuationCand
         _row((str(index + 20), "peer", f"context-{index}"), index, "peer")
         for index in range(5)
     )
+    previous = _row(("12", "drive", "0.5 s"), 0, "left")
+    continuation = _row(("", "", "within"), 0, "right")
     return ContinuationCandidate(
         candidate_id=candidate_id,
         side="baseline",
-        previous_row=_row(("12", "drive", "0.5 s"), 0, "left"),
-        continuation_row=_row(("", "", "within"), 0, "right"),
+        previous_row=previous,
+        continuation_row=continuation,
         next_full_row=_row(("13", "stop", "0.8 s"), 1, "right"),
         mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 0.9),
+        previous_mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        previous_fragment_rows=(previous,),
+        continuation_fragment_rows=(continuation,),
         evidence=("blank_key_cells", "textual_continuity"),
         conflicts=("weak_cross_version_match",),
         vetoes=(),
@@ -164,8 +169,17 @@ def test_adjudicator_sends_only_bounded_structural_context():
 
 def test_adjudicator_projects_sparse_previous_row_to_logical_cells():
     candidate = make_medium_candidate()
-    sparse_previous = _row(("", "12", "", "drive", "", "0.5 s"), 0, "left")
-    candidate = replace(candidate, previous_row=sparse_previous)
+    sparse_previous = _row(("", "beta", "", "", "", "prefix"), 0, "left")
+    candidate = replace(
+        candidate,
+        previous_row=sparse_previous,
+        previous_mapping=ColumnMapping(
+            (0, 1, 5),
+            {0: 0, 1: 1, 5: 2},
+            1.0,
+        ),
+        previous_fragment_rows=(sparse_previous,),
+    )
     provider = RecordingProvider(
         '{"candidate_id":"candidate-1","decision":"merge","confidence":0.75,"reason":"continues"}'
     )
@@ -173,5 +187,10 @@ def test_adjudicator_projects_sparse_previous_row_to_logical_cells():
     adjudicate_continuation(candidate, provider)
 
     payload = json.loads(provider.chat_calls[0][1]["content"])
-    assert payload["previous_cells"] == ["12", "drive", "0.5 s"]
+    assert payload["previous_cells"] == ["", "beta", "prefix"]
+    assert payload["physical_mapping"]["previous_logical_by_physical"] == [
+        [0, 0],
+        [1, 1],
+        [5, 2],
+    ]
     assert len(payload["logical_column_roles"]) == 3

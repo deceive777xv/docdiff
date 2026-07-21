@@ -172,6 +172,9 @@ class ContinuationCandidate:
     continuation_row: TableRowMatrix
     next_full_row: TableRowMatrix | None
     mapping: ColumnMapping
+    previous_mapping: ColumnMapping
+    previous_fragment_rows: tuple[TableRowMatrix, ...]
+    continuation_fragment_rows: tuple[TableRowMatrix, ...]
     evidence: tuple[EvidenceCode, ...]
     conflicts: tuple[str, ...]
     vetoes: tuple[VetoCode, ...]
@@ -198,6 +201,16 @@ def generate_continuation_candidates(
     right_body_rows = tuple(row for row in _body_rows(right) if row.source not in boundary_rows)
     if not left_body_rows or not right_body_rows:
         return []
+
+    left_active_columns = _active_columns(left)
+    previous_mapping = ColumnMapping(
+        left_active_columns,
+        {
+            physical_index: logical_index
+            for logical_index, physical_index in enumerate(left_active_columns)
+        },
+        1.0,
+    )
 
     previous_row = left_body_rows[-1]
     first_right_body_position = min(
@@ -256,6 +269,9 @@ def generate_continuation_candidates(
         if leading_content_rows
         else right_body_rows
     )
+    continuation_projection_sources = {
+        row.source for row in right_body_rows
+    } | {continuation_row.source}
     next_full_row = (
         first_full_row
         if leading_content_rows
@@ -303,6 +319,18 @@ def generate_continuation_candidates(
         continuation_row=continuation_row,
         next_full_row=next_full_row,
         mapping=mapping,
+        previous_mapping=previous_mapping,
+        previous_fragment_rows=tuple(
+            row
+            for row in left_body_rows
+            if row.kind == "content"
+        ),
+        continuation_fragment_rows=tuple(
+            row
+            for row in right.rows
+            if row.kind == "content"
+            and row.source in continuation_projection_sources
+        ),
         evidence=evidence,
         conflicts=conflicts,
         vetoes=vetoes,
@@ -411,6 +439,41 @@ def _operation_sort_key(operation: ReconstructionOperation) -> tuple[object, ...
     )
 
 
+def _retained_row_projection(
+    row: TableRowMatrix,
+    fragment_mapping: Mapping[int, int],
+    logical_width: int,
+) -> dict[int, int]:
+    """Project a retained row without guessing the position of missing cells."""
+    mapping = dict(sorted(fragment_mapping.items()))
+    occupied_columns = tuple(
+        physical_index
+        for physical_index, occupied in enumerate(row.occupied)
+        if occupied
+    )
+    unmapped_columns = tuple(
+        physical_index
+        for physical_index in occupied_columns
+        if physical_index not in mapping
+    )
+    if not unmapped_columns:
+        return mapping
+    if len(occupied_columns) != logical_width:
+        raise ValueError("fragment projection contains unmapped retained cells")
+
+    row_mapping = {
+        physical_index: logical_index
+        for logical_index, physical_index in enumerate(occupied_columns)
+    }
+    stable_anchors = sum(
+        mapping.get(physical_index) == logical_index
+        for physical_index, logical_index in row_mapping.items()
+    )
+    if stable_anchors < logical_width - len(unmapped_columns):
+        raise ValueError("fragment projection contains unmapped retained cells")
+    return row_mapping
+
+
 def build_reconstruction_operations(
     analyses: Sequence[CandidateAssessment],
     boundary_rows: Mapping[str, set[SourceRowRef]],
@@ -463,18 +526,58 @@ def build_reconstruction_operations(
         source_paragraph_ids = list(
             dict.fromkeys(source.paragraph_id for source in sources)
         )
-        mapping = dict(sorted(candidate.mapping.logical_by_physical.items()))
-        logical_width = max(mapping.values(), default=-1) + 1
-        record_projection(
-            candidate.side,
-            candidate.previous_row.source,
-            _infer_row_projection(candidate.previous_row, logical_width),
+        previous_mapping = dict(
+            sorted(candidate.previous_mapping.logical_by_physical.items())
         )
-        record_projection(
-            candidate.side,
-            candidate.continuation_row.source,
-            mapping,
+        continuation_mapping = dict(
+            sorted(candidate.mapping.logical_by_physical.items())
         )
+        previous_logical_width = max(previous_mapping.values(), default=-1) + 1
+        continuation_logical_width = max(
+            continuation_mapping.values(), default=-1
+        ) + 1
+        if (
+            previous_logical_width <= 0
+            or previous_logical_width != continuation_logical_width
+        ):
+            raise ValueError(
+                "participating fragment projections have different logical widths"
+            )
+        if candidate.previous_row.source not in {
+            row.source for row in candidate.previous_fragment_rows
+        }:
+            raise ValueError("previous fragment projection omits candidate source row")
+        if candidate.continuation_row.source not in {
+            row.source for row in candidate.continuation_fragment_rows
+        }:
+            raise ValueError("continuation fragment projection omits candidate source row")
+        dropped_candidate_rows = boundary_rows.get(candidate.side, set())
+        if any(source in dropped_candidate_rows for source in sources):
+            raise ValueError("accepted merge source row is marked as boundary noise")
+        for row in candidate.previous_fragment_rows:
+            if row.source in dropped_candidate_rows:
+                continue
+            record_projection(
+                candidate.side,
+                row.source,
+                _retained_row_projection(
+                    row,
+                    previous_mapping,
+                    previous_logical_width,
+                ),
+            )
+        for row in candidate.continuation_fragment_rows:
+            if row.source in dropped_candidate_rows:
+                continue
+            record_projection(
+                candidate.side,
+                row.source,
+                _retained_row_projection(
+                    row,
+                    continuation_mapping,
+                    continuation_logical_width,
+                ),
+            )
         operations.extend(
             (
                 ReconstructionOperation(
@@ -513,48 +616,6 @@ def build_reconstruction_operations(
         identified = _with_stable_identity(operation)
         unique.setdefault(identified.operation_id, identified)
     return sorted(unique.values(), key=_operation_sort_key)
-
-
-def _infer_row_projection(
-    row: TableRowMatrix,
-    logical_width: int,
-) -> dict[int, int]:
-    """Infer a row-local projection without assuming fixed physical columns."""
-    if logical_width <= 0:
-        raise ValueError("logical projection width must be positive")
-    physical_width = len(row.raw_cells)
-    if physical_width < logical_width:
-        raise ValueError("source row is narrower than its logical projection")
-    if physical_width == logical_width:
-        columns = tuple(range(logical_width))
-    else:
-        occupied = tuple(
-            index
-            for index, value in enumerate(row.raw_cells)
-            if _normalize_cell(value)
-        )
-        if len(occupied) > logical_width:
-            raise ValueError("source row has too many occupied cells for logical projection")
-        selected = set(occupied)
-
-        def candidate_score(candidate: tuple[int, ...]) -> tuple[object, ...]:
-            gaps = [right - left for left, right in zip(candidate, candidate[1:])]
-            gap_variation = (
-                sum(abs(gap * len(gaps) - sum(gaps)) for gap in gaps)
-                if gaps
-                else 0
-            )
-            return gap_variation, -(candidate[-1] - candidate[0]), candidate
-
-        while len(selected) < logical_width:
-            selected.add(
-                min(
-                    (index for index in range(physical_width) if index not in selected),
-                    key=lambda index: candidate_score(tuple(sorted(selected | {index}))),
-                )
-            )
-        columns = tuple(sorted(selected))
-    return {physical: logical for logical, physical in enumerate(columns)}
 
 
 def _project_raw_cells(
@@ -2297,6 +2358,13 @@ def _apply_merge_fragments(
         raise ValueError("merge_fragments cannot cross sections")
     _, section, insert_index, _ = ordered[0]
     paragraphs = [location[3] for location in ordered]
+    paragraph_ids = {id(paragraph) for paragraph in paragraphs}
+    final_index = ordered[-1][2]
+    if any(
+        id(paragraph) not in paragraph_ids
+        for paragraph in section.paragraphs[insert_index : final_index + 1]
+    ):
+        raise ValueError("merge_fragments cannot cross retained paragraphs")
     sentences = [sentence for paragraph in paragraphs for sentence in paragraph.sentences]
     merged = Paragraph(
         paragraph_id=_expected_paragraph_id(operation),
@@ -2319,7 +2387,6 @@ def _apply_merge_fragments(
         for operation_id in paragraph._reconstruction_operations
     ) | {operation.operation_id}
     _rebuild_paragraph(merged)
-    paragraph_ids = {id(paragraph) for paragraph in paragraphs}
     section.paragraphs[:] = [
         paragraph
         for paragraph in section.paragraphs
@@ -2346,12 +2413,35 @@ def _apply_operation(
     _record_operation(document, operation)
 
 
+def _validate_projection_operations(
+    operations: Sequence[ReconstructionOperation],
+) -> None:
+    projections: dict[
+        tuple[Literal["baseline", "target"], SourceRowRef],
+        dict[int, int],
+    ] = {}
+    for operation in operations:
+        if operation.type != "project_columns":
+            continue
+        mapping = dict(sorted(operation.column_mapping.items()))
+        for source in operation.source_rows:
+            key = (operation.side, source)
+            existing = projections.get(key)
+            if existing is not None and existing != mapping:
+                raise ValueError(
+                    "conflicting projections for source row "
+                    f"{source.section_id}/{source.paragraph_id}/{source.sentence_index}"
+                )
+            projections[key] = mapping
+
+
 def apply_reconstruction_operations(
     baseline_ir: DocumentIR,
     target_ir: DocumentIR,
     operations: Sequence[ReconstructionOperation],
 ) -> tuple[DocumentIR, DocumentIR]:
     """Replay an explicit reconstruction trace on deep-copied documents."""
+    _validate_projection_operations(operations)
     baseline = deepcopy(baseline_ir)
     target = deepcopy(target_ir)
     documents = {"baseline": baseline, "target": target}

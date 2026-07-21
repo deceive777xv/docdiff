@@ -30,42 +30,6 @@ def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, obje
     return data
 
 
-def _previous_mapping(candidate: ContinuationCandidate) -> dict[int, int]:
-    logical_width = max(candidate.mapping.logical_by_physical.values(), default=-1) + 1
-    physical_width = len(candidate.previous_row.normalized_cells)
-    if logical_width <= 0:
-        return {index: index for index in range(physical_width)}
-    if physical_width <= logical_width:
-        return {index: index for index in range(physical_width)}
-    occupied = [
-        index
-        for index, value in enumerate(candidate.previous_row.normalized_cells)
-        if value
-    ]
-    selected = set(occupied[:logical_width])
-
-    def candidate_score(columns: tuple[int, ...]) -> tuple[object, ...]:
-        gaps = [right - left for left, right in zip(columns, columns[1:])]
-        variation = (
-            sum(abs(gap * len(gaps) - sum(gaps)) for gap in gaps)
-            if gaps
-            else 0
-        )
-        return variation, -(columns[-1] - columns[0]), columns
-
-    while len(selected) < logical_width:
-        selected.add(
-            min(
-                (index for index in range(physical_width) if index not in selected),
-                key=lambda index: candidate_score(tuple(sorted((*selected, index)))),
-            )
-        )
-    return {
-        physical_index: logical_index
-        for logical_index, physical_index in enumerate(sorted(selected))
-    }
-
-
 def _project_cells(
     row: TableRowMatrix | None,
     mapping: dict[int, int],
@@ -83,7 +47,10 @@ def _project_cells(
 
 
 def _logical_column_roles(candidate: ContinuationCandidate) -> list[dict[str, object]]:
-    previous = _project_types(candidate.previous_row, _previous_mapping(candidate)) or []
+    previous = _project_types(
+        candidate.previous_row,
+        candidate.previous_mapping.logical_by_physical,
+    ) or []
     continuation = _project_types(
         candidate.continuation_row,
         candidate.mapping.logical_by_physical,
@@ -123,7 +90,7 @@ def _project_types(
 
 
 def _prompt_payload(candidate: ContinuationCandidate) -> dict[str, object]:
-    previous_mapping = _previous_mapping(candidate)
+    previous_mapping = candidate.previous_mapping.logical_by_physical
     return {
         "candidate_id": candidate.candidate_id,
         "side": candidate.side,

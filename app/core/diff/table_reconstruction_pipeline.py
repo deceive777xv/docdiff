@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import re
 from typing import Literal, Mapping, Sequence, cast
 
 from app.core.diff.reconstruction_trace import (
@@ -18,6 +19,7 @@ from app.core.diff.reconstruction_trace import (
 from app.core.diff.structure_aligner import SectionPair, align_sections
 from app.core.diff.table_reconstruction import (
     CandidateAssessment,
+    ColumnMapping,
     ContinuationCandidate,
     TableFragment,
     apply_reconstruction_operations,
@@ -32,10 +34,11 @@ from app.core.diff.table_reconstruction import (
 )
 from app.core.diff.table_reconstruction_llm import adjudicate_continuation
 from app.core.model.base_provider import BaseProvider
-from app.core.types import DocumentIR, Section
+from app.core.types import DocumentIR, Paragraph, Section
 
 
 _LLM_MERGE_THRESHOLD = 0.75
+_MAX_BOUNDARY_PARAGRAPH_NORMALIZED_LENGTH = 160
 
 
 @dataclass(frozen=True)
@@ -102,25 +105,138 @@ def _paragraph_boundaries(
     }
 
 
-def _side_candidates(
+def _ordered_retained_fragments(
+    fragments: Sequence[TableFragment],
+    boundary_rows: set[SourceRowRef],
+) -> tuple[TableFragment, ...]:
+    return tuple(
+        sorted(
+            (
+                fragment
+                for fragment in fragments
+                if any(row.source not in boundary_rows for row in fragment.rows)
+            ),
+            key=lambda fragment: (fragment.paragraph_index, fragment.paragraph_id),
+        )
+    )
+
+
+def _compatible_fragment_pairs(
     fragments: Sequence[TableFragment],
     cross_version_fragments: Sequence[TableFragment],
     boundary_rows: set[SourceRowRef],
-    side: Literal["baseline", "target"],
-) -> list[ContinuationCandidate]:
-    candidates: list[ContinuationCandidate] = []
-    ordered = sorted(
-        (
-            fragment
-            for fragment in fragments
-            if any(row.source not in boundary_rows for row in fragment.rows)
-        ),
-        key=lambda fragment: (fragment.paragraph_index, fragment.paragraph_id),
-    )
+) -> tuple[tuple[TableFragment, TableFragment, ColumnMapping], ...]:
+    ordered = _ordered_retained_fragments(fragments, boundary_rows)
+    compatible: list[tuple[TableFragment, TableFragment, ColumnMapping]] = []
     for left, right in zip(ordered, ordered[1:]):
         mapping = infer_monotonic_column_mapping(left, right, cross_version_fragments)
-        if mapping is None:
+        if mapping is not None:
+            compatible.append((left, right, mapping))
+    return tuple(compatible)
+
+
+def _normalized_paragraph_content(paragraph: Paragraph) -> str:
+    text = paragraph.text or "\n".join(sentence.text for sentence in paragraph.sentences)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def _classify_repeated_boundary_paragraphs(
+    section: Section | None,
+    fragments: Sequence[TableFragment],
+    compatible_pairs: Sequence[tuple[TableFragment, TableFragment, ColumnMapping]],
+) -> set[str]:
+    """Confirm repeated short ordinary paragraphs at multiple table boundaries."""
+    if section is None or not compatible_pairs:
+        return set()
+    table_paragraph_ids = {fragment.paragraph_id for fragment in fragments}
+    boundary_positions: dict[int, set[tuple[int, int, int]]] = {}
+    for pair_index, (left, right, _) in enumerate(compatible_pairs):
+        if left.section_id != section.section_id or right.section_id != section.section_id:
             continue
+        for paragraph_index in range(left.paragraph_index + 1, right.paragraph_index):
+            if 0 <= paragraph_index < len(section.paragraphs):
+                boundary_positions.setdefault(paragraph_index, set()).add(
+                    (
+                        pair_index,
+                        paragraph_index - left.paragraph_index,
+                        right.paragraph_index - paragraph_index,
+                    )
+                )
+
+    occurrences: dict[str, list[int]] = {}
+    for paragraph_index, paragraph in enumerate(section.paragraphs):
+        if paragraph.paragraph_id in table_paragraph_ids:
+            continue
+        normalized = _normalized_paragraph_content(paragraph)
+        occurrences.setdefault(normalized, []).append(paragraph_index)
+
+    confirmed: set[str] = set()
+    for normalized, paragraph_indexes in occurrences.items():
+        placements = [
+            tuple(boundary_positions.get(paragraph_index, set()))
+            for paragraph_index in paragraph_indexes
+        ]
+        supporting_boundaries = {
+            placement[0]
+            for paragraph_placements in placements
+            for placement in paragraph_placements
+        }
+        position_signatures = {
+            placement[1:]
+            for paragraph_placements in placements
+            for placement in paragraph_placements
+        }
+        if (
+            normalized
+            and len(normalized) <= _MAX_BOUNDARY_PARAGRAPH_NORMALIZED_LENGTH
+            and len(paragraph_indexes) >= 2
+            and all(len(paragraph_placements) == 1 for paragraph_placements in placements)
+            and len(supporting_boundaries) >= 2
+            and len(position_signatures) == 1
+        ):
+            confirmed.update(
+                section.paragraphs[paragraph_index].paragraph_id
+                for paragraph_index in paragraph_indexes
+            )
+    return confirmed
+
+
+def _side_candidates(
+    section: Section | None,
+    fragments: Sequence[TableFragment],
+    cross_version_fragments: Sequence[TableFragment],
+    boundary_rows: set[SourceRowRef],
+    boundary_paragraph_ids: set[str],
+    side: Literal["baseline", "target"],
+) -> tuple[list[ContinuationCandidate], set[str]]:
+    candidates: list[ContinuationCandidate] = []
+    compatible_pairs = _compatible_fragment_pairs(
+        fragments,
+        cross_version_fragments,
+        boundary_rows,
+    )
+    ordinary_boundary_paragraphs = _classify_repeated_boundary_paragraphs(
+        section,
+        fragments,
+        compatible_pairs,
+    )
+    confirmed_boundary_paragraphs = (
+        set(boundary_paragraph_ids) | ordinary_boundary_paragraphs
+    )
+    for left, right, mapping in compatible_pairs:
+        intervening_paragraph_ids = (
+            [
+                section.paragraphs[index].paragraph_id
+                for index in range(left.paragraph_index + 1, right.paragraph_index)
+            ]
+            if section is not None
+            and 0 <= left.paragraph_index < right.paragraph_index < len(section.paragraphs)
+            else None
+        )
+        allow_confirmed_non_table_gap = bool(intervening_paragraph_ids) and all(
+            paragraph_id in confirmed_boundary_paragraphs
+            for paragraph_id in intervening_paragraph_ids
+        )
         candidates.extend(
             generate_continuation_candidates(
                 left,
@@ -129,10 +245,10 @@ def _side_candidates(
                 boundary_rows,
                 cross_version_fragments,
                 side,
-                allow_non_table_gap=True,
+                allow_non_table_gap=allow_confirmed_non_table_gap,
             )
         )
-    return candidates
+    return candidates, ordinary_boundary_paragraphs
 
 
 def _collect_pair_analysis(
@@ -148,26 +264,40 @@ def _collect_pair_analysis(
     target_fragments = _jointly_infer_fragments(target_initial, baseline_fragments)
     baseline_rows = classify_repeated_boundary_regions(baseline_fragments)
     target_rows = classify_repeated_boundary_regions(target_fragments)
+    baseline_table_paragraphs = _paragraph_boundaries(
+        baseline_fragments,
+        baseline_rows,
+    )
+    target_table_paragraphs = _paragraph_boundaries(
+        target_fragments,
+        target_rows,
+    )
+    baseline_candidates, baseline_ordinary_paragraphs = _side_candidates(
+        section_pair.baseline_section,
+        baseline_fragments,
+        target_fragments,
+        baseline_rows,
+        baseline_table_paragraphs,
+        "baseline",
+    )
+    target_candidates, target_ordinary_paragraphs = _side_candidates(
+        section_pair.target_section,
+        target_fragments,
+        baseline_fragments,
+        target_rows,
+        target_table_paragraphs,
+        "target",
+    )
     candidates = [
-        *_side_candidates(
-            baseline_fragments,
-            target_fragments,
-            baseline_rows,
-            "baseline",
-        ),
-        *_side_candidates(
-            target_fragments,
-            baseline_fragments,
-            target_rows,
-            "target",
-        ),
+        *baseline_candidates,
+        *target_candidates,
     ]
     return (
         candidates,
         {"baseline": baseline_rows, "target": target_rows},
         {
-            "baseline": _paragraph_boundaries(baseline_fragments, baseline_rows),
-            "target": _paragraph_boundaries(target_fragments, target_rows),
+            "baseline": baseline_table_paragraphs | baseline_ordinary_paragraphs,
+            "target": target_table_paragraphs | target_ordinary_paragraphs,
         },
     )
 

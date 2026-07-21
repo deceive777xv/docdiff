@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from app.core.diff import semantic_matcher
 from app.core.diff import table_reconstruction as reconstruction
 from app.core.diff.reconstruction_trace import ReconstructionOperation, SourceRowRef
 from app.core.diff.table_reconstruction import (
@@ -427,6 +428,9 @@ def make_candidate(
         continuation_row=continuation,
         next_full_row=None,
         mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        previous_mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        previous_fragment_rows=(previous,),
+        continuation_fragment_rows=(continuation,),
         evidence=evidence,
         conflicts=(),
         vetoes=vetoes,
@@ -512,6 +516,110 @@ def test_candidate_is_limited_to_adjacent_fragment_boundary(left_values, right_v
     assert [candidate.continuation_row.source for candidate in candidates] == [right.rows[0].source]
     assert candidates[0].next_full_row is not None
     assert candidates[0].next_full_row.source == right.rows[1].source
+
+
+def test_candidate_carries_exact_mappings_and_retained_rows_for_both_fragments():
+    left, right, mapping = make_candidate_fragments(
+        left_columns=(1, 4, 5),
+        right_columns=(0, 3, 7),
+        left_width=6,
+        right_width=8,
+    )
+
+    candidate = generate_continuation_candidates(
+        left,
+        right,
+        mapping,
+        set(),
+        (),
+        "baseline",
+    )[0]
+
+    assert getattr(candidate, "previous_mapping", None) == ColumnMapping(
+        (1, 4, 5),
+        {1: 0, 4: 1, 5: 2},
+        1.0,
+    )
+    assert getattr(candidate, "previous_fragment_rows", None) == left.rows
+    assert getattr(candidate, "continuation_fragment_rows", None) == right.rows
+
+
+def test_candidate_projection_rows_exclude_boundary_noise_headers_and_separators():
+    left_rows = (
+        make_row(("item", "group", "detail"), 0, "projection-left"),
+        make_row(("---", "---", "---"), 1, "projection-left"),
+        make_row(("100", "start", "complete"), 2, "projection-left"),
+        make_row(("101", "lead", "prefix"), 3, "projection-left"),
+    )
+    right_rows = (
+        make_row(("item", "group", "detail"), 0, "projection-right"),
+        make_row(("---", "---", "---"), 1, "projection-right"),
+        make_row(("", "", "suffix"), 2, "projection-right"),
+        make_row(("102", "next", "complete"), 3, "projection-right"),
+        make_row(("repeated", "boundary", "noise"), 4, "projection-right"),
+    )
+    left = TableFragment(
+        "section-1",
+        "projection-left",
+        0,
+        left_rows,
+        (
+            TableRegion(left_rows[:1], 0, 1, "header"),
+            TableRegion(left_rows[1:2], 1, 2, "boundary"),
+            TableRegion(left_rows[2:], 2, 4, "body"),
+        ),
+        (2,),
+        (0, 1, 2),
+    )
+    right = TableFragment(
+        "section-1",
+        "projection-right",
+        1,
+        right_rows,
+        (
+            TableRegion(right_rows[:1], 0, 1, "header"),
+            TableRegion(right_rows[1:2], 1, 2, "boundary"),
+            TableRegion(right_rows[2:], 2, 5, "body"),
+        ),
+        (2,),
+        (0, 1, 2),
+    )
+    boundary_rows = {right_rows[-1].source}
+
+    candidate = generate_continuation_candidates(
+        left,
+        right,
+        ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        boundary_rows,
+        (),
+        "baseline",
+    )[0]
+    operations = reconstruction.build_reconstruction_operations(
+        [CandidateAssessment(candidate, "high", "merge")],
+        {"baseline": boundary_rows, "target": set()},
+        {"baseline": set(), "target": set()},
+    )
+
+    projected_sources = {
+        operation.source_rows[0]
+        for operation in operations
+        if operation.type == "project_columns"
+    }
+    assert projected_sources == {
+        left_rows[2].source,
+        left_rows[3].source,
+        right_rows[2].source,
+        right_rows[3].source,
+    }
+    assert not projected_sources.intersection(
+        {
+            left_rows[0].source,
+            left_rows[1].source,
+            right_rows[0].source,
+            right_rows[1].source,
+            right_rows[4].source,
+        }
+    )
 
 
 def test_candidate_boundary_rows_are_excluded_before_selecting_adjacent_rows():
@@ -1160,6 +1268,7 @@ def _accepted_fixture_assessment(
     side: str,
     previous,
     continuation,
+    previous_mapping: ColumnMapping,
     mapping: ColumnMapping,
     candidate_id: str,
 ) -> CandidateAssessment:
@@ -1170,6 +1279,9 @@ def _accepted_fixture_assessment(
         continuation_row=continuation,
         next_full_row=None,
         mapping=mapping,
+        previous_mapping=previous_mapping,
+        previous_fragment_rows=(previous,),
+        continuation_fragment_rows=(continuation,),
         evidence=EVIDENCE_CODES[:4],
         conflicts=(),
         vetoes=(),
@@ -1189,6 +1301,7 @@ def make_fixture_assessments(
             "baseline",
             _fixture_row(baseline, "baseline-fragment-a", 1),
             _fixture_row(baseline, "baseline-fragment-b", 0),
+            ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
             ColumnMapping((1, 3, 5), {1: 0, 3: 1, 5: 2}, 1.0),
             "fixture-baseline-numbered",
         ),
@@ -1196,6 +1309,7 @@ def make_fixture_assessments(
             "baseline",
             _fixture_row(baseline, "baseline-unnumbered-a", 0),
             _fixture_row(baseline, "baseline-unnumbered-b", 0),
+            ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
             ColumnMapping((1, 3, 5), {1: 0, 3: 1, 5: 2}, 1.0),
             "fixture-baseline-unnumbered",
         ),
@@ -1203,6 +1317,7 @@ def make_fixture_assessments(
             "target",
             _fixture_row(target, "target-fragment-a", 0),
             _fixture_row(target, "target-fragment-b", 0),
+            ColumnMapping((1, 3, 5), {1: 0, 3: 1, 5: 2}, 1.0),
             ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
             "fixture-target-numbered",
         ),
@@ -1273,9 +1388,10 @@ def test_sanitized_fixture_assessment_build_and_replay_preserve_control_rows():
 def test_builder_projects_sparse_previous_row_before_replay_without_manual_operation():
     baseline, target = load_sanitized_fixture()
     target_assessment = make_fixture_assessments(baseline, target)[2]
+    boundary_rows, boundary_paragraphs = make_fixture_boundaries(baseline, target)
 
     operations = reconstruction.build_reconstruction_operations(
-        [target_assessment], {"baseline": set(), "target": set()}, {"baseline": set(), "target": set()}
+        [target_assessment], boundary_rows, boundary_paragraphs
     )
     projection_by_source = {
         operation.source_rows[0]: operation.column_mapping
@@ -1290,6 +1406,229 @@ def test_builder_projects_sparse_previous_row_before_replay_without_manual_opera
         baseline, target, operations
     )[1]
     assert "| 14 | violet<br>limit. | within |" in normalized_target.plain_text
+
+
+def test_assessment_builder_and_replay_project_every_retained_body_row_exactly():
+    left, right, mapping = make_candidate_fragments(
+        left_columns=(1, 4, 5),
+        right_columns=(0, 3, 7),
+        left_width=6,
+        right_width=8,
+    )
+    candidate = generate_continuation_candidates(
+        left,
+        right,
+        mapping,
+        set(),
+        (),
+        "baseline",
+    )[0]
+    assessment = assess_candidate(candidate)
+    assert assessment.final_action == "merge"
+    paragraphs = [
+        Paragraph(
+            fragment.paragraph_id,
+            "\n".join(row.raw_text for row in fragment.rows),
+            [Sentence(row.raw_text) for row in fragment.rows],
+        )
+        for fragment in (left, right)
+    ]
+    baseline = DocumentIR(
+        "projection-document",
+        "Projection",
+        "projection-hash",
+        [Section("section-1", "Projection", 1, paragraphs)],
+        "\n".join(paragraph.text for paragraph in paragraphs),
+    )
+    target = DocumentIR("empty-target", "Empty", "empty-hash")
+    baseline_before = deepcopy(baseline)
+    target_before = deepcopy(target)
+
+    operations = reconstruction.build_reconstruction_operations(
+        [assessment],
+        {"baseline": set(), "target": set()},
+        {"baseline": set(), "target": set()},
+    )
+    projections = {
+        operation.source_rows[0]: operation.column_mapping
+        for operation in operations
+        if operation.type == "project_columns"
+    }
+    assert projections == {
+        **{row.source: {1: 0, 4: 1, 5: 2} for row in left.rows},
+        **{row.source: {0: 0, 3: 1, 7: 2} for row in right.rows},
+    }
+
+    normalized, normalized_target = reconstruction.apply_reconstruction_operations(
+        baseline,
+        target,
+        operations,
+    )
+    assert baseline == baseline_before
+    assert target == target_before
+    units = semantic_matcher._expand_paragraphs(normalized.sections[0].paragraphs)
+    table_values = [unit.table_values for unit in units if unit.table_values is not None]
+    assert table_values == [
+        ["100", "start", "complete"],
+        ["101", "lead", "prefixsuffix"],
+        ["102", "next", "complete"],
+        ["", "inner", "sparse"],
+    ]
+    assert "prefix<br>suffix" in normalized.plain_text
+    assert {len(values) for values in table_values} == {3}
+    assert reconstruction.apply_reconstruction_operations(
+        baseline,
+        target,
+        operations,
+    ) == (normalized, normalized_target)
+    assert reconstruction.apply_reconstruction_operations(
+        normalized,
+        normalized_target,
+        operations,
+    ) == (normalized, normalized_target)
+
+
+def test_operation_builder_rejects_conflicting_retained_row_projections():
+    left, right, mapping = make_candidate_fragments()
+    candidate = generate_continuation_candidates(
+        left,
+        right,
+        mapping,
+        set(),
+        (),
+        "baseline",
+    )[0]
+    first = CandidateAssessment(candidate, "high", "merge")
+    conflicting = CandidateAssessment(
+        replace(
+            candidate,
+            candidate_id="conflicting-projection",
+            mapping=ColumnMapping((0, 1, 2), {0: 1, 1: 0, 2: 2}, 1.0),
+        ),
+        "high",
+        "merge",
+    )
+
+    with pytest.raises(ValueError, match="conflicting projections"):
+        reconstruction.build_reconstruction_operations(
+            [first, conflicting],
+            {"baseline": set(), "target": set()},
+            {"baseline": set(), "target": set()},
+        )
+
+
+def test_operation_builder_rejects_fragment_projections_with_different_logical_widths():
+    left, right, mapping = make_candidate_fragments()
+    candidate = generate_continuation_candidates(
+        left,
+        right,
+        mapping,
+        set(),
+        (),
+        "baseline",
+    )[0]
+    incomplete = CandidateAssessment(
+        replace(
+            candidate,
+            mapping=ColumnMapping((0, 1), {0: 0, 1: 1}, 1.0),
+        ),
+        "high",
+        "merge",
+    )
+
+    with pytest.raises(ValueError, match="different logical widths"):
+        reconstruction.build_reconstruction_operations(
+            [incomplete],
+            {"baseline": set(), "target": set()},
+            {"baseline": set(), "target": set()},
+        )
+
+
+def test_operation_builder_rejects_partial_mapping_that_would_drop_retained_cells():
+    left, right, _ = make_candidate_fragments(
+        right_values=(
+            ("", "", "suffix", ""),
+            ("102", "next", "complete", "retained-extra"),
+        ),
+        right_columns=(0, 2, 4, 6),
+        right_width=7,
+    )
+    candidate = ContinuationCandidate(
+        candidate_id="partial-retained-projection",
+        side="baseline",
+        previous_row=left.rows[-1],
+        continuation_row=right.rows[0],
+        next_full_row=right.rows[1],
+        mapping=ColumnMapping((0, 2, 4), {0: 0, 2: 1, 4: 2}, 1.0),
+        previous_mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        previous_fragment_rows=left.rows,
+        continuation_fragment_rows=right.rows,
+        evidence=EVIDENCE_CODES[:4],
+        conflicts=(),
+        vetoes=(),
+        cross_version_rows=(),
+    )
+
+    with pytest.raises(ValueError, match="unmapped retained cells"):
+        reconstruction.build_reconstruction_operations(
+            [CandidateAssessment(candidate, "high", "merge")],
+            {"baseline": set(), "target": set()},
+            {"baseline": set(), "target": set()},
+        )
+
+
+def test_operation_builder_projects_fully_populated_row_from_shifted_physical_slot():
+    left_rows = (
+        make_row(("100", "start", "stable", "complete"), 0, "shift-left"),
+        make_row(("101", "lead", "stable", "prefix"), 1, "shift-left"),
+    )
+    right_rows = (
+        make_row(("", "", "", "", "", "suffix"), 0, "shift-right"),
+        make_row(("", "102", "next", "", "shifted", "complete"), 1, "shift-right"),
+    )
+    previous_mapping = ColumnMapping(
+        (0, 1, 2, 3),
+        {0: 0, 1: 1, 2: 2, 3: 3},
+        1.0,
+    )
+    continuation_mapping = ColumnMapping(
+        (1, 2, 3, 5),
+        {1: 0, 2: 1, 3: 2, 5: 3},
+        1.0,
+    )
+    candidate = ContinuationCandidate(
+        candidate_id="shifted-full-row-projection",
+        side="baseline",
+        previous_row=left_rows[-1],
+        continuation_row=right_rows[0],
+        next_full_row=right_rows[1],
+        mapping=continuation_mapping,
+        previous_mapping=previous_mapping,
+        previous_fragment_rows=left_rows,
+        continuation_fragment_rows=right_rows,
+        evidence=EVIDENCE_CODES[:4],
+        conflicts=(),
+        vetoes=(),
+        cross_version_rows=(),
+    )
+
+    operations = reconstruction.build_reconstruction_operations(
+        [CandidateAssessment(candidate, "high", "merge")],
+        {"baseline": set(), "target": set()},
+        {"baseline": set(), "target": set()},
+    )
+    projection_by_source = {
+        operation.source_rows[0]: operation.column_mapping
+        for operation in operations
+        if operation.type == "project_columns"
+    }
+
+    assert projection_by_source[right_rows[1].source] == {
+        1: 0,
+        2: 1,
+        4: 2,
+        5: 3,
+    }
 
 
 def test_replay_projects_drops_merges_and_consolidates_without_mutating_sources():
@@ -1338,6 +1677,46 @@ def test_replay_rejects_a_missing_source_without_exact_prior_provenance():
         reconstruction.apply_reconstruction_operations(baseline_ir, target_ir, [missing])
 
 
+def test_replay_rejects_conflicting_projection_operations_for_the_same_source_row():
+    paragraph = Paragraph(
+        "projection-source",
+        "| | alpha | | beta |",
+        [Sentence("| | alpha | | beta |")],
+    )
+    baseline = DocumentIR(
+        "projection-conflict-document",
+        "Projection conflict",
+        "projection-conflict-hash",
+        [Section("section-1", "Projection conflict", 1, [paragraph])],
+    )
+    baseline_before = deepcopy(baseline)
+    source = _source("section-1", "projection-source", 0)
+    operations = [
+        ReconstructionOperation(
+            "projection-conflict-a",
+            "baseline",
+            "project_columns",
+            [source],
+            column_mapping={1: 0, 3: 1},
+        ),
+        ReconstructionOperation(
+            "projection-conflict-b",
+            "baseline",
+            "project_columns",
+            [source],
+            column_mapping={1: 1, 3: 0},
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="conflicting projections"):
+        reconstruction.apply_reconstruction_operations(
+            baseline,
+            DocumentIR("empty-target", "Empty", "empty-hash"),
+            operations,
+        )
+    assert baseline == baseline_before
+
+
 def _make_chain_document() -> DocumentIR:
     paragraphs = [
         Paragraph("chain-a", "| 1 | neutral | part-a |", [Sentence("| 1 | neutral | part-a |")]),
@@ -1359,8 +1738,12 @@ def _make_chain_operations(document: DocumentIR) -> list[ReconstructionOperation
     row_b = _fixture_row(document, "chain-b", 0)
     row_c = _fixture_row(document, "chain-c", 0)
     assessments = [
-        _accepted_fixture_assessment("baseline", row_a, row_b, mapping, "chain-ab"),
-        _accepted_fixture_assessment("baseline", row_b, row_c, mapping, "chain-bc"),
+        _accepted_fixture_assessment(
+            "baseline", row_a, row_b, mapping, mapping, "chain-ab"
+        ),
+        _accepted_fixture_assessment(
+            "baseline", row_b, row_c, mapping, mapping, "chain-bc"
+        ),
     ]
     return reconstruction.build_reconstruction_operations(
         assessments,
@@ -1432,6 +1815,39 @@ def test_replay_merge_rows_rejects_conflicting_logical_key_cells():
         )
 
 
+def test_replay_rejects_fragment_merge_across_a_retained_paragraph():
+    paragraphs = [
+        Paragraph("left-table", "| 1 | alpha |", [Sentence("| 1 | alpha |")]),
+        Paragraph(
+            "retained-prose",
+            "This explanatory paragraph must remain in place.",
+            [Sentence("This explanatory paragraph must remain in place.")],
+        ),
+        Paragraph("right-table", "| 2 | beta |", [Sentence("| 2 | beta |")]),
+    ]
+    baseline = DocumentIR(
+        "noncontiguous-document",
+        "Noncontiguous",
+        "noncontiguous-hash",
+        [Section("section-1", "Noncontiguous", 1, paragraphs)],
+    )
+    baseline_before = deepcopy(baseline)
+    operation = ReconstructionOperation(
+        "noncontiguous-fragment-merge",
+        "baseline",
+        "merge_fragments",
+        source_paragraph_ids=["left-table", "right-table"],
+    )
+
+    with pytest.raises(ValueError, match="retained paragraphs"):
+        reconstruction.apply_reconstruction_operations(
+            baseline,
+            DocumentIR("empty-target", "Empty", "empty-hash"),
+            [operation],
+        )
+    assert baseline == baseline_before
+
+
 def test_operation_builder_is_stable_and_uses_transformation_precedence():
     assert hasattr(reconstruction, "build_reconstruction_operations"), "operation builder is not implemented"
     left, right, mapping = make_candidate_fragments()
@@ -1458,11 +1874,13 @@ def test_operation_builder_is_stable_and_uses_transformation_precedence():
     assert [operation.type for operation in first] == [
         "project_columns",
         "project_columns",
+        "project_columns",
+        "project_columns",
         "drop_boundary_rows",
         "drop_boundary_paragraphs",
         "merge_rows",
         "merge_fragments",
     ]
     assert all(operation.operation_id for operation in first)
-    assert first[4].generated_row_id
-    assert first[5].generated_paragraph_id
+    assert first[6].generated_row_id
+    assert first[7].generated_paragraph_id
