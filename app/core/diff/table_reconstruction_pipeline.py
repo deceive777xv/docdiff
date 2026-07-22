@@ -39,6 +39,7 @@ from app.core.types import DocumentIR, Paragraph, Section
 
 _LLM_MERGE_THRESHOLD = 0.75
 _MAX_BOUNDARY_PARAGRAPH_NORMALIZED_LENGTH = 160
+_UNSAFE_FRAGMENT_PROJECTION = "unsafe_fragment_projection"
 
 
 @dataclass(frozen=True)
@@ -324,6 +325,47 @@ def _resolve_assessment(
     return replace(assessment, final_action=final_action), judgment
 
 
+def _validate_resolved_assessments(
+    assessments: Sequence[CandidateAssessment],
+    boundary_rows: Mapping[str, set[SourceRowRef]],
+    boundary_paragraphs: Mapping[str, set[str]],
+) -> list[CandidateAssessment]:
+    validated: list[CandidateAssessment] = []
+    build_reconstruction_operations([], boundary_rows, boundary_paragraphs)
+    for assessment in assessments:
+        if assessment.final_action != "merge":
+            validated.append(assessment)
+            continue
+        try:
+            build_reconstruction_operations(
+                [*validated, assessment],
+                boundary_rows,
+                boundary_paragraphs,
+            )
+        except ValueError:
+            candidate = replace(
+                assessment.candidate,
+                conflicts=tuple(
+                    dict.fromkeys(
+                        (
+                            *assessment.candidate.conflicts,
+                            _UNSAFE_FRAGMENT_PROJECTION,
+                        )
+                    )
+                ),
+            )
+            validated.append(
+                replace(
+                    assessment,
+                    candidate=candidate,
+                    final_action="keep_separate",
+                )
+            )
+        else:
+            validated.append(assessment)
+    return validated
+
+
 def _merge_sets(
     destination: dict[str, set],
     source: Mapping[str, set],
@@ -402,6 +444,11 @@ def reconstruct_table_pairs(
         resolved.append(assessment)
         judgments[key] = judgment
 
+    resolved = _validate_resolved_assessments(
+        resolved,
+        boundary_rows,
+        boundary_paragraphs,
+    )
     operations = build_reconstruction_operations(
         resolved,
         boundary_rows,

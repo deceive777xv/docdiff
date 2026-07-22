@@ -17,6 +17,7 @@ from app.core.diff.table_reconstruction import (
     ContinuationCandidate,
     TableFragment,
     TableRegion,
+    build_reconstruction_operations,
     split_markdown_table_row,
 )
 from app.core.diff import table_reconstruction_pipeline as pipeline
@@ -183,6 +184,58 @@ def test_pipeline_calls_llm_once_per_medium_candidate_only(monkeypatch):
     assert decisions["vetoed"].llm is None
     assert decisions["medium-1"].llm is not None
     assert decisions["medium-2"].llm is not None
+
+
+def test_pipeline_downgrades_only_unsafe_llm_merge_after_projection_preflight(
+    monkeypatch,
+):
+    safe = _candidate("safe-high", "high")
+    unsafe = _candidate("unsafe-medium", "medium")
+    unsafe_extra_row = _row(
+        ("102", "next", "complete", "retained-extra"),
+        1,
+        "unsafe-medium-right",
+    )
+    unsafe = replace(
+        unsafe,
+        continuation_fragment_rows=(
+            *unsafe.continuation_fragment_rows,
+            unsafe_extra_row,
+        ),
+    )
+    _stub_candidates(monkeypatch, [safe, unsafe])
+    monkeypatch.setattr(
+        pipeline,
+        "build_reconstruction_operations",
+        build_reconstruction_operations,
+    )
+    baseline, target, pairs = _documents()
+    provider = QueueProvider([_response("unsafe-medium")])
+
+    result = pipeline.reconstruct_table_pairs(
+        pairs,
+        baseline,
+        target,
+        provider,
+    )
+
+    decisions = {
+        decision.candidate_id: decision for decision in result.trace.decisions
+    }
+    assert decisions["safe-high"].final_action == "merge"
+    assert decisions["unsafe-medium"].final_action == "keep_separate"
+    assert decisions["unsafe-medium"].llm is not None
+    assert decisions["unsafe-medium"].llm.decision == "merge"
+    assert (
+        "unsafe_fragment_projection"
+        in decisions["unsafe-medium"].rule_conflicts
+    )
+    assert {
+        operation.decision_id
+        for operation in result.trace.operations
+        if operation.type == "merge_rows"
+    } == {"safe-high"}
+    assert len(provider.chat_calls) == 1
 
 
 def test_pipeline_provider_failure_is_nonfatal_and_continues(monkeypatch):
