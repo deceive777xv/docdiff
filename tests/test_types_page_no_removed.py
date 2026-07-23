@@ -3,10 +3,11 @@ from __future__ import annotations
 import dataclasses
 
 
-def test_paragraph_no_page_no():
+def test_paragraph_page_no_is_optional():
     from app.core.types import Paragraph
     fields = {f.name for f in dataclasses.fields(Paragraph)}
-    assert "page_no" not in fields
+    assert "page_no" in fields
+    assert Paragraph("p", "text").page_no is None
 
 
 def test_diff_item_no_page_fields():

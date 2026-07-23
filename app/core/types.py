@@ -16,6 +16,7 @@ class Paragraph:
     paragraph_id: str
     text: str
     sentences: list[Sentence] = field(default_factory=list)
+    page_no: int | None = None
 
 
 @dataclass

@@ -46,6 +46,20 @@ class QueueProvider(BaseProvider):
         return True
 
 
+class EchoMergeProvider(BaseProvider):
+    chat_model = "echo-merge"
+
+    def chat(self, messages: list[dict], **kwargs) -> str:
+        payload = json.loads(messages[-1]["content"])
+        return _response(payload["boundary_id"])
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise AssertionError("retrieval is outside reconstruction")
+
+    def health_check(self) -> bool:
+        return True
+
+
 def _row(cells: tuple[str, ...], index: int, paragraph_id: str, section_id: str = "section-1"):
     row = split_markdown_table_row(
         "|" + "|".join(cells) + "|",
@@ -146,17 +160,23 @@ def _stub_candidates(monkeypatch, candidates: list[ContinuationCandidate]):
 
 
 def _response(candidate_id: str, decision: str = "merge", confidence: float = 0.9) -> str:
+    merge = decision == "merge"
     return json.dumps(
         {
-            "candidate_id": candidate_id,
-            "decision": decision,
+            "boundary_id": candidate_id,
+            "roles": {
+                "previous_row": "body_row",
+                "continuation_row": "continuation_row",
+            },
+            "row_action": "merge" if merge else "keep",
+            "table_action": "merge_fragments" if merge else "keep",
             "confidence": confidence,
             "reason": "bounded structural evidence",
         }
     )
 
 
-def test_pipeline_calls_llm_once_per_medium_candidate_only(monkeypatch):
+def test_pipeline_calls_llm_once_per_nontrivial_candidate(monkeypatch):
     candidates = [
         _candidate("high", "high"),
         _candidate("medium-1", "medium"),
@@ -166,11 +186,13 @@ def test_pipeline_calls_llm_once_per_medium_candidate_only(monkeypatch):
     ]
     _stub_candidates(monkeypatch, candidates)
     baseline, target, pairs = _documents()
-    provider = QueueProvider([_response("medium-1"), _response("medium-2")])
+    provider = QueueProvider(
+        [_response("high"), _response("medium-1"), _response("medium-2")]
+    )
 
     result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
 
-    assert len(provider.chat_calls) == 2
+    assert len(provider.chat_calls) == 3
     assert [(decision.candidate_id, decision.final_action) for decision in result.trace.decisions] == [
         ("high", "merge"),
         ("low", "keep_separate"),
@@ -179,11 +201,35 @@ def test_pipeline_calls_llm_once_per_medium_candidate_only(monkeypatch):
         ("vetoed", "keep_separate"),
     ]
     decisions = {decision.candidate_id: decision for decision in result.trace.decisions}
-    assert decisions["high"].llm is None
+    assert decisions["high"].llm is not None
     assert decisions["low"].llm is None
     assert decisions["vetoed"].llm is None
     assert decisions["medium-1"].llm is not None
     assert decisions["medium-2"].llm is not None
+
+
+def test_pipeline_rejects_known_non_adjacent_page_boundary_before_llm(monkeypatch):
+    previous = _row(("12", "drive", "prefix"), 0, "left", "baseline-section")
+    continuation = _row(("", "", "suffix"), 0, "right", "baseline-section")
+    candidate = replace(
+        _candidate("non-adjacent", "high"),
+        previous_row=previous,
+        continuation_row=continuation,
+        previous_fragment_rows=(previous,),
+        continuation_fragment_rows=(continuation,),
+    )
+    _stub_candidates(monkeypatch, [candidate])
+    baseline, target, pairs = _documents()
+    baseline.sections[0].paragraphs = [
+        Paragraph("left", previous.raw_text, [Sentence(previous.raw_text)], page_no=1),
+        Paragraph("right", continuation.raw_text, [Sentence(continuation.raw_text)], page_no=3),
+    ]
+    provider = QueueProvider([])
+
+    result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
+
+    assert provider.chat_calls == []
+    assert result.trace.decisions[0].final_action == "keep_separate"
 
 
 def test_pipeline_downgrades_only_unsafe_llm_merge_after_projection_preflight(
@@ -210,7 +256,7 @@ def test_pipeline_downgrades_only_unsafe_llm_merge_after_projection_preflight(
         build_reconstruction_operations,
     )
     baseline, target, pairs = _documents()
-    provider = QueueProvider([_response("unsafe-medium")])
+    provider = QueueProvider([_response("safe-high"), _response("unsafe-medium")])
 
     result = pipeline.reconstruct_table_pairs(
         pairs,
@@ -235,7 +281,7 @@ def test_pipeline_downgrades_only_unsafe_llm_merge_after_projection_preflight(
         for operation in result.trace.operations
         if operation.type == "merge_rows"
     } == {"safe-high"}
-    assert len(provider.chat_calls) == 1
+    assert len(provider.chat_calls) == 2
 
 
 def test_pipeline_provider_failure_is_nonfatal_and_continues(monkeypatch):
@@ -442,7 +488,7 @@ def _run_single_side_section(section: Section):
     )
     target = DocumentIR("target-neutral", "Target neutral", "target-neutral-hash", [])
     return baseline, pipeline.reconstruct_table_pairs(
-        [SectionPair(section, None, 0.0)], baseline, target, None
+        [SectionPair(section, None, 0.0)], baseline, target, EchoMergeProvider()
     )
 
 

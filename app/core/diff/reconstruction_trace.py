@@ -12,8 +12,9 @@ from typing import Literal, cast
 from app.core.types import DiffItem, DocumentIR
 
 
-SCHEMA_VERSION = 1
-ALGORITHM_VERSION = "cross-page-table-v1"
+SCHEMA_VERSION = 2
+ALGORITHM_VERSION = "cross-page-table-v2"
+_LEGACY_ALGORITHM_VERSION = "cross-page-table-v1"
 
 _SIDES = {"baseline", "target"}
 _DECISION_ACTIONS = {"merge", "keep_separate"}
@@ -46,6 +47,9 @@ class LLMJudgment:
     decision: Literal["merge", "keep_separate"]
     confidence: float
     reason: str
+    roles: dict[str, str] = field(default_factory=dict)
+    row_action: Literal["merge", "keep"] = "keep"
+    table_action: Literal["merge_fragments", "keep"] = "keep"
 
 
 @dataclass(frozen=True)
@@ -59,6 +63,10 @@ class ReconstructionDecision:
     rule_conflicts: list[str]
     llm: LLMJudgment | None
     final_action: Literal["merge", "keep_separate"]
+    boundary_id: str = ""
+    previous_page_no: int | None = None
+    next_page_no: int | None = None
+    context_refs: list[str] = field(default_factory=list)
     generated_row_id: str = ""
 
 
@@ -170,12 +178,42 @@ def _parse_llm(value: object, label: str) -> LLMJudgment | None:
     confidence = data.get("confidence")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0.0 <= confidence <= 1.0:
         raise ValueError(f"{label}.confidence must be between 0 and 1")
+    decision = cast(Literal["merge", "keep_separate"], _require_enum(data.get("decision"), f"{label}.decision", _DECISION_ACTIONS))
+    raw_roles = data.get("roles", {})
+    if not isinstance(raw_roles, dict) or any(
+        not isinstance(key, str) or not isinstance(role, str)
+        for key, role in raw_roles.items()
+    ):
+        raise ValueError(f"{label}.roles must map strings to strings")
+    default_row_action = "merge" if decision == "merge" else "keep"
+    default_table_action = "merge_fragments" if decision == "merge" else "keep"
+    row_action = _require_enum(
+        data.get("row_action", default_row_action),
+        f"{label}.row_action",
+        {"merge", "keep"},
+    )
+    table_action = _require_enum(
+        data.get("table_action", default_table_action),
+        f"{label}.table_action",
+        {"merge_fragments", "keep"},
+    )
     return LLMJudgment(
         model=_require_string(data.get("model"), f"{label}.model"),
-        decision=cast(Literal["merge", "keep_separate"], _require_enum(data.get("decision"), f"{label}.decision", _DECISION_ACTIONS)),
+        decision=decision,
         confidence=float(confidence),
         reason=_require_string(data.get("reason"), f"{label}.reason"),
+        roles=cast(dict[str, str], dict(raw_roles)),
+        row_action=cast(Literal["merge", "keep"], row_action),
+        table_action=cast(Literal["merge_fragments", "keep"], table_action),
     )
+
+
+def _parse_optional_page_no(value: object, label: str) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{label} must be a positive integer or null")
+    return value
 
 
 def _parse_decision(value: object, label: str) -> ReconstructionDecision:
@@ -190,6 +228,23 @@ def _parse_decision(value: object, label: str) -> ReconstructionDecision:
         rule_conflicts=_parse_string_list(data.get("rule_conflicts"), f"{label}.rule_conflicts"),
         llm=_parse_llm(data.get("llm"), f"{label}.llm"),
         final_action=cast(Literal["merge", "keep_separate"], _require_enum(data.get("final_action"), f"{label}.final_action", _DECISION_ACTIONS)),
+        boundary_id=_require_string(
+            data.get("boundary_id", ""),
+            f"{label}.boundary_id",
+            allow_empty=True,
+        ),
+        previous_page_no=_parse_optional_page_no(
+            data.get("previous_page_no"),
+            f"{label}.previous_page_no",
+        ),
+        next_page_no=_parse_optional_page_no(
+            data.get("next_page_no"),
+            f"{label}.next_page_no",
+        ),
+        context_refs=_parse_string_list(
+            data.get("context_refs", []),
+            f"{label}.context_refs",
+        ),
         generated_row_id=_require_string(data.get("generated_row_id", ""), f"{label}.generated_row_id", allow_empty=True),
     )
 
@@ -214,16 +269,23 @@ def trace_from_dict(data: dict[str, object]) -> ReconstructionTrace:
     if not isinstance(data, dict):
         raise ValueError("Reconstruction trace must be an object")
     schema_version = data.get("schema_version")
-    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version != SCHEMA_VERSION:
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version not in {1, SCHEMA_VERSION}
+    ):
         raise ValueError("Unsupported reconstruction schema version")
-    if data.get("algorithm_version") != ALGORITHM_VERSION:
+    expected_algorithm = (
+        _LEGACY_ALGORITHM_VERSION if schema_version == 1 else ALGORITHM_VERSION
+    )
+    if data.get("algorithm_version") != expected_algorithm:
         raise ValueError("Unsupported reconstruction algorithm version")
 
     baseline = _require_object(data.get("baseline"), "baseline")
     target = _require_object(data.get("target"), "target")
     return ReconstructionTrace(
-        schema_version=SCHEMA_VERSION,
-        algorithm_version=ALGORITHM_VERSION,
+        schema_version=schema_version,
+        algorithm_version=expected_algorithm,
         baseline=DocumentTraceRef(
             _require_string(baseline.get("doc_id"), "baseline.doc_id"),
             _require_string(baseline.get("file_hash"), "baseline.file_hash"),

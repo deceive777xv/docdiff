@@ -663,3 +663,76 @@ def test_single_new_header_like_table_row_is_reported_as_added():
         if pair.baseline_para is None and pair.target_para is not None
     ]
     assert "| 2 | Beta |" in added
+
+
+def test_repeated_short_paragraph_uses_neighbor_context():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    first_heading = make_para("A）工作条件")
+    surviving_heading = make_para("A）工作条件")
+    baseline = make_section(
+        "要求",
+        [
+            first_heading,
+            make_para("仅旧版本保留的甲项说明"),
+            surviving_heading,
+            make_para("稳定保留的乙项说明"),
+        ],
+    )
+    target_heading = make_para("A）工作条件")
+    target = make_section(
+        "要求",
+        [target_heading, make_para("稳定保留的乙项说明")],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    heading_match = next(
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None
+        and pair.target_para is target_heading
+    )
+    assert heading_match.baseline_para is surviving_heading
+
+
+def test_ordinary_paragraph_matches_are_monotonic():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    baseline_paras = [
+        make_para("Alpha unique ordinary paragraph"),
+        make_para("Beta unique ordinary paragraph"),
+    ]
+    target_paras = [
+        make_para("Beta unique ordinary paragraph"),
+        make_para("Alpha unique ordinary paragraph"),
+    ]
+    pairs = match_paragraphs(
+        [
+            SectionPair(
+                make_section("正文", baseline_paras),
+                make_section("正文", target_paras),
+                1.0,
+            )
+        ],
+        MockEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    baseline_index = {id(para): index for index, para in enumerate(baseline_paras)}
+    target_index = {id(para): index for index, para in enumerate(target_paras)}
+    matched_indices = [
+        (baseline_index[id(pair.baseline_para)], target_index[id(pair.target_para)])
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    ]
+
+    assert matched_indices == sorted(matched_indices)
+    assert all(
+        left[1] < right[1]
+        for left, right in zip(matched_indices, matched_indices[1:])
+    )

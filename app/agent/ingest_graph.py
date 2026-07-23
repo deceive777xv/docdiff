@@ -4,12 +4,12 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from dataclasses import asdict
 from pathlib import Path
 
 from langgraph.graph import END, StateGraph
 
 from app.agent.states import IngestState
+from app.core.document_ir_codec import document_ir_to_dict
 from app.core.parser.ir_builder import build_chunks
 from app.core.parser.router import parse_document
 from app.core.utils import file_hash as compute_file_hash
@@ -84,7 +84,8 @@ def save_document(state: IngestState) -> dict:
         parsed_dir.mkdir(parents=True, exist_ok=True)
         ir_path = parsed_dir / f"{ir.doc_id}.json"
         ir_path.write_text(
-            json.dumps(asdict(ir), ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps(document_ir_to_dict(ir), ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
 
         document_id = state.get("document_id")

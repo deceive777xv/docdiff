@@ -1,7 +1,6 @@
 """LangGraph StateGraph for the document comparison workflow."""
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -13,7 +12,8 @@ from app.core.diff.reconstruction_trace import persist_compare_artifacts
 from app.core.diff.semantic_matcher import match_paragraphs
 from app.core.diff.structure_aligner import align_sections
 from app.core.diff.table_reconstruction_pipeline import reconstruct_table_pairs
-from app.core.types import ComparePolicy, DocumentIR, Paragraph, Section, Sentence
+from app.core.document_ir_codec import load_document_ir
+from app.core.types import ComparePolicy, DocumentIR
 from app.db import compare_repo, document_repo
 
 logger = logging.getLogger(__name__)
@@ -31,30 +31,7 @@ def _load_ir(version_id: str, conn) -> DocumentIR:
     ir_path = row["parsed_json_path"]
     if not ir_path or not Path(ir_path).exists():
         raise FileNotFoundError(f"Parsed IR not found: {ir_path}")
-    data = json.loads(Path(ir_path).read_text(encoding="utf-8"))
-    sections = []
-    for sec in data.get("sections", []):
-        paras = [
-            Paragraph(
-                paragraph_id=p["paragraph_id"],
-                text=p["text"],
-                sentences=[Sentence(text=s["text"]) for s in p.get("sentences", [])],
-            )
-            for p in sec.get("paragraphs", [])
-        ]
-        sections.append(Section(
-            section_id=sec["section_id"],
-            title=sec["title"],
-            level=sec["level"],
-            paragraphs=paras,
-        ))
-    return DocumentIR(
-        doc_id=data["doc_id"],
-        title=data["title"],
-        file_hash=data["file_hash"],
-        sections=sections,
-        plain_text=data.get("plain_text", ""),
-    )
+    return load_document_ir(ir_path)
 
 
 def create_task(state: CompareState) -> dict:

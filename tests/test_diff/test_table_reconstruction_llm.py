@@ -35,6 +35,30 @@ class RecordingProvider(BaseProvider):
         return True
 
 
+def _response(
+    boundary_id: str = "candidate-1",
+    *,
+    row_action: str = "merge",
+    table_action: str = "merge_fragments",
+    confidence: float = 0.75,
+    roles: dict[str, str] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "boundary_id": boundary_id,
+            "roles": roles
+            or {
+                "previous_row": "body_row",
+                "continuation_row": "continuation_row",
+            },
+            "row_action": row_action,
+            "table_action": table_action,
+            "confidence": confidence,
+            "reason": "bounded structural evidence",
+        }
+    )
+
+
 def _row(cells: tuple[str, ...], index: int, paragraph_id: str):
     row = split_markdown_table_row(
         "|" + "|".join(cells) + "|",
@@ -75,13 +99,10 @@ def make_medium_candidate(candidate_id: str = "candidate-1") -> ContinuationCand
 def test_adjudicator_parses_matching_valid_response(decision, confidence):
     candidate = make_medium_candidate("candidate-1")
     provider = RecordingProvider(
-        json.dumps(
-            {
-                "candidate_id": "candidate-1",
-                "decision": decision,
-                "confidence": confidence,
-                "reason": "cells continue",
-            }
+        _response(
+            row_action="merge" if decision == "merge" else "keep",
+            table_action="merge_fragments" if decision == "merge" else "keep",
+            confidence=confidence,
         )
     )
 
@@ -91,6 +112,7 @@ def test_adjudicator_parses_matching_valid_response(decision, confidence):
     assert judgment.model == "recording-model"
     assert judgment.decision == decision
     assert judgment.confidence == confidence
+    assert judgment.roles["continuation_row"] == "continuation_row"
     assert len(provider.chat_calls) == 1
 
 
@@ -128,22 +150,18 @@ def test_adjudicator_treats_provider_exceptions_as_candidate_local_failure(error
 
 
 def test_adjudicator_preserves_valid_sub_threshold_judgment():
-    provider = RecordingProvider(
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":0.74,"reason":"plausible"}'
-    )
+    provider = RecordingProvider(_response(confidence=0.74))
 
     judgment = adjudicate_continuation(make_medium_candidate(), provider)
 
     assert judgment is not None
     assert judgment.decision == "merge"
     assert judgment.confidence == 0.74
-    assert judgment.reason == "plausible"
+    assert judgment.reason == "bounded structural evidence"
 
 
 def test_adjudicator_sends_only_bounded_structural_context():
-    provider = RecordingProvider(
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":0.75,"reason":"continues"}'
-    )
+    provider = RecordingProvider(_response())
 
     adjudicate_continuation(make_medium_candidate(), provider)
 
@@ -152,6 +170,7 @@ def test_adjudicator_sends_only_bounded_structural_context():
     assert [message["role"] for message in messages] == ["system", "user"]
     payload = json.loads(messages[1]["content"])
     assert set(payload) == {
+        "boundary_id",
         "candidate_id",
         "side",
         "previous_cells",
@@ -162,6 +181,7 @@ def test_adjudicator_sends_only_bounded_structural_context():
         "rule_evidence",
         "rule_conflicts",
         "cross_version_rows",
+        "context_items",
     }
     assert len(payload["cross_version_rows"]) == 3
     assert "paragraph_id" not in messages[1]["content"]
@@ -180,9 +200,7 @@ def test_adjudicator_projects_sparse_previous_row_to_logical_cells():
         ),
         previous_fragment_rows=(sparse_previous,),
     )
-    provider = RecordingProvider(
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":0.75,"reason":"continues"}'
-    )
+    provider = RecordingProvider(_response())
 
     adjudicate_continuation(candidate, provider)
 
@@ -194,3 +212,17 @@ def test_adjudicator_projects_sparse_previous_row_to_logical_cells():
         [5, 2],
     ]
     assert len(payload["logical_column_roles"]) == 3
+
+
+def test_adjudicator_rejects_roles_outside_the_bounded_context():
+    provider = RecordingProvider(
+        _response(
+            roles={
+                "previous_row": "body_row",
+                "continuation_row": "continuation_row",
+                "invented-row": "ordinary_text",
+            }
+        )
+    )
+
+    assert adjudicate_continuation(make_medium_candidate(), provider) is None

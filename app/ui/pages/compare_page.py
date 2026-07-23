@@ -35,13 +35,14 @@ from app.core.markdown_utils import (
     render_markdown_fragment as _core_render_markdown_fragment,
     strip_markdown_formatting as _core_strip_markdown_formatting,
 )
+from app.core.document_ir_codec import document_ir_from_dict
 from app.core.diff.reconstruction_trace import (
     load_reconstruction_trace,
     reconstruction_trace_path,
     validate_trace_documents,
 )
 from app.core.diff.table_reconstruction_pipeline import replay_reconstruction
-from app.core.types import ComparePolicy, DiffItem, DiffResult, DocumentIR, Paragraph, Section, Sentence
+from app.core.types import ComparePolicy, DiffItem, DiffResult, DocumentIR
 from app.db import document_repo
 from app.ui.app_context import AppContext
 from app.ui.theme import Theme
@@ -117,37 +118,7 @@ def _normalize_diff_text(text: str) -> str:
 
 
 def _ir_from_dict(data: dict) -> DocumentIR:
-    sections: list[Section] = []
-    for sec in data.get("sections", []):
-        paragraphs: list[Paragraph] = []
-        for para in sec.get("paragraphs", []):
-            sentences = [
-                Sentence(text=sent.get("text", ""))
-                for sent in para.get("sentences", [])
-                if sent.get("text", "")
-            ]
-            paragraphs.append(
-                Paragraph(
-                    paragraph_id=para.get("paragraph_id", ""),
-                    text=para.get("text", ""),
-                    sentences=sentences,
-                )
-            )
-        sections.append(
-            Section(
-                section_id=sec.get("section_id", ""),
-                title=sec.get("title", ""),
-                level=int(sec.get("level", 1) or 1),
-                paragraphs=paragraphs,
-            )
-        )
-    return DocumentIR(
-        doc_id=data.get("doc_id", ""),
-        title=data.get("title", ""),
-        file_hash=data.get("file_hash", ""),
-        sections=sections,
-        plain_text=data.get("plain_text", ""),
-    )
+    return document_ir_from_dict(data)
 
 
 def _render_changed_inline(text: str, other_text: str) -> str:

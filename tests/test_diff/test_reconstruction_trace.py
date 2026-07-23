@@ -41,8 +41,23 @@ def make_trace_with_every_operation() -> ReconstructionTrace:
                 rule_confidence="high",
                 rule_evidence=["same table header"],
                 rule_conflicts=[],
-                llm=LLMJudgment("test-model", "merge", 0.9, "continued table"),
+                llm=LLMJudgment(
+                    "test-model",
+                    "merge",
+                    0.9,
+                    "continued table",
+                    roles={
+                        "previous_row": "body_row",
+                        "continuation_row": "continuation_row",
+                    },
+                    row_action="merge",
+                    table_action="merge_fragments",
+                ),
                 final_action="merge",
+                boundary_id="boundary-1",
+                previous_page_no=4,
+                next_page_no=5,
+                context_refs=["item-1", "item-2"],
                 generated_row_id="row-1",
             )
         ],
@@ -85,13 +100,15 @@ def test_trace_round_trip_preserves_typed_mappings_and_llm_judgment(tmp_path):
 
     assert restored == trace
     assert restored.decisions[0].column_mapping == {1: 0, 3: 1}
-    assert restored.algorithm_version == "cross-page-table-v1"
+    assert restored.algorithm_version == "cross-page-table-v2"
+    assert restored.decisions[0].previous_page_no == 4
+    assert restored.decisions[0].llm.roles["continuation_row"] == "continuation_row"
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("schema_version", 2),
+        ("schema_version", 3),
         ("schema_version", True),
         ("algorithm_version", "unknown-version"),
     ],
@@ -102,6 +119,28 @@ def test_trace_rejects_unsupported_versions(field, value):
 
     with pytest.raises(ValueError, match="Unsupported reconstruction"):
         trace_from_dict(payload)
+
+
+def test_trace_loader_accepts_legacy_v1_payload():
+    payload = trace_to_dict(make_trace_with_every_operation())
+    payload["schema_version"] = 1
+    payload["algorithm_version"] = "cross-page-table-v1"
+    for decision in payload["decisions"]:
+        decision.pop("boundary_id", None)
+        decision.pop("previous_page_no", None)
+        decision.pop("next_page_no", None)
+        decision.pop("context_refs", None)
+        if decision["llm"] is not None:
+            decision["llm"].pop("roles", None)
+            decision["llm"].pop("row_action", None)
+            decision["llm"].pop("table_action", None)
+
+    restored = trace_from_dict(payload)
+
+    assert restored.schema_version == 1
+    assert restored.algorithm_version == "cross-page-table-v1"
+    assert restored.decisions[0].boundary_id == ""
+    assert restored.decisions[0].llm.roles == {}
 
 
 def test_trace_rejects_document_identity_mismatch():

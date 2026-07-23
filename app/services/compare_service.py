@@ -1,10 +1,10 @@
 """Compare service — run semantic diff between two document versions."""
 from __future__ import annotations
-import json
 import logging
 import sqlite3
 from pathlib import Path
 
+from app.core.document_ir_codec import load_document_ir
 from app.core.diff.diff_classifier import classify
 from app.core.diff.reconstruction_trace import persist_compare_artifacts
 from app.core.diff.semantic_matcher import match_paragraphs
@@ -25,31 +25,7 @@ def _load_ir(version_id: str, conn: sqlite3.Connection) -> DocumentIR:
     ir_path = version_row["parsed_json_path"]
     if not ir_path or not Path(ir_path).exists():
         raise FileNotFoundError(f"Parsed IR not found at {ir_path}")
-    data = json.loads(Path(ir_path).read_text(encoding="utf-8"))
-    from app.core.types import Section, Paragraph, Sentence
-    sections = []
-    for sec in data.get("sections", []):
-        paras = []
-        for p in sec.get("paragraphs", []):
-            sents = [Sentence(text=s["text"]) for s in p.get("sentences", [])]
-            paras.append(Paragraph(
-                paragraph_id=p["paragraph_id"],
-                text=p["text"],
-                sentences=sents,
-            ))
-        sections.append(Section(
-            section_id=sec["section_id"],
-            title=sec["title"],
-            level=sec["level"],
-            paragraphs=paras,
-        ))
-    return DocumentIR(
-        doc_id=data["doc_id"],
-        title=data["title"],
-        file_hash=data["file_hash"],
-        sections=sections,
-        plain_text=data.get("plain_text", ""),
-    )
+    return load_document_ir(ir_path)
 
 
 def run_compare(

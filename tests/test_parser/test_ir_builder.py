@@ -96,3 +96,22 @@ def test_chunk_no_is_sequential():
     assert len(chunks) == 3
     for expected, chunk in enumerate(chunks):
         assert chunk.chunk_no == expected
+
+
+def test_chunks_inherit_paragraph_page_number():
+    para = Paragraph(
+        paragraph_id="p1",
+        text="page-aware content",
+        sentences=[Sentence(text="page-aware content")],
+        page_no=3,
+    )
+    ir = DocumentIR(
+        doc_id="doc",
+        title="Title",
+        file_hash="hash",
+        sections=[Section("section", "正文", 1, [para])],
+    )
+
+    chunks = build_chunks(ir, "v1")
+
+    assert chunks[0].page_no == 3

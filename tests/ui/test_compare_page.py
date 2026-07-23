@@ -830,7 +830,7 @@ def test_render_diff_falls_back_to_raw_pair_for_invalid_reconstruction_sidecar(
     elif trace_mutation is not None:
         payload = trace_to_dict(trace)
         if trace_mutation == "unsupported_schema":
-            payload["schema_version"] = 2
+            payload["schema_version"] = 3
         elif trace_mutation == "wrong_doc_id":
             payload["baseline"]["doc_id"] = "wrong-doc-id"
         else:

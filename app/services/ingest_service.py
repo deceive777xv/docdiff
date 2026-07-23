@@ -4,9 +4,9 @@ import json
 import logging
 import shutil
 import sqlite3
-from dataclasses import asdict
 from pathlib import Path
 
+from app.core.document_ir_codec import document_ir_to_dict
 from app.core.model.base_provider import BaseProvider
 from app.core.parser.ir_builder import build_chunks
 from app.core.parser.router import parse_document
@@ -68,7 +68,8 @@ def ingest_document(
     parsed_dir.mkdir(parents=True, exist_ok=True)
     ir_path = parsed_dir / f"{ir.doc_id}.json"
     ir_path.write_text(
-        json.dumps(asdict(ir), ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(document_ir_to_dict(ir), ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
     # DB insert
@@ -127,7 +128,8 @@ def ingest_new_version(
     parsed_dir.mkdir(parents=True, exist_ok=True)
     ir_path = parsed_dir / f"{ir.doc_id}.json"
     ir_path.write_text(
-        json.dumps(asdict(ir), ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(document_ir_to_dict(ir), ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
     version_id = document_repo.insert_version(

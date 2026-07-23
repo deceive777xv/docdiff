@@ -1,59 +1,65 @@
-"""Tests for PDF Markdown repair in pymupdf4llm_adapter."""
+"""Tests for the page-aware PyMuPDF4LLM adapter."""
 from __future__ import annotations
 
+import sys
 
-def test_pdfplumber_table_repair_replaces_flattened_table_text():
-    from app.core.parser.pymupdf4llm_adapter import (
-        _merge_pdf_tables_into_markdown,
-        _parse_markdown,
-    )
 
-    md = (
-        "|编号|标题|\n"
-        "|---|---|\n"
-        "|57|怎么画好男人的屁股|\n\n"
-        "58 如何画拿武器的刀剑客姿势漫画设计 "
-        "59 色彩与层次技术-魅力人物着色方法 "
-        "60 东方Touhou项目CG插图教程指南\n"
-    )
-    tables = [
-        [
-            ["58", "如何画拿武器的刀剑客姿势漫画设计"],
-            ["59", "色彩与层次技术-魅力人物着色方法"],
-            ["60", "东方Touhou项目CG插图教程指南"],
-        ]
+def test_extract_assigns_physical_page_numbers_without_printed_page_labels(
+    tmp_path,
+    monkeypatch,
+):
+    import pymupdf
+
+    pdf_path = tmp_path / "two-pages.pdf"
+    document = pymupdf.open()
+    document.new_page().insert_text((72, 72), "First physical page.")
+    document.new_page().insert_text((72, 72), "Second physical page.")
+    document.save(pdf_path)
+    document.close()
+
+    class ForbiddenPdfPlumber:
+        def __getattr__(self, name):
+            raise AssertionError("pdfplumber must not be used by the PDF parser")
+
+    monkeypatch.setitem(sys.modules, "pdfplumber", ForbiddenPdfPlumber())
+
+    from app.core.parser.pymupdf4llm_adapter import extract
+
+    ir = extract(str(pdf_path))
+    paragraphs = [para for section in ir.sections for para in section.paragraphs]
+
+    assert [para.page_no for para in paragraphs] == [1, 2]
+    assert "First physical page" in paragraphs[0].text
+    assert "Second physical page" in paragraphs[1].text
+
+
+def test_page_chunks_preserve_section_state_across_page_boundaries(monkeypatch, tmp_path):
+    pdf_path = tmp_path / "section.pdf"
+    pdf_path.write_bytes(b"fake-pdf")
+
+    chunks = [
+        {
+            "metadata": {"page_number": 1},
+            "text": "# Shared section\n\nParagraph on page one.",
+        },
+        {
+            "metadata": {"page_number": 2},
+            "text": "Paragraph on page two.",
+        },
     ]
 
-    repaired = _merge_pdf_tables_into_markdown(md, tables)
-    ir = _parse_markdown(repaired, "books", "hash")
-    paragraphs = ir.sections[0].paragraphs
+    import pymupdf4llm
 
-    assert "58 如何画拿武器" not in repaired
-    assert "|列1|列2|" in repaired
-    assert "|58|如何画拿武器的刀剑客姿势漫画设计|" in repaired
-    assert any(
-        "|59|色彩与层次技术-魅力人物着色方法|" in sent.text
-        for para in paragraphs
-        for sent in para.sentences
-    )
+    monkeypatch.setattr(pymupdf4llm, "to_markdown", lambda *_args, **_kwargs: chunks)
 
+    from app.core.parser.pymupdf4llm_adapter import extract
 
-def test_pdfplumber_table_repair_skips_existing_markdown_tables():
-    from app.core.parser.pymupdf4llm_adapter import _merge_pdf_tables_into_markdown
+    ir = extract(str(pdf_path))
 
-    md = (
-        "|编号|标题|\n"
-        "|---|---|\n"
-        "|58|如何画拿武器的刀剑客姿势漫画设计|\n"
-        "|59|色彩与层次技术-魅力人物着色方法|\n"
-    )
-    tables = [
-        [
-            ["58", "如何画拿武器的刀剑客姿势漫画设计"],
-            ["59", "色彩与层次技术-魅力人物着色方法"],
-        ]
+    assert len(ir.sections) == 1
+    assert ir.sections[0].title == "Shared section"
+    assert [para.page_no for para in ir.sections[0].paragraphs] == [1, 2]
+    assert [para.text for para in ir.sections[0].paragraphs] == [
+        "Paragraph on page one.",
+        "Paragraph on page two.",
     ]
-
-    repaired = _merge_pdf_tables_into_markdown(md, tables)
-
-    assert repaired == md

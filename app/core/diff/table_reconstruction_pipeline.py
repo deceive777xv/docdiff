@@ -33,6 +33,10 @@ from app.core.diff.table_reconstruction import (
     infer_regions,
 )
 from app.core.diff.table_reconstruction_llm import adjudicate_continuation
+from app.core.diff.table_boundary_context import (
+    TableBoundaryContext,
+    locate_table_boundary_context,
+)
 from app.core.model.base_provider import BaseProvider
 from app.core.types import DocumentIR, Paragraph, Section
 
@@ -306,15 +310,16 @@ def _collect_pair_analysis(
 def _resolve_assessment(
     assessment: CandidateAssessment,
     provider: BaseProvider | None,
+    context: TableBoundaryContext | None = None,
 ) -> tuple[CandidateAssessment, LLMJudgment | None]:
-    if assessment.final_action != "needs_llm" or provider is None:
-        final_action = (
-            assessment.final_action
-            if assessment.final_action != "needs_llm"
-            else "keep_separate"
-        )
-        return replace(assessment, final_action=final_action), None
-    judgment = adjudicate_continuation(assessment.candidate, provider)
+    candidate = assessment.candidate
+    requires_semantic_decision = (
+        assessment.rule_confidence in {"high", "medium"}
+        and not candidate.vetoes
+    )
+    if not requires_semantic_decision or provider is None:
+        return replace(assessment, final_action="keep_separate"), None
+    judgment = adjudicate_continuation(candidate, provider, context)
     final_action = (
         "merge"
         if judgment is not None
@@ -378,14 +383,45 @@ def _decision_sort_key(decision: ReconstructionDecision) -> tuple[str, str]:
     return decision.side, decision.candidate_id
 
 
+def _source_page_no(
+    document: DocumentIR,
+    source: SourceRowRef,
+) -> int | None:
+    for section in document.sections:
+        if section.section_id != source.section_id:
+            continue
+        for paragraph in section.paragraphs:
+            if paragraph.paragraph_id == source.paragraph_id:
+                return paragraph.page_no
+    return None
+
+
+def _has_invalid_known_page_boundary(
+    document: DocumentIR,
+    candidate: ContinuationCandidate,
+) -> bool:
+    previous_page = _source_page_no(document, candidate.previous_row.source)
+    continuation_page = _source_page_no(
+        document,
+        candidate.continuation_row.source,
+    )
+    return (
+        previous_page is not None
+        and continuation_page is not None
+        and continuation_page != previous_page + 1
+    )
+
+
 def _trace_decisions(
     assessments: Sequence[CandidateAssessment],
     judgments: Mapping[tuple[str, str], LLMJudgment | None],
     generated_row_ids: Mapping[str, str],
+    contexts: Mapping[tuple[str, str], TableBoundaryContext | None],
 ) -> list[ReconstructionDecision]:
     decisions = []
     for assessment in assessments:
         candidate = assessment.candidate
+        context = contexts.get((candidate.side, candidate.candidate_id))
         decisions.append(
             ReconstructionDecision(
                 candidate_id=candidate.candidate_id,
@@ -403,6 +439,16 @@ def _trace_decisions(
                 llm=judgments[(candidate.side, candidate.candidate_id)],
                 final_action=cast(
                     Literal["merge", "keep_separate"], assessment.final_action
+                ),
+                boundary_id=context.boundary_id if context is not None else candidate.candidate_id,
+                previous_page_no=(
+                    context.previous_page_no if context is not None else None
+                ),
+                next_page_no=context.next_page_no if context is not None else None,
+                context_refs=(
+                    [item.item_id for item in context.items]
+                    if context is not None
+                    else []
                 ),
                 generated_row_id=generated_row_ids.get(candidate.candidate_id, ""),
             )
@@ -439,8 +485,25 @@ def reconstruct_table_pairs(
 
     resolved: list[CandidateAssessment] = []
     judgments: dict[tuple[str, str], LLMJudgment | None] = {}
+    contexts: dict[tuple[str, str], TableBoundaryContext | None] = {}
     for key, candidate in sorted(candidates.items()):
-        assessment, judgment = _resolve_assessment(assess_candidate(candidate), provider)
+        document = baseline_ir if candidate.side == "baseline" else target_ir
+        context = locate_table_boundary_context(
+            document,
+            candidate.side,
+            candidate.previous_row.source,
+            candidate.continuation_row.source,
+        )
+        contexts[key] = context
+        assessment, judgment = _resolve_assessment(
+            assess_candidate(candidate),
+            (
+                None
+                if _has_invalid_known_page_boundary(document, candidate)
+                else provider
+            ),
+            context,
+        )
         resolved.append(assessment)
         judgments[key] = judgment
 
@@ -464,7 +527,12 @@ def reconstruct_table_pairs(
         algorithm_version=ALGORITHM_VERSION,
         baseline=DocumentTraceRef(baseline_ir.doc_id, baseline_ir.file_hash),
         target=DocumentTraceRef(target_ir.doc_id, target_ir.file_hash),
-        decisions=_trace_decisions(resolved, judgments, generated_row_ids),
+        decisions=_trace_decisions(
+            resolved,
+            judgments,
+            generated_row_ids,
+            contexts,
+        ),
         operations=operations,
     )
     normalized_baseline, normalized_target = replay_reconstruction(

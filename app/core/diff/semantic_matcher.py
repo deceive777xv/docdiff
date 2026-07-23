@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 import numpy as np
 
@@ -644,7 +645,27 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
     units: list[_ParagraphUnit] = []
     for para in paras:
         if not _should_split_para(para):
-            units.append(_ParagraphUnit(para=para, split_unit=False, match_text=para.text))
+            stripped_text = para.text.strip()
+            is_table_row = (
+                stripped_text.startswith("|")
+                and stripped_text.endswith("|")
+            )
+            units.append(
+                _ParagraphUnit(
+                    para=para,
+                    split_unit=False,
+                    match_text=(
+                        _table_row_match_text(para.text)
+                        if is_table_row
+                        else para.text
+                    ),
+                    table_values=(
+                        _table_row_values(para.text)
+                        if is_table_row
+                        else None
+                    ),
+                )
+            )
             continue
 
         is_table = _looks_like_table(para)
@@ -660,6 +681,7 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
                 paragraph_id=f"{para.paragraph_id}#u{index}",
                 text=text,
                 sentences=[Sentence(text=text)],
+                page_no=para.page_no,
             )
             following = sentences[index + 1] if index + 1 < len(sentences) else ""
             units.append(
@@ -672,6 +694,167 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
                 )
             )
     return units
+
+
+def _is_ordinary_unit(unit: _ParagraphUnit) -> bool:
+    return unit.table_values is None
+
+
+def _context_side_similarity(left: str, right: str) -> float | None:
+    if not left and not right:
+        return None
+    if not left or not right:
+        return None
+    normalized_left = _normalize_match_text(left)
+    normalized_right = _normalize_match_text(right)
+    if normalized_left == normalized_right:
+        return 1.0
+    return min(0.65, max(
+        _lexical_similarity(left, right),
+        SequenceMatcher(None, normalized_left, normalized_right).ratio(),
+    ))
+
+
+def _ordinary_context_similarity(
+    b_units: list[_ParagraphUnit],
+    t_units: list[_ParagraphUnit],
+    i: int,
+    j: int,
+) -> float:
+    weighted_scores: list[tuple[float, float]] = []
+    for offset, weight in ((-1, 2.0), (1, 2.0), (-2, 1.0), (2, 1.0)):
+        b_index = i + offset
+        t_index = j + offset
+        b_text = (
+            _unit_match_text(b_units[b_index])
+            if 0 <= b_index < len(b_units) and _is_ordinary_unit(b_units[b_index])
+            else ""
+        )
+        t_text = (
+            _unit_match_text(t_units[t_index])
+            if 0 <= t_index < len(t_units) and _is_ordinary_unit(t_units[t_index])
+            else ""
+        )
+        score = _context_side_similarity(b_text, t_text)
+        if score is not None:
+            weighted_scores.append((score, weight))
+    if not weighted_scores:
+        return 1.0
+    return sum(score * weight for score, weight in weighted_scores) / sum(
+        weight for _, weight in weighted_scores
+    )
+
+
+def _relative_position_similarity(
+    i: int,
+    baseline_count: int,
+    j: int,
+    target_count: int,
+) -> float:
+    baseline_position = i / max(1, baseline_count - 1)
+    target_position = j / max(1, target_count - 1)
+    return max(0.0, 1.0 - abs(baseline_position - target_position))
+
+
+def _ordinary_match_score(
+    base_score: float,
+    b_units: list[_ParagraphUnit],
+    t_units: list[_ParagraphUnit],
+    i: int,
+    j: int,
+) -> float:
+    b_text = _normalize_match_text(_unit_match_text(b_units[i]))
+    t_text = _normalize_match_text(_unit_match_text(t_units[j]))
+    b_duplicates = sum(
+        _normalize_match_text(_unit_match_text(unit)) == b_text
+        for unit in b_units
+        if _is_ordinary_unit(unit)
+    )
+    t_duplicates = sum(
+        _normalize_match_text(_unit_match_text(unit)) == t_text
+        for unit in t_units
+        if _is_ordinary_unit(unit)
+    )
+    ambiguous = (
+        min(len(b_text), len(t_text)) <= 24
+        or b_duplicates > 1
+        or t_duplicates > 1
+    )
+    if not ambiguous:
+        return base_score
+
+    context_score = _ordinary_context_similarity(b_units, t_units, i, j)
+    position_score = _relative_position_similarity(i, len(b_units), j, len(t_units))
+    role_score = 1.0
+    return (
+        0.55 * base_score
+        + 0.30 * context_score
+        + 0.10 * position_score
+        + 0.05 * role_score
+    )
+
+
+def _select_monotonic_ordinary_matches(
+    candidates: list[tuple[float, float, int, int]],
+    b_units: list[_ParagraphUnit],
+    t_units: list[_ParagraphUnit],
+) -> dict[int, tuple[int, float]]:
+    baseline_indices = [
+        index for index, unit in enumerate(b_units) if _is_ordinary_unit(unit)
+    ]
+    target_indices = [
+        index for index, unit in enumerate(t_units) if _is_ordinary_unit(unit)
+    ]
+    score_map: dict[tuple[int, int], tuple[float, float]] = {}
+    for rank_score, similarity, i, j in candidates:
+        if not (_is_ordinary_unit(b_units[i]) and _is_ordinary_unit(t_units[j])):
+            continue
+        previous = score_map.get((i, j))
+        if previous is None or rank_score > previous[0]:
+            score_map[(i, j)] = (rank_score, similarity)
+
+    rows = len(baseline_indices)
+    columns = len(target_indices)
+    dp = [[0.0] * (columns + 1) for _ in range(rows + 1)]
+    choice = [[""] * (columns + 1) for _ in range(rows + 1)]
+    for row in range(1, rows + 1):
+        choice[row][0] = "up"
+    for column in range(1, columns + 1):
+        choice[0][column] = "left"
+
+    for row in range(1, rows + 1):
+        i = baseline_indices[row - 1]
+        for column in range(1, columns + 1):
+            j = target_indices[column - 1]
+            best = dp[row - 1][column]
+            direction = "up"
+            if dp[row][column - 1] > best:
+                best = dp[row][column - 1]
+                direction = "left"
+            candidate = score_map.get((i, j))
+            if candidate is not None:
+                match_total = dp[row - 1][column - 1] + candidate[0]
+                if match_total >= best:
+                    best = match_total
+                    direction = "match"
+            dp[row][column] = best
+            choice[row][column] = direction
+
+    selected: dict[int, tuple[int, float]] = {}
+    row, column = rows, columns
+    while row > 0 or column > 0:
+        direction = choice[row][column]
+        if direction == "match":
+            i = baseline_indices[row - 1]
+            j = target_indices[column - 1]
+            selected[i] = (j, score_map[(i, j)][1])
+            row -= 1
+            column -= 1
+        elif direction == "up":
+            row -= 1
+        else:
+            column -= 1
+    return selected
 
 
 def match_paragraphs(
@@ -757,13 +940,26 @@ def match_paragraphs(
         rerank_floor = min(similarity_threshold, _LLM_RERANK_MIN_SCORE)
         for i, b_unit in enumerate(b_units):
             for j, t_unit in enumerate(t_units):
+                if _is_ordinary_unit(b_unit) != _is_ordinary_unit(t_unit):
+                    continue
                 b_match_text = _unit_match_text(b_unit)
                 t_match_text = _unit_match_text(t_unit)
-                sim = max(
+                base_sim = max(
                     _cosine(b_embeds[i], t_embeds[j]),
                     _lexical_similarity(b_match_text, t_match_text),
                 )
-                sim -= _rule_score_delta(b_unit.para.text, t_unit.para.text)
+                base_sim -= _rule_score_delta(b_unit.para.text, t_unit.para.text)
+                sim = (
+                    _ordinary_match_score(
+                        base_sim,
+                        b_units,
+                        t_units,
+                        i,
+                        j,
+                    )
+                    if _is_ordinary_unit(b_unit)
+                    else base_sim
+                )
                 if sim >= rerank_floor:
                     candidates_by_baseline.setdefault(i, []).append((sim, j))
                 if sim >= similarity_threshold:
@@ -809,9 +1005,17 @@ def match_paragraphs(
                 rank_score = max(ranked[0][0] + 0.001, similarity_threshold)
                 candidates.append((rank_score, selected_score, i, selected_j))
 
-        b_matched: dict[int, tuple[int, float]] = {}
-        t_used: set[int] = set()
+        b_matched = _select_monotonic_ordinary_matches(
+            candidates,
+            b_units,
+            t_units,
+        )
+        t_used: set[int] = {
+            target_index for target_index, _ in b_matched.values()
+        }
         for _, sim, i, j in sorted(candidates, key=lambda item: (-item[0], item[2], item[3])):
+            if _is_ordinary_unit(b_units[i]):
+                continue
             if i in b_matched or j in t_used:
                 continue
             if i in llm_unmatched_baselines:

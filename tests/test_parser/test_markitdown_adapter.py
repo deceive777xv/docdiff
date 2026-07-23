@@ -80,8 +80,8 @@ def test_extract_populates_doc_id_and_file_hash(tmp_path):
     assert ir.file_hash != ""
 
 
-def test_paragraph_has_no_page_no(tmp_path):
-    """After migration Paragraph must not have a page_no attribute."""
+def test_non_pdf_paragraph_has_unknown_page_number(tmp_path):
+    """Non-PDF parsers keep page provenance explicitly unknown."""
     test_file = tmp_path / "test.html"
     test_file.write_text("<h1>Section</h1><p>Text here.</p>", encoding="utf-8")
 
@@ -89,4 +89,4 @@ def test_paragraph_has_no_page_no(tmp_path):
     ir = extract(str(test_file))
 
     para = ir.sections[0].paragraphs[0]
-    assert not hasattr(para, "page_no"), "Paragraph.page_no must not exist after migration"
+    assert para.page_no is None
