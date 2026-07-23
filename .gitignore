@@ -22,3 +22,4 @@ releases/
 .codegraph/
 .tmp/
 .worktrees/
+.codex-remote-attachments/
