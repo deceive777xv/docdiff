@@ -113,6 +113,19 @@ def test_home_page_version_column_does_not_take_stretch_space(home_page):
     assert home_page._tasks_table.columnWidth(1) <= 320
 
 
+def test_home_page_recent_tasks_table_grows_with_available_height(home_page, qtbot):
+    """The recent-task table should use vertical space added to the home page."""
+    home_page.resize(1200, 700)
+    home_page.show()
+    qtbot.waitUntil(lambda: home_page.isVisible())
+    compact_height = home_page._tasks_table.height()
+
+    home_page.resize(1200, 1000)
+    qtbot.waitUntil(lambda: home_page._tasks_table.height() > compact_height)
+
+    assert home_page._tasks_table.height() >= compact_height + 200
+
+
 def test_home_page_open_button_emits_task_id(home_page, mem_conn, qtbot):
     """Clicking a completed task action emits the task id for the main window."""
     baseline_id, target_id = _insert_versions(mem_conn)

@@ -141,9 +141,11 @@ class HomePage(QWidget):
 
         # Recent tasks
         recent_group = QGroupBox("最近对比任务")
+        recent_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         recent_layout = QVBoxLayout(recent_group)
 
         self._tasks_table = QTableWidget(0, 6)
+        self._tasks_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._tasks_table.setHorizontalHeaderLabels(
             ["任务ID", "版本", "状态", "结果", "创建时间", "操作"]
         )
@@ -159,12 +161,10 @@ class HomePage(QWidget):
         self._tasks_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._tasks_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._tasks_table.setAlternatingRowColors(True)
-        self._tasks_table.setMaximumHeight(240)
         self._tasks_table.itemDoubleClicked.connect(self._on_task_row_activated)
         recent_layout.addWidget(self._tasks_table)
 
-        layout.addWidget(recent_group)
-        layout.addStretch()
+        layout.addWidget(recent_group, 1)
 
     def _apply_theme(self) -> None:
         self.setStyleSheet(f"background-color:{Theme.BG_PAGE};")
