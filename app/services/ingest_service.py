@@ -1,15 +1,14 @@
 """Ingest service — import a document file into the local library."""
 from __future__ import annotations
-import json
 import logging
 import shutil
 import sqlite3
 from pathlib import Path
 
-from app.core.document_ir_codec import document_ir_to_dict
 from app.core.model.base_provider import BaseProvider
 from app.core.parser.ir_builder import build_chunks
 from app.core.parser.router import parse_document
+from app.core.structure_repair.storage import prepare_import_ir
 from app.core.types import DocumentIR
 from app.core.utils import file_hash as compute_file_hash
 from app.db import chunk_repo, document_repo
@@ -63,14 +62,14 @@ def ingest_document(
     if quality.needs_ocr:
         logger.warning("Low-quality document, OCR may be needed: %s", path)
 
-    # Save IR JSON
-    parsed_dir = Path(data_dir) / "parsed"
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-    ir_path = parsed_dir / f"{ir.doc_id}.json"
-    ir_path.write_text(
-        json.dumps(document_ir_to_dict(ir), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    artifacts = prepare_import_ir(
+        data_dir,
+        ir,
+        provider=llm_client,
+        model=llm_model,
     )
+    ir = artifacts.document
+    ir_path = artifacts.normalized_path
 
     # DB insert
     doc_id = document_repo.insert_document(
@@ -124,13 +123,14 @@ def ingest_new_version(
     if quality.needs_ocr:
         logger.warning("Low-quality new version, OCR may be needed: %s", path)
 
-    parsed_dir = Path(data_dir) / "parsed"
-    parsed_dir.mkdir(parents=True, exist_ok=True)
-    ir_path = parsed_dir / f"{ir.doc_id}.json"
-    ir_path.write_text(
-        json.dumps(document_ir_to_dict(ir), ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    artifacts = prepare_import_ir(
+        data_dir,
+        ir,
+        provider=llm_client,
+        model=llm_model,
     )
+    ir = artifacts.document
+    ir_path = artifacts.normalized_path
 
     version_id = document_repo.insert_version(
         conn,

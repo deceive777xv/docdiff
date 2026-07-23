@@ -347,7 +347,125 @@ def _unit_match_text(unit: _ParagraphUnit) -> str:
 
 
 def _normalize_match_text(text: str) -> str:
-    return re.sub(r"\s+", "", text or "").strip().lower()
+    without_list_marker = re.sub(
+        r"^\s*(?:[-*+•]\s+)+",
+        "",
+        text or "",
+    )
+    return re.sub(r"\s+", "", without_list_marker).strip().lower()
+
+
+def _pair_text(pair: ParagraphPair, side: str) -> str:
+    if side == "baseline":
+        return pair.baseline_match_text or (
+            pair.baseline_para.text if pair.baseline_para is not None else ""
+        )
+    return pair.target_match_text or (
+        pair.target_para.text if pair.target_para is not None else ""
+    )
+
+
+def _reconcile_unique_exact_unmatched(
+    results: list[ParagraphPair],
+) -> list[ParagraphPair]:
+    baseline_indexes = [
+        index
+        for index, pair in enumerate(results)
+        if pair.baseline_para is not None
+        and pair.target_para is None
+        and not pair.split_unit
+        and "|" not in pair.baseline_para.text
+    ]
+    target_indexes = [
+        index
+        for index, pair in enumerate(results)
+        if pair.baseline_para is None
+        and pair.target_para is not None
+        and not pair.split_unit
+        and "|" not in pair.target_para.text
+    ]
+    selected: dict[int, int] = {}
+    target_used: set[int] = set()
+
+    def select_unique(
+        baseline_key,
+        target_key,
+        *,
+        predicate,
+        pair_filter=lambda _baseline, _target: True,
+    ) -> None:
+        baseline_groups: dict[object, list[int]] = {}
+        target_groups: dict[object, list[int]] = {}
+        for index in baseline_indexes:
+            if index in selected:
+                continue
+            key = baseline_key(index)
+            if predicate(key):
+                baseline_groups.setdefault(key, []).append(index)
+        for index in target_indexes:
+            if index in target_used:
+                continue
+            key = target_key(index)
+            if predicate(key):
+                target_groups.setdefault(key, []).append(index)
+        for key, source_indexes in baseline_groups.items():
+            candidate_indexes = target_groups.get(key, [])
+            if (
+                len(source_indexes) == 1
+                and len(candidate_indexes) == 1
+                and pair_filter(source_indexes[0], candidate_indexes[0])
+            ):
+                selected[source_indexes[0]] = candidate_indexes[0]
+                target_used.add(candidate_indexes[0])
+
+    select_unique(
+        lambda index: (
+            results[index].section_path,
+            _normalize_match_text(_pair_text(results[index], "baseline")),
+        ),
+        lambda index: (
+            results[index].section_path,
+            _normalize_match_text(_pair_text(results[index], "target")),
+        ),
+        predicate=lambda key: bool(key[1]) and len(key[1]) <= 24,
+    )
+    select_unique(
+        lambda index: _normalize_match_text(
+            _pair_text(results[index], "baseline")
+        ),
+        lambda index: _normalize_match_text(
+            _pair_text(results[index], "target")
+        ),
+        predicate=lambda key: len(key) >= 24,
+        pair_filter=lambda baseline_index, target_index: (
+            results[baseline_index].section_path
+            != results[target_index].section_path
+        ),
+    )
+
+    reconciled: list[ParagraphPair] = []
+    for index, pair in enumerate(results):
+        if index in target_used:
+            continue
+        target_index = selected.get(index)
+        if target_index is None:
+            reconciled.append(pair)
+            continue
+        target_pair = results[target_index]
+        reconciled.append(
+            ParagraphPair(
+                baseline_para=pair.baseline_para,
+                target_para=target_pair.target_para,
+                similarity=1.0,
+                section_path=pair.section_path or target_pair.section_path,
+                split_unit=False,
+                baseline_match_text=pair.baseline_match_text,
+                target_match_text=target_pair.target_match_text,
+                baseline_table_header=pair.baseline_table_header,
+                target_table_header=target_pair.target_table_header,
+            )
+        )
+    return reconciled
 
 
 def _table_header_signature(unit: _ParagraphUnit) -> str:
@@ -1072,4 +1190,4 @@ def match_paragraphs(
                     target_table_header=t_unit.table_header,
                 ))
 
-    return results
+    return _reconcile_unique_exact_unmatched(results)

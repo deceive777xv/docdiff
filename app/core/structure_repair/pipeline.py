@@ -1,0 +1,895 @@
+"""Conservative import-time normalization for parsed DocumentIR."""
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from copy import deepcopy
+import hashlib
+import json
+import re
+from typing import Iterable
+
+from app.core.document_ir_codec import document_ir_to_dict
+from app.core.types import DocumentIR, Paragraph, Section, Sentence
+
+from .llm import adjudicate_paragraph_merge, adjudicate_section_parent
+from .models import (
+    RejectedStructureCandidate,
+    StructureRepairDecision,
+    StructureRepairOperation,
+    StructureRepairResult,
+    StructureRepairTrace,
+)
+
+
+SCHEMA_VERSION = 1
+ALGORITHM_VERSION = "post-parse-structure-v1"
+
+_NUMBERED_TITLE_RE = re.compile(
+    r"^\s*(?P<number>\d+(?:\.\d+)+)\s+(?P<title>\S.{0,100})\s*$"
+)
+_SECTION_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)\b")
+_GENERIC_STRUCTURE_RE = re.compile(
+    r"^\s*(?:[A-Za-zＡ-Ｚａ-ｚ]\s*[)）．.、]|[（(][A-Za-zＡ-Ｚａ-ｚ][）)])"
+)
+_EXPLICIT_PAGE_NUMBER_RE = re.compile(r"^\s*第\s*\d+\s*页\s*$")
+_PURE_NUMBER_RE = re.compile(r"^\s*\d+\s*$")
+_TERMINAL_RE = re.compile(r"[。！？!?；;：:]\s*$")
+_HEADING_END_RE = re.compile(r"[。！？!?；;]\s*$")
+_TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_IMAGE_PLACEHOLDER_RE = re.compile(
+    r"^\s*==>\s*picture\s*\[\s*\d+\s*x\s*\d+\s*]\s*"
+    r"intentionally omitted\s*<==\s*$",
+    re.IGNORECASE,
+)
+_DOCUMENT_CODE_RE = re.compile(
+    r"^\s*(?=[A-Z0-9-]*[A-Z])(?=[A-Z0-9-]*\d)"
+    r"[A-Z0-9]+(?:-[A-Z0-9]+){2,}\s*[（(]\d{8}[）)]\s*$"
+)
+_PUNCTUATION_ONLY_RE = re.compile(
+    r"^[\s…·—\-_=,.，。:：;；!?！？、（）()\[\]{}]+$"
+)
+_CONTINUATION_SUFFIXES = (
+    "的",
+    "地",
+    "得",
+    "在",
+    "对",
+    "与",
+    "和",
+    "或",
+    "及",
+    "为",
+    "是",
+    "当",
+    "若",
+    "如",
+    "到",
+    "从",
+    "由",
+    "将",
+    "并",
+    "且",
+    "则",
+    "时",
+    "后",
+    "前",
+    "内",
+    "中",
+    "未",
+    "不",
+    "应",
+    "可",
+    "需",
+    "必须",
+    "包括",
+    "例如",
+    "通过",
+)
+_CONTINUATION_PREFIXES = (
+    "并",
+    "且",
+    "或",
+    "以及",
+    "同时",
+    "时",
+    "后",
+    "前",
+    "则",
+    "而",
+    "但",
+)
+_MAX_LLM_PARAGRAPH_CANDIDATES = 24
+
+
+def _stable_id(prefix: str, source_ids: Iterable[str]) -> str:
+    digest = hashlib.sha256(
+        "\x1f".join(source_ids).encode("utf-8")
+    ).hexdigest()[:20]
+    return f"{prefix}-{digest}"
+
+
+def _operation_id(operation_type: str, source_ids: list[str]) -> str:
+    return _stable_id(operation_type, source_ids)
+
+
+def _document_hash(document: DocumentIR) -> str:
+    payload = json.dumps(
+        document_ir_to_dict(document),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _normalize_title(title: str) -> str:
+    value = re.sub(r"^\s*(?:\*\*|__)(.*?)(?:\*\*|__)\s*$", r"\1", title)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _section_number(title: str) -> tuple[int, ...] | None:
+    match = _SECTION_NUMBER_RE.match(_normalize_title(title))
+    if not match:
+        return None
+    try:
+        return tuple(int(part) for part in match.group(1).split("."))
+    except ValueError:
+        return None
+
+
+def _strict_heading(paragraph: Paragraph, current: Section) -> tuple[str, tuple[int, ...]] | None:
+    if "\n" in paragraph.text or len(paragraph.text.strip()) > 120:
+        return None
+    if _HEADING_END_RE.search(paragraph.text):
+        return None
+    match = _NUMBERED_TITLE_RE.match(_normalize_title(paragraph.text))
+    if not match:
+        return None
+    current_number = _section_number(current.title)
+    candidate = tuple(int(part) for part in match.group("number").split("."))
+    if current_number is None:
+        return None
+    same_level_next = (
+        len(candidate) == len(current_number)
+        and candidate[:-1] == current_number[:-1]
+        and candidate[-1] == current_number[-1] + 1
+    )
+    direct_child = (
+        len(candidate) == len(current_number) + 1
+        and candidate[:-1] == current_number
+        and candidate[-1] == 1
+    )
+    if not (same_level_next or direct_child):
+        return None
+    return _normalize_title(paragraph.text), candidate
+
+
+def _normalize_titles(
+    document: DocumentIR,
+    operations: list[StructureRepairOperation],
+) -> None:
+    for section in document.sections:
+        normalized = _normalize_title(section.title)
+        if normalized == section.title:
+            continue
+        operations.append(
+            StructureRepairOperation(
+                operation_id=_operation_id("normalize_title", [section.section_id]),
+                type="normalize_title",
+                source_ids=[section.section_id],
+                output_id=section.section_id,
+                reason="strip Markdown emphasis and normalize whitespace",
+            )
+        )
+        section.title = normalized
+
+
+def _demote_generic_sections(
+    document: DocumentIR,
+    operations: list[StructureRepairOperation],
+) -> None:
+    repaired: list[Section] = []
+    numbered_parent: Section | None = None
+    for section in document.sections:
+        if _section_number(section.title) is not None:
+            repaired.append(section)
+            numbered_parent = section
+            continue
+        if numbered_parent is None or not _GENERIC_STRUCTURE_RE.match(section.title):
+            repaired.append(section)
+            continue
+        title_paragraph_id = _stable_id("paragraph", [section.section_id])
+        page_no = section.paragraphs[0].page_no if section.paragraphs else None
+        numbered_parent.paragraphs.append(
+            Paragraph(
+                paragraph_id=title_paragraph_id,
+                text=section.title,
+                sentences=[Sentence(text=section.title)],
+                page_no=page_no,
+            )
+        )
+        numbered_parent.paragraphs.extend(section.paragraphs)
+        operations.append(
+            StructureRepairOperation(
+                operation_id=_operation_id("demote_to_paragraph", [section.section_id]),
+                type="demote_to_paragraph",
+                source_ids=[section.section_id],
+                output_id=title_paragraph_id,
+                target_section_id=numbered_parent.section_id,
+                reason="generic repeated structure title under numbered section",
+            )
+        )
+    document.sections = repaired
+
+
+def _promote_numbered_paragraphs(
+    document: DocumentIR,
+    operations: list[StructureRepairOperation],
+) -> None:
+    repaired: list[Section] = []
+    for source_section in document.sections:
+        active = Section(
+            section_id=source_section.section_id,
+            title=source_section.title,
+            level=source_section.level,
+            paragraphs=[],
+        )
+        repaired.append(active)
+        for paragraph in source_section.paragraphs:
+            heading = _strict_heading(paragraph, active)
+            if heading is None:
+                active.paragraphs.append(paragraph)
+                continue
+            title, number = heading
+            generated_id = _stable_id("section", [paragraph.paragraph_id])
+            active = Section(
+                section_id=generated_id,
+                title=title,
+                level=len(number),
+                paragraphs=[],
+            )
+            repaired.append(active)
+            operations.append(
+                StructureRepairOperation(
+                    operation_id=_operation_id(
+                        "promote_to_section",
+                        [paragraph.paragraph_id],
+                    ),
+                    type="promote_to_section",
+                    source_ids=[paragraph.paragraph_id],
+                    output_id=generated_id,
+                    reason="strict numbered heading with compatible local sequence",
+                )
+            )
+    document.sections = repaired
+
+
+def _page_boundary_ids(document: DocumentIR) -> tuple[set[str], set[str]]:
+    by_page: dict[int, list[Paragraph]] = defaultdict(list)
+    for section in document.sections:
+        for paragraph in section.paragraphs:
+            if paragraph.page_no is not None:
+                by_page[paragraph.page_no].append(paragraph)
+    first = {items[0].paragraph_id for items in by_page.values() if items}
+    last = {items[-1].paragraph_id for items in by_page.values() if items}
+    return first, last
+
+
+def _remove_noise(
+    document: DocumentIR,
+    operations: list[StructureRepairOperation],
+) -> None:
+    first_ids, last_ids = _page_boundary_ids(document)
+    occurrences: dict[str, list[Paragraph]] = defaultdict(list)
+    for section in document.sections:
+        for paragraph in section.paragraphs:
+            normalized = re.sub(r"\s+", " ", paragraph.text).strip().casefold()
+            occurrences[normalized].append(paragraph)
+    repeated_boundary_ids: set[str] = set()
+    repeated_metadata_ids: set[str] = set()
+    repeated_punctuation_ids: set[str] = set()
+    ordered_paragraphs = [
+        paragraph
+        for section in document.sections
+        for paragraph in section.paragraphs
+    ]
+    ordered_index = {
+        paragraph.paragraph_id: index
+        for index, paragraph in enumerate(ordered_paragraphs)
+    }
+    for normalized, paragraphs in occurrences.items():
+        pages = {paragraph.page_no for paragraph in paragraphs if paragraph.page_no}
+        if (
+            normalized
+            and len(pages) >= 2
+            and all(
+                paragraph.paragraph_id in first_ids
+                or paragraph.paragraph_id in last_ids
+                for paragraph in paragraphs
+            )
+        ):
+            repeated_boundary_ids.update(p.paragraph_id for p in paragraphs)
+        if (
+            len(paragraphs) >= 2
+            and len(normalized) <= 100
+            and _DOCUMENT_CODE_RE.fullmatch(paragraphs[0].text)
+        ):
+            repeated_metadata_ids.update(p.paragraph_id for p in paragraphs)
+        if len(paragraphs) >= 2 and _PUNCTUATION_ONLY_RE.fullmatch(
+            paragraphs[0].text
+        ):
+            for paragraph in paragraphs:
+                index = ordered_index[paragraph.paragraph_id]
+                neighbors = ordered_paragraphs[
+                    max(0, index - 1) : min(len(ordered_paragraphs), index + 2)
+                ]
+                if any(
+                    neighbor.paragraph_id != paragraph.paragraph_id
+                    and not _PUNCTUATION_ONLY_RE.fullmatch(neighbor.text)
+                    for neighbor in neighbors
+                ):
+                    repeated_punctuation_ids.add(paragraph.paragraph_id)
+
+    for section in document.sections:
+        retained: list[Paragraph] = []
+        for paragraph in section.paragraphs:
+            is_page_number = bool(
+                _EXPLICIT_PAGE_NUMBER_RE.fullmatch(paragraph.text)
+                or (
+                    _PURE_NUMBER_RE.fullmatch(paragraph.text)
+                    and (
+                        paragraph.paragraph_id in first_ids
+                        or paragraph.paragraph_id in last_ids
+                    )
+                )
+            )
+            is_placeholder = bool(_IMAGE_PLACEHOLDER_RE.fullmatch(paragraph.text))
+            if (
+                not is_page_number
+                and not is_placeholder
+                and paragraph.paragraph_id not in repeated_boundary_ids
+                and paragraph.paragraph_id not in repeated_metadata_ids
+                and paragraph.paragraph_id not in repeated_punctuation_ids
+            ):
+                retained.append(paragraph)
+                continue
+            operations.append(
+                StructureRepairOperation(
+                    operation_id=_operation_id("remove_noise", [paragraph.paragraph_id]),
+                    type="remove_noise",
+                    source_ids=[paragraph.paragraph_id],
+                    reason=(
+                        "printed page number"
+                        if is_page_number
+                        else (
+                            "intentionally omitted image placeholder"
+                            if is_placeholder
+                            else (
+                                "stable repeated document metadata"
+                                if paragraph.paragraph_id in repeated_metadata_ids
+                                else (
+                                    "repeated isolated punctuation fragment"
+                                    if paragraph.paragraph_id
+                                    in repeated_punctuation_ids
+                                    else "stable repeated page boundary text"
+                                )
+                            )
+                        )
+                    ),
+                )
+            )
+        section.paragraphs = retained
+
+
+def _is_table(paragraph: Paragraph) -> bool:
+    lines = [line for line in paragraph.text.splitlines() if line.strip()]
+    return bool(lines) and all(_TABLE_ROW_RE.match(line) for line in lines)
+
+
+def _is_heading_like(text: str) -> bool:
+    value = text.strip()
+    return bool(
+        _NUMBERED_TITLE_RE.match(value)
+        or _GENERIC_STRUCTURE_RE.match(value)
+        or (len(value) <= 20 and not _TERMINAL_RE.search(value))
+    )
+
+
+def _certain_continuation(previous: Paragraph, following: Paragraph) -> bool:
+    left = previous.text.rstrip()
+    right = following.text.lstrip()
+    if not left or not right or _is_table(previous) or _is_table(following):
+        return False
+    if _TERMINAL_RE.search(left) or _is_heading_like(right):
+        return False
+    if previous.page_no is None or following.page_no is None:
+        return False
+    if following.page_no - previous.page_no not in {0, 1}:
+        return False
+    return left.endswith(_CONTINUATION_SUFFIXES) or right.startswith(
+        _CONTINUATION_PREFIXES
+    )
+
+
+def _merge_certain_paragraphs(
+    document: DocumentIR,
+    operations: list[StructureRepairOperation],
+) -> None:
+    for section in document.sections:
+        repaired: list[Paragraph] = []
+        index = 0
+        while index < len(section.paragraphs):
+            current = section.paragraphs[index]
+            if (
+                index + 1 < len(section.paragraphs)
+                and _certain_continuation(current, section.paragraphs[index + 1])
+            ):
+                following = section.paragraphs[index + 1]
+                output_id = _stable_id(
+                    "paragraph",
+                    [current.paragraph_id, following.paragraph_id],
+                )
+                merged_text = current.text.rstrip() + following.text.lstrip()
+                repaired.append(
+                    Paragraph(
+                        paragraph_id=output_id,
+                        text=merged_text,
+                        sentences=[Sentence(text=merged_text)],
+                        page_no=current.page_no,
+                    )
+                )
+                operations.append(
+                    StructureRepairOperation(
+                        operation_id=_operation_id(
+                            "merge_paragraphs",
+                            [current.paragraph_id, following.paragraph_id],
+                        ),
+                        type="merge_paragraphs",
+                        source_ids=[current.paragraph_id, following.paragraph_id],
+                        output_id=output_id,
+                        reason="adjacent sentence fragments have explicit continuity",
+                    )
+                )
+                index += 2
+                continue
+            repaired.append(current)
+            index += 1
+        section.paragraphs = repaired
+
+
+def _table_rows(paragraph: Paragraph) -> list[str]:
+    return [line.strip() for line in paragraph.text.splitlines() if line.strip()]
+
+
+def _table_cells(row: str) -> list[str]:
+    return [cell.strip() for cell in row.strip().strip("|").split("|")]
+
+
+def _is_separator(row: str) -> bool:
+    cells = _table_cells(row)
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+
+def _can_merge_table_fragments(
+    previous: Paragraph,
+    following: Paragraph,
+) -> bool:
+    if not _is_table(previous) or not _is_table(following):
+        return False
+    if previous.page_no is None or following.page_no is None:
+        return False
+    if following.page_no - previous.page_no not in {0, 1}:
+        return False
+    left_rows = _table_rows(previous)
+    right_rows = _table_rows(following)
+    if len(left_rows) < 2 or len(right_rows) < 3:
+        return False
+    left_widths = {len(_table_cells(row)) for row in left_rows}
+    right_widths = {len(_table_cells(row)) for row in right_rows}
+    return (
+        len(left_widths) == 1
+        and left_widths == right_widths
+        and _table_cells(left_rows[0]) == _table_cells(right_rows[0])
+        and _is_separator(left_rows[1])
+        and _is_separator(right_rows[1])
+    )
+
+
+def _merge_table_fragments(
+    document: DocumentIR,
+    operations: list[StructureRepairOperation],
+) -> None:
+    for section in document.sections:
+        repaired: list[Paragraph] = []
+        index = 0
+        while index < len(section.paragraphs):
+            current = section.paragraphs[index]
+            if (
+                index + 1 < len(section.paragraphs)
+                and _can_merge_table_fragments(
+                    current,
+                    section.paragraphs[index + 1],
+                )
+            ):
+                following = section.paragraphs[index + 1]
+                rows = _table_rows(current) + _table_rows(following)[2:]
+                output_id = _stable_id(
+                    "table",
+                    [current.paragraph_id, following.paragraph_id],
+                )
+                repaired.append(
+                    Paragraph(
+                        paragraph_id=output_id,
+                        text="\n".join(rows),
+                        sentences=[Sentence(text=row) for row in rows],
+                        page_no=current.page_no,
+                    )
+                )
+                operations.append(
+                    StructureRepairOperation(
+                        operation_id=_operation_id(
+                            "merge_table_fragments",
+                            [current.paragraph_id, following.paragraph_id],
+                        ),
+                        type="merge_table_fragments",
+                        source_ids=[current.paragraph_id, following.paragraph_id],
+                        output_id=output_id,
+                        reason="adjacent table fragments repeat an identical header and width",
+                    )
+                )
+                index += 2
+                continue
+            repaired.append(current)
+            index += 1
+        section.paragraphs = repaired
+
+
+def _adjudicate_unnumbered_sections(
+    document: DocumentIR,
+    provider: object | None,
+    model: str,
+    operations: list[StructureRepairOperation],
+    decisions: list[StructureRepairDecision],
+    rejected: list[RejectedStructureCandidate],
+) -> None:
+    if provider is None:
+        return
+    for index in range(1, len(document.sections)):
+        previous = document.sections[index - 1]
+        section = document.sections[index]
+        if (
+            _section_number(previous.title) is None
+            or _section_number(section.title) is not None
+            or _GENERIC_STRUCTURE_RE.match(section.title)
+            or section.level > previous.level
+        ):
+            continue
+        judgment, rejection_code = adjudicate_section_parent(
+            section,
+            previous,
+            provider,
+            model,
+        )
+        candidate_id = f"section:{section.section_id}"
+        if judgment is None:
+            rejected.append(
+                RejectedStructureCandidate(
+                    candidate_id=candidate_id,
+                    code=rejection_code,
+                    reason="LLM judgment was unavailable or failed validation",
+                )
+            )
+            continue
+        decisions.append(
+            StructureRepairDecision(
+                candidate_id=candidate_id,
+                action=judgment.action,
+                source_ids=[section.section_id],
+                target_section_id=previous.section_id,
+                confidence=judgment.confidence,
+                reason=judgment.reason,
+            )
+        )
+        if judgment.action == "keep":
+            continue
+        section.level = previous.level + 1
+        operations.append(
+            StructureRepairOperation(
+                operation_id=_operation_id(
+                    "move_to_section",
+                    [section.section_id, previous.section_id],
+                ),
+                type="move_to_section",
+                source_ids=[section.section_id],
+                output_id=section.section_id,
+                target_section_id=previous.section_id,
+                reason=judgment.reason,
+                actor="llm",
+                confidence=judgment.confidence,
+            )
+        )
+
+
+def _is_ambiguous_fragment_candidate(
+    previous: Paragraph,
+    following: Paragraph,
+) -> bool:
+    if (
+        previous.page_no is None
+        or following.page_no is None
+        or following.page_no - previous.page_no not in {0, 1}
+        or _is_table(previous)
+        or _is_table(following)
+        or _TERMINAL_RE.search(previous.text.rstrip())
+        or _is_heading_like(following.text)
+    ):
+        return False
+    return 0 < len(previous.text) + len(following.text) <= 1600
+
+
+def _adjudicate_paragraph_fragments(
+    document: DocumentIR,
+    provider: object | None,
+    model: str,
+    operations: list[StructureRepairOperation],
+    decisions: list[StructureRepairDecision],
+    rejected: list[RejectedStructureCandidate],
+) -> None:
+    if provider is None:
+        return
+    candidate_count = 0
+    for section in document.sections:
+        repaired: list[Paragraph] = []
+        index = 0
+        while index < len(section.paragraphs):
+            previous = section.paragraphs[index]
+            if (
+                index + 1 >= len(section.paragraphs)
+                or candidate_count >= _MAX_LLM_PARAGRAPH_CANDIDATES
+                or not _is_ambiguous_fragment_candidate(
+                    previous,
+                    section.paragraphs[index + 1],
+                )
+            ):
+                repaired.append(previous)
+                index += 1
+                continue
+            following = section.paragraphs[index + 1]
+            candidate_count += 1
+            context = section.paragraphs[
+                max(0, index - 2) : min(len(section.paragraphs), index + 4)
+            ]
+            judgment, rejection_code = adjudicate_paragraph_merge(
+                section,
+                previous,
+                following,
+                context,
+                provider,
+                model,
+            )
+            candidate_id = (
+                f"paragraphs:{previous.paragraph_id}:{following.paragraph_id}"
+            )
+            if judgment is None:
+                rejected.append(
+                    RejectedStructureCandidate(
+                        candidate_id=candidate_id,
+                        code=rejection_code,
+                        reason="LLM judgment was unavailable or failed validation",
+                    )
+                )
+                repaired.append(previous)
+                index += 1
+                continue
+            decisions.append(
+                StructureRepairDecision(
+                    candidate_id=candidate_id,
+                    action=judgment.action,
+                    source_ids=[
+                        previous.paragraph_id,
+                        following.paragraph_id,
+                    ],
+                    target_section_id=section.section_id,
+                    confidence=judgment.confidence,
+                    reason=judgment.reason,
+                )
+            )
+            if judgment.action == "keep":
+                repaired.append(previous)
+                index += 1
+                continue
+            output_id = _stable_id(
+                "paragraph",
+                [previous.paragraph_id, following.paragraph_id],
+            )
+            merged_text = previous.text.rstrip() + following.text.lstrip()
+            repaired.append(
+                Paragraph(
+                    paragraph_id=output_id,
+                    text=merged_text,
+                    sentences=[Sentence(text=merged_text)],
+                    page_no=previous.page_no,
+                )
+            )
+            operations.append(
+                StructureRepairOperation(
+                    operation_id=_operation_id(
+                        "merge_paragraphs",
+                        [previous.paragraph_id, following.paragraph_id],
+                    ),
+                    type="merge_paragraphs",
+                    source_ids=[previous.paragraph_id, following.paragraph_id],
+                    output_id=output_id,
+                    target_section_id=section.section_id,
+                    reason=judgment.reason,
+                    actor="llm",
+                    confidence=judgment.confidence,
+                )
+            )
+            index += 2
+        section.paragraphs = repaired
+
+
+def _rebuild_plain_text(document: DocumentIR) -> None:
+    document.plain_text = "\n".join(
+        paragraph.text
+        for section in document.sections
+        for paragraph in section.paragraphs
+    )
+
+
+def _characters(value: str) -> Counter[str]:
+    return Counter(character for character in value if not character.isspace())
+
+
+def _content_counter(document: DocumentIR) -> Counter[str]:
+    content: Counter[str] = Counter()
+    for section in document.sections:
+        content.update(_characters(_normalize_title(section.title)))
+        for paragraph in section.paragraphs:
+            content.update(_characters(paragraph.text))
+    return content
+
+
+def _source_paragraphs(document: DocumentIR) -> dict[str, Paragraph]:
+    return {
+        paragraph.paragraph_id: paragraph
+        for section in document.sections
+        for paragraph in section.paragraphs
+    }
+
+
+def _allowed_removed_content(
+    raw: DocumentIR,
+    operations: list[StructureRepairOperation],
+) -> Counter[str]:
+    paragraphs = _source_paragraphs(raw)
+    removed: Counter[str] = Counter()
+    for operation in operations:
+        if operation.type == "remove_noise":
+            for source_id in operation.source_ids:
+                paragraph = paragraphs.get(source_id)
+                if paragraph is None:
+                    raise ValueError("noise operation references an unknown paragraph")
+                removed.update(_characters(paragraph.text))
+        elif operation.type == "merge_table_fragments":
+            if len(operation.source_ids) != 2:
+                raise ValueError("table merge must reference exactly two paragraphs")
+            following = paragraphs.get(operation.source_ids[1])
+            if following is None:
+                raise ValueError("table merge references an unknown paragraph")
+            duplicate_rows = _table_rows(following)[:2]
+            removed.update(_characters("\n".join(duplicate_rows)))
+    return removed
+
+
+def _has_unique_ids(document: DocumentIR) -> bool:
+    section_ids = [section.section_id for section in document.sections]
+    paragraph_ids = [
+        paragraph.paragraph_id
+        for section in document.sections
+        for paragraph in section.paragraphs
+    ]
+    return (
+        len(section_ids) == len(set(section_ids))
+        and len(paragraph_ids) == len(set(paragraph_ids))
+    )
+
+
+def _content_is_conserved(
+    raw: DocumentIR,
+    repaired: DocumentIR,
+    operations: list[StructureRepairOperation],
+) -> bool:
+    try:
+        expected = _content_counter(raw)
+        expected.subtract(_allowed_removed_content(raw, operations))
+    except ValueError:
+        return False
+    expected = Counter({key: count for key, count in expected.items() if count})
+    return (
+        not any(count < 0 for count in expected.values())
+        and expected == _content_counter(repaired)
+        and _has_unique_ids(repaired)
+    )
+
+
+def repair_document(
+    document: DocumentIR,
+    *,
+    provider: object | None = None,
+    model: str = "",
+) -> StructureRepairResult:
+    """Return a conservative normalized copy and a replayable audit trace."""
+    raw_hash = _document_hash(document)
+    repaired = deepcopy(document)
+    operations: list[StructureRepairOperation] = []
+    decisions: list[StructureRepairDecision] = []
+    rejected: list[RejectedStructureCandidate] = []
+    warnings: list[str] = []
+
+    _normalize_titles(repaired, operations)
+    _demote_generic_sections(repaired, operations)
+    _promote_numbered_paragraphs(repaired, operations)
+    _remove_noise(repaired, operations)
+    _merge_certain_paragraphs(repaired, operations)
+    _merge_table_fragments(repaired, operations)
+    _adjudicate_paragraph_fragments(
+        repaired,
+        provider,
+        model,
+        operations,
+        decisions,
+        rejected,
+    )
+    _adjudicate_unnumbered_sections(
+        repaired,
+        provider,
+        model,
+        operations,
+        decisions,
+        rejected,
+    )
+    _rebuild_plain_text(repaired)
+
+    if not _content_is_conserved(document, repaired, operations):
+        fallback = deepcopy(document)
+        fallback_hash = _document_hash(fallback)
+        trace = StructureRepairTrace(
+            schema_version=SCHEMA_VERSION,
+            algorithm_version=ALGORITHM_VERSION,
+            doc_id=document.doc_id,
+            raw_hash=raw_hash,
+            normalized_hash=fallback_hash,
+            status="fallback",
+            operations=operations,
+            decisions=decisions,
+            rejected=rejected,
+            warnings=["content_conservation_failed"],
+        )
+        return StructureRepairResult(
+            document=fallback,
+            trace=trace,
+            status="fallback",
+            warnings=["content_conservation_failed"],
+        )
+
+    status = "repaired" if operations else "unchanged"
+    trace = StructureRepairTrace(
+        schema_version=SCHEMA_VERSION,
+        algorithm_version=ALGORITHM_VERSION,
+        doc_id=document.doc_id,
+        raw_hash=raw_hash,
+        normalized_hash=_document_hash(repaired),
+        status=status,
+        operations=operations,
+        decisions=decisions,
+        rejected=rejected,
+        warnings=warnings,
+    )
+    return StructureRepairResult(
+        document=repaired,
+        trace=trace,
+        status=status,
+        warnings=warnings,
+    )

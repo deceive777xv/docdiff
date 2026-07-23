@@ -96,3 +96,46 @@ def test_graph_happy_path(tmp_path):
     assert result["doc_id"] == "doc-123"
     assert result["version_id"] == "ver-456"
     assert result["status"] == "completed"
+
+
+def test_save_document_uses_normalized_ir_for_chunks(tmp_path):
+    from app.agent.ingest_graph import save_document
+    from app.core.types import DocumentIR, Paragraph, Section, Sentence
+
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF-1.4 test")
+    raw = DocumentIR(
+        doc_id="graph-repair",
+        title="Graph",
+        file_hash="graph-hash",
+        sections=[
+            Section(
+                "s1",
+                "**1.1 图流程**",
+                2,
+                [Paragraph("p1", "正文。", [Sentence("正文。")], 1)],
+            )
+        ],
+        plain_text="正文。",
+    )
+
+    with (
+        patch("app.agent.ingest_graph.document_repo.insert_document", return_value="doc"),
+        patch("app.agent.ingest_graph.document_repo.insert_version", return_value="version"),
+        patch("app.agent.ingest_graph.chunk_repo.insert_chunks") as insert_chunks,
+    ):
+        result = save_document(
+            {
+                "file_path": str(source),
+                "data_dir": str(tmp_path),
+                "source_type": "standard",
+                "conn": MagicMock(),
+                "_file_hash": "file-hash",
+                "_ir": raw,
+            }
+        )
+
+    assert result["status"] == "saved"
+    assert result["_ir"].sections[0].title == "1.1 图流程"
+    assert result["_chunks"][0].section_path == "1.1 图流程"
+    insert_chunks.assert_called_once()

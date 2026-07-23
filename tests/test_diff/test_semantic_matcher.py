@@ -736,3 +736,65 @@ def test_ordinary_paragraph_matches_are_monotonic():
         left[1] < right[1]
         for left, right in zip(matched_indices, matched_indices[1:])
     )
+
+
+def test_unique_long_text_can_match_across_parent_child_section_split():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    shared = "车门电动打开过程中遇到障碍物时立即停止，并悬停在当前位置。"
+    baseline = DocumentIR(
+        "baseline",
+        "Baseline",
+        "hash-a",
+        [
+            make_section("1.1.18 中断处理功能", []),
+            make_section("附表：悬停方式对应悬停动作", [make_para(shared)]),
+        ],
+    )
+    target = DocumentIR(
+        "target",
+        "Target",
+        "hash-b",
+        [make_section("1.1.18 中断处理功能", [make_para(shared)])],
+    )
+
+    pairs = match_paragraphs(
+        align_sections(baseline, target),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0].baseline_para is not None
+    assert pairs[0].target_para is not None
+    assert pairs[0].similarity == 1.0
+
+
+def test_unique_same_section_short_text_ignores_markdown_list_marker():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    baseline = make_section(
+        "1.1.4 开启关闭防夹功能",
+        [make_para("A）工作条件"), make_para("旧版上下文。")],
+    )
+    target = make_section(
+        "1.1.4 开启关闭防夹功能",
+        [make_para("- A）工作条件"), make_para("新版上下文。")],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        MockEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    headings = [
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None
+        and pair.baseline_para.text == "A）工作条件"
+    ]
+    assert len(headings) == 1
+    assert headings[0].target_para is not None
+    assert headings[0].target_para.text == "- A）工作条件"

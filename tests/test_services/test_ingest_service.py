@@ -1,6 +1,9 @@
 """Tests for app/services/ingest_service.py"""
 from __future__ import annotations
 
+import json
+from unittest.mock import patch
+
 import pytest
 
 
@@ -67,3 +70,46 @@ def test_ingest_inserts_chunks(tmp_path, docx_file, db_conn):
 
     chunks = get_chunks_by_version(db_conn, version_id)
     assert len(chunks) > 0
+
+
+def test_ingest_persists_raw_and_indexes_normalized_ir(tmp_path, docx_file, db_conn):
+    from app.core.types import DocumentIR, Paragraph, ParseQualityReport, Section, Sentence
+    from app.db import chunk_repo, document_repo
+    from app.services.ingest_service import ingest_document
+
+    raw = DocumentIR(
+        doc_id="repair-doc",
+        title="Repair",
+        file_hash="repair-hash",
+        sections=[
+            Section(
+                "s1",
+                "**1.1 测试**",
+                2,
+                [Paragraph("p1", "正文。", [Sentence("正文。")], 1)],
+            )
+        ],
+        plain_text="正文。",
+    )
+    quality = ParseQualityReport(quality_score=1.0, needs_ocr=False)
+
+    with patch(
+        "app.services.ingest_service.parse_document",
+        return_value=(raw, quality),
+    ):
+        _, version_id = ingest_document(
+            db_conn,
+            str(tmp_path),
+            str(docx_file),
+            embedder=None,
+        )
+
+    version = document_repo.get_version_by_id(db_conn, version_id)
+    normalized_path = tmp_path / "parsed" / "repair-doc.json"
+    assert version["parsed_json_path"] == str(normalized_path)
+    assert (tmp_path / "parsed" / "raw" / "repair-doc.json").exists()
+    assert (tmp_path / "parsed" / "traces" / "repair-doc.structure.json").exists()
+    normalized = json.loads(normalized_path.read_text(encoding="utf-8"))
+    assert normalized["sections"][0]["title"] == "1.1 测试"
+    chunks = chunk_repo.get_chunks_by_version(db_conn, version_id)
+    assert chunks[0]["section_path"] == "1.1 测试"

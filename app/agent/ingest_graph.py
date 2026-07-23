@@ -1,7 +1,5 @@
 """LangGraph StateGraph for the document ingest workflow."""
 from __future__ import annotations
-
-import json
 import logging
 import shutil
 from pathlib import Path
@@ -9,9 +7,9 @@ from pathlib import Path
 from langgraph.graph import END, StateGraph
 
 from app.agent.states import IngestState
-from app.core.document_ir_codec import document_ir_to_dict
 from app.core.parser.ir_builder import build_chunks
 from app.core.parser.router import parse_document
+from app.core.structure_repair.storage import prepare_import_ir
 from app.core.utils import file_hash as compute_file_hash
 from app.db import chunk_repo, document_repo
 
@@ -80,13 +78,14 @@ def save_document(state: IngestState) -> dict:
         if not dest.exists():
             shutil.copy2(str(path), str(dest))
 
-        parsed_dir = Path(data_dir) / "parsed"
-        parsed_dir.mkdir(parents=True, exist_ok=True)
-        ir_path = parsed_dir / f"{ir.doc_id}.json"
-        ir_path.write_text(
-            json.dumps(document_ir_to_dict(ir), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        artifacts = prepare_import_ir(
+            data_dir,
+            ir,
+            provider=state.get("llm_client"),
+            model=state.get("llm_model", ""),
         )
+        ir = artifacts.document
+        ir_path = artifacts.normalized_path
 
         document_id = state.get("document_id")
         if document_id:
@@ -121,7 +120,13 @@ def save_document(state: IngestState) -> dict:
         chunks = build_chunks(ir, version_id)
         chunk_repo.insert_chunks(conn, chunks)
 
-        return {"doc_id": doc_id, "version_id": version_id, "_chunks": chunks, "status": "saved"}
+        return {
+            "doc_id": doc_id,
+            "version_id": version_id,
+            "_ir": ir,
+            "_chunks": chunks,
+            "status": "saved",
+        }
     except Exception as e:
         logger.exception("save_document failed")
         return {"error": str(e), "status": "failed"}

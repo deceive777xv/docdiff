@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+import json
+
+from app.core.types import DocumentIR, Paragraph, Section, Sentence
+
+
+def _raw_document() -> DocumentIR:
+    return DocumentIR(
+        doc_id="raw-doc",
+        title="Raw",
+        file_hash="raw-hash",
+        sections=[
+            Section(
+                "s1",
+                "**1.1 测试**",
+                2,
+                [
+                    Paragraph(
+                        "p1",
+                        "原始正文。",
+                        [Sentence("原始正文。")],
+                        1,
+                    )
+                ],
+            )
+        ],
+        plain_text="原始正文。",
+    )
+
+
+def test_prepare_import_ir_persists_raw_normalized_and_trace(tmp_path):
+    from app.core.structure_repair.storage import prepare_import_ir
+
+    artifacts = prepare_import_ir(tmp_path, _raw_document())
+
+    assert artifacts.raw_path == tmp_path / "parsed" / "raw" / "raw-doc.json"
+    assert artifacts.normalized_path == tmp_path / "parsed" / "raw-doc.json"
+    assert artifacts.trace_path == (
+        tmp_path / "parsed" / "traces" / "raw-doc.structure.json"
+    )
+    raw = json.loads(artifacts.raw_path.read_text(encoding="utf-8"))
+    normalized = json.loads(artifacts.normalized_path.read_text(encoding="utf-8"))
+    trace = json.loads(artifacts.trace_path.read_text(encoding="utf-8"))
+    assert raw["sections"][0]["title"] == "**1.1 测试**"
+    assert normalized["sections"][0]["title"] == "1.1 测试"
+    assert trace["status"] == "repaired"
+    assert trace["raw_hash"] != trace["normalized_hash"]
+
+
+def test_prepare_import_ir_falls_back_to_raw_when_repair_raises(
+    tmp_path,
+    monkeypatch,
+):
+    from app.core.structure_repair import storage
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("repair failed")
+
+    monkeypatch.setattr(storage, "repair_document", fail)
+
+    artifacts = storage.prepare_import_ir(tmp_path, _raw_document())
+
+    raw = json.loads(artifacts.raw_path.read_text(encoding="utf-8"))
+    normalized = json.loads(artifacts.normalized_path.read_text(encoding="utf-8"))
+    trace = json.loads(artifacts.trace_path.read_text(encoding="utf-8"))
+    assert normalized == raw
+    assert artifacts.document == _raw_document()
+    assert trace["status"] == "fallback"
+    assert trace["warnings"] == ["RuntimeError: repair failed"]

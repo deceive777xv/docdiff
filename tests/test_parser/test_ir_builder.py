@@ -7,6 +7,14 @@ from app.core.types import DocumentIR, Section, Paragraph, Sentence
 from app.core.parser.ir_builder import build_chunks
 
 
+def _make_paragraph(text: str) -> Paragraph:
+    return Paragraph(
+        paragraph_id=str(uuid.uuid4()),
+        text=text,
+        sentences=[Sentence(text=text)],
+    )
+
+
 def _make_ir(sections_data: list[tuple[str, list[tuple[str, list[str]]]]]) -> DocumentIR:
     """Helper: build a DocumentIR from (section_title, [(para_text, [sent_text, ...]), ...])."""
     sections = []
@@ -115,3 +123,26 @@ def test_chunks_inherit_paragraph_page_number():
     chunks = build_chunks(ir, "v1")
 
     assert chunks[0].page_no == 3
+
+
+def test_chunks_use_hierarchical_section_path():
+    ir = DocumentIR(
+        doc_id="doc",
+        title="Title",
+        file_hash="hash",
+        sections=[
+            Section("s1", "1 总则", 1, [_make_paragraph("总则正文")]),
+            Section("s2", "1.1 功能", 2, [_make_paragraph("功能正文")]),
+            Section("s3", "附表", 3, [_make_paragraph("附表正文")]),
+            Section("s4", "2 其他", 1, [_make_paragraph("其他正文")]),
+        ],
+    )
+
+    chunks = build_chunks(ir, "v1")
+
+    assert [chunk.section_path for chunk in chunks] == [
+        "1 总则",
+        "1 总则 > 1.1 功能",
+        "1 总则 > 1.1 功能 > 附表",
+        "2 其他",
+    ]
