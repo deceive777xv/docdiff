@@ -52,6 +52,7 @@ def make_trace_with_every_operation() -> ReconstructionTrace:
                     },
                     row_action="merge",
                     table_action="merge_fragments",
+                    mapping_id="candidate-1:mapping:0",
                 ),
                 final_action="merge",
                 boundary_id="boundary-1",
@@ -103,6 +104,13 @@ def test_trace_round_trip_preserves_typed_mappings_and_llm_judgment(tmp_path):
     assert restored.algorithm_version == "cross-page-table-v2"
     assert restored.decisions[0].previous_page_no == 4
     assert restored.decisions[0].llm.roles["continuation_row"] == "continuation_row"
+    assert restored.decisions[0].llm.mapping_id == "candidate-1:mapping:0"
+
+
+def test_trace_dict_round_trip_preserves_mapping_id():
+    restored = trace_from_dict(trace_to_dict(make_trace_with_every_operation()))
+
+    assert restored.decisions[0].llm.mapping_id == "candidate-1:mapping:0"
 
 
 @pytest.mark.parametrize(
@@ -131,6 +139,7 @@ def test_trace_loader_accepts_legacy_v1_payload():
         decision.pop("next_page_no", None)
         decision.pop("context_refs", None)
         if decision["llm"] is not None:
+            decision["llm"].pop("mapping_id", None)
             decision["llm"].pop("roles", None)
             decision["llm"].pop("row_action", None)
             decision["llm"].pop("table_action", None)
@@ -141,6 +150,7 @@ def test_trace_loader_accepts_legacy_v1_payload():
     assert restored.algorithm_version == "cross-page-table-v1"
     assert restored.decisions[0].boundary_id == ""
     assert restored.decisions[0].llm.roles == {}
+    assert restored.decisions[0].llm.mapping_id == ""
 
 
 def test_trace_rejects_document_identity_mismatch():

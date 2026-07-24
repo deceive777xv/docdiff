@@ -10,6 +10,8 @@ class SectionPair:
     baseline_section: Section | None
     target_section: Section | None
     title_similarity: float   # 0.0–1.0
+    baseline_index: int | None = None
+    target_index: int | None = None
 
 
 def _title_similarity(a: str, b: str) -> float:
@@ -38,7 +40,7 @@ def align_sections(
     paired: list[SectionPair] = []
     target_used = set()
 
-    for b_sec in baseline.sections:
+    for baseline_index, b_sec in enumerate(baseline.sections):
         best_sim = 0.0
         best_t = None
         for i, t_sec in enumerate(target.sections):
@@ -55,6 +57,8 @@ def align_sections(
                 baseline_section=b_sec,
                 target_section=best_t[1],
                 title_similarity=best_sim,
+                baseline_index=baseline_index,
+                target_index=best_t[0],
             ))
         else:
             # Baseline section not found in target → deleted
@@ -62,6 +66,7 @@ def align_sections(
                 baseline_section=b_sec,
                 target_section=None,
                 title_similarity=0.0,
+                baseline_index=baseline_index,
             ))
 
     # Remaining target sections not matched → added
@@ -71,6 +76,7 @@ def align_sections(
                 baseline_section=None,
                 target_section=t_sec,
                 title_similarity=0.0,
+                target_index=i,
             ))
 
     return paired

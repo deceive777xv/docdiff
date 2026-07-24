@@ -798,3 +798,106 @@ def test_unique_same_section_short_text_ignores_markdown_list_marker():
     assert len(headings) == 1
     assert headings[0].target_para is not None
     assert headings[0].target_para.text == "- A）工作条件"
+
+
+def test_parent_section_scope_matches_one_child_paragraph_to_two_parent_paragraphs():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    baseline_parent = make_section("1.1.28 附件功能", [])
+    baseline_parent.level = 3
+    baseline_child = make_section(
+        "失效保护",
+        [
+            make_para(
+                "当检测到系统存在故障时，域控记录故障码并通过CAN向诊断仪输出。"
+            )
+        ],
+    )
+    baseline_child.level = 4
+    target_parent = make_section(
+        "1.1.28 附件功能",
+        [
+            make_para("当检测到系统存在故障时，域控记录故障码"),
+            make_para("并通过CAN向诊断仪输出。"),
+        ],
+    )
+    target_parent.level = 3
+    baseline = DocumentIR(
+        "baseline",
+        "Baseline",
+        "hash-a",
+        [baseline_parent, baseline_child],
+    )
+    target = DocumentIR(
+        "target",
+        "Target",
+        "hash-b",
+        [target_parent],
+    )
+
+    pairs = match_paragraphs(
+        align_sections(baseline, target),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    matched = [
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    ]
+    assert len(matched) == 1
+    assert matched[0].baseline_para.text == (
+        "当检测到系统存在故障时，域控记录故障码并通过CAN向诊断仪输出。"
+    )
+    assert matched[0].target_para.text == (
+        "当检测到系统存在故障时，域控记录故障码\n并通过CAN向诊断仪输出。"
+    )
+    assert matched[0].section_path == "失效保护"
+    assert matched[0].split_unit is True
+    assert not any(
+        pair.baseline_para is None or pair.target_para is None
+        for pair in pairs
+    )
+
+
+def test_exact_window_matches_one_paragraph_to_three_adjacent_paragraphs():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    baseline = make_section(
+        "正文",
+        [
+            make_para(
+                "系统检测到故障后记录故障码，并通过CAN向诊断仪输出，"
+                "以便维修人员查询具体故障信息。"
+            )
+        ],
+    )
+    target = make_section(
+        "正文",
+        [
+            make_para("系统检测到故障后记录故障码，"),
+            make_para("并通过CAN向诊断仪输出，"),
+            make_para("以便维修人员查询具体故障信息。"),
+        ],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    matched = [
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    ]
+    assert len(matched) == 1
+    assert matched[0].target_para.text.count("\n") == 2
+    assert matched[0].similarity == 1.0
+    assert not any(
+        pair.baseline_para is None or pair.target_para is None
+        for pair in pairs
+    )

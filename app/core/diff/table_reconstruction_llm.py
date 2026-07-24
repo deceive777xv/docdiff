@@ -11,7 +11,16 @@ from app.core.diff.table_reconstruction import ContinuationCandidate, TableRowMa
 from app.core.model.base_provider import BaseProvider
 
 
-_RESPONSE_FIELDS = {
+_ATOMIC_RESPONSE_FIELDS = {
+    "boundary_id",
+    "candidate_id",
+    "roles",
+    "action",
+    "mapping_id",
+    "confidence",
+    "reason",
+}
+_LEGACY_RESPONSE_FIELDS = {
     "boundary_id",
     "roles",
     "row_action",
@@ -21,6 +30,7 @@ _RESPONSE_FIELDS = {
 }
 _ROW_ACTIONS = {"merge", "keep"}
 _TABLE_ACTIONS = {"merge_fragments", "keep"}
+_ATOMIC_ACTIONS = {"merge_row", "keep"}
 _ROLES = {
     "body_row",
     "continuation_row",
@@ -33,10 +43,11 @@ _ROLES = {
 _MAX_CROSS_VERSION_ROWS = 3
 _SYSTEM_MESSAGE = (
     "Classify a bounded physical-page boundary and decide table reconstruction actions. "
-    "Return only one JSON object with exactly these fields: boundary_id, roles, row_action, "
-    "table_action, confidence, reason. roles may reference only supplied IDs. row_action "
-    "must be merge or keep; table_action must be merge_fragments or keep. Never invent "
-    "text, IDs, or column mappings. Markdown fences, prose, and extra fields are invalid."
+    "Return only one JSON object with exactly these fields: boundary_id, candidate_id, "
+    "roles, action, mapping_id, confidence, reason. roles may reference only supplied IDs. "
+    "action must be merge_row or keep. mapping_id must be one of the supplied mapping "
+    "candidate IDs. Never invent text, IDs, or column mappings. Markdown fences, prose, "
+    "and extra fields are invalid."
 )
 
 
@@ -114,6 +125,7 @@ def _prompt_payload(
 ) -> dict[str, object]:
     previous_mapping = candidate.previous_mapping.logical_by_physical
     boundary_id = context.boundary_id if context is not None else candidate.candidate_id
+    mapping_id = f"{candidate.candidate_id}:mapping:0"
     return {
         "boundary_id": boundary_id,
         "candidate_id": candidate.candidate_id,
@@ -139,6 +151,18 @@ def _prompt_payload(
                 for physical, logical in sorted(candidate.mapping.logical_by_physical.items())
             ],
         },
+        "mapping_candidates": [
+            {
+                "mapping_id": mapping_id,
+                "logical_by_physical": [
+                    [physical, logical]
+                    for physical, logical in sorted(
+                        candidate.mapping.logical_by_physical.items()
+                    )
+                ],
+                "score": candidate.mapping.score,
+            }
+        ],
         "rule_evidence": list(candidate.evidence),
         "rule_conflicts": list(dict.fromkeys((*candidate.conflicts, *candidate.vetoes))),
         "cross_version_rows": [
@@ -164,7 +188,13 @@ def _parse_response(
     context: TableBoundaryContext | None,
 ) -> LLMJudgment | None:
     data = json.loads(response, object_pairs_hook=_reject_duplicate_members)
-    if not isinstance(data, dict) or set(data) != _RESPONSE_FIELDS:
+    if not isinstance(data, dict):
+        return None
+    response_fields = frozenset(data)
+    if response_fields not in {
+        frozenset(_ATOMIC_RESPONSE_FIELDS),
+        frozenset(_LEGACY_RESPONSE_FIELDS),
+    }:
         return None
     boundary_id = context.boundary_id if context is not None else candidate.candidate_id
     if data["boundary_id"] != boundary_id:
@@ -187,10 +217,23 @@ def _parse_response(
         for item_id, role in roles.items()
     ):
         return None
-    row_action = data["row_action"]
+    if response_fields == _ATOMIC_RESPONSE_FIELDS:
+        if data["candidate_id"] != candidate.candidate_id:
+            return None
+        mapping_id = f"{candidate.candidate_id}:mapping:0"
+        if data["mapping_id"] != mapping_id:
+            return None
+        action = data["action"]
+        if not isinstance(action, str) or action not in _ATOMIC_ACTIONS:
+            return None
+        row_action = "merge" if action == "merge_row" else "keep"
+        table_action = "merge_fragments" if action == "merge_row" else "keep"
+    else:
+        mapping_id = ""
+        row_action = data["row_action"]
+        table_action = data["table_action"]
     if not isinstance(row_action, str) or row_action not in _ROW_ACTIONS:
         return None
-    table_action = data["table_action"]
     if not isinstance(table_action, str) or table_action not in _TABLE_ACTIONS:
         return None
     confidence = data["confidence"]
@@ -213,6 +256,7 @@ def _parse_response(
         ),
         confidence=float(confidence),
         reason=reason,
+        mapping_id=mapping_id,
         roles={str(item_id): str(role) for item_id, role in roles.items()},
         row_action=cast(Literal["merge", "keep"], row_action),
         table_action=cast(Literal["merge_fragments", "keep"], table_action),
@@ -224,7 +268,7 @@ def adjudicate_continuation(
     provider: BaseProvider,
     context: TableBoundaryContext | None = None,
 ) -> LLMJudgment | None:
-    """Ask once for a strict, candidate-bound judgment; invalid output is nonfatal."""
+    """Request a strict candidate-bound judgment, retrying invalid JSON once."""
     messages = [
         {"role": "system", "content": _SYSTEM_MESSAGE},
         {
@@ -239,6 +283,25 @@ def adjudicate_continuation(
     ]
     try:
         response = provider.chat(messages)
+        judgment = _parse_response(response, candidate, provider, context)
+    except Exception:
+        return None
+    if judgment is not None:
+        return judgment
+
+    retry_messages = [
+        {
+            "role": "system",
+            "content": (
+                _SYSTEM_MESSAGE
+                + " The previous response failed strict validation. Correct only the JSON "
+                "shape and reuse the supplied IDs."
+            ),
+        },
+        messages[1],
+    ]
+    try:
+        response = provider.chat(retry_messages)
         return _parse_response(response, candidate, provider, context)
     except Exception:
         return None

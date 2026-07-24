@@ -11,7 +11,7 @@ import numpy as np
 
 from app.core.diff.structure_aligner import SectionPair
 from app.core.model.base_provider import BaseProvider
-from app.core.types import Paragraph, Sentence
+from app.core.types import Paragraph, Section, Sentence
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,14 @@ class _ParagraphUnit:
     match_text: str | None = None
     table_values: list[str] | None = None
     table_header: bool = False
+    section_path: str = ""
+
+
+@dataclass
+class _SectionMatchScope:
+    baseline_sections: list[Section]
+    target_sections: list[Section]
+    title: str
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -65,6 +73,9 @@ _LLM_RERANK_MIN_SCORE = 0.45
 _LLM_RERANK_MIN_CONFIDENCE = 0.6
 _LLM_CONFLICT_MAX_BASELINES = 6
 _LLM_CONFLICT_MAX_TARGETS = 8
+_EXACT_WINDOW_MAX_UNITS = 3
+_EXACT_WINDOW_MIN_CHARS = 24
+_EXACT_WINDOW_MAX_CHARS = 2000
 
 _MATCH_RERANK_PROMPT = """你是文档表格行匹配助手。请判断“基准行”应该和哪一个候选行视为同一条记录。
 
@@ -759,7 +770,10 @@ def _should_split_para(para: Paragraph) -> bool:
     return len(sentences) > 1
 
 
-def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
+def _expand_paragraphs(
+    paras: list[Paragraph],
+    section_path: str = "",
+) -> list[_ParagraphUnit]:
     units: list[_ParagraphUnit] = []
     for para in paras:
         if not _should_split_para(para):
@@ -782,6 +796,7 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
                         if is_table_row
                         else None
                     ),
+                    section_path=section_path,
                 )
             )
             continue
@@ -809,6 +824,7 @@ def _expand_paragraphs(paras: list[Paragraph]) -> list[_ParagraphUnit]:
                     match_text=_table_row_match_text(text) if is_table else text,
                     table_values=_table_row_values(text) if is_table else None,
                     table_header=_looks_like_structural_table_header(text, following) if is_table else False,
+                    section_path=section_path,
                 )
             )
     return units
@@ -975,6 +991,262 @@ def _select_monotonic_ordinary_matches(
     return selected
 
 
+def _section_match_scopes(pairs: list[SectionPair]) -> list[_SectionMatchScope]:
+    scopes: list[_SectionMatchScope] = []
+    scope_by_pair: dict[int, _SectionMatchScope] = {}
+
+    for pair in pairs:
+        if pair.baseline_section is None or pair.target_section is None:
+            continue
+        scope = _SectionMatchScope(
+            baseline_sections=[pair.baseline_section],
+            target_sections=[pair.target_section],
+            title=pair.baseline_section.title or pair.target_section.title,
+        )
+        scopes.append(scope)
+        scope_by_pair[id(pair)] = scope
+
+    def attach_side(side: str) -> None:
+        entries: list[tuple[int, Section, SectionPair]] = []
+        for pair in pairs:
+            section = (
+                pair.baseline_section
+                if side == "baseline"
+                else pair.target_section
+            )
+            index = (
+                pair.baseline_index
+                if side == "baseline"
+                else pair.target_index
+            )
+            if section is not None and index is not None:
+                entries.append((index, section, pair))
+
+        stack: list[tuple[int, _SectionMatchScope]] = []
+        for _, section, pair in sorted(entries, key=lambda item: item[0]):
+            while stack and stack[-1][0] >= section.level:
+                stack.pop()
+
+            scope = scope_by_pair.get(id(pair))
+            if scope is None:
+                scope = stack[-1][1] if stack else None
+                if scope is None:
+                    scope = _SectionMatchScope(
+                        baseline_sections=[],
+                        target_sections=[],
+                        title=section.title,
+                    )
+                    scopes.append(scope)
+                if side == "baseline":
+                    scope.baseline_sections.append(section)
+                else:
+                    scope.target_sections.append(section)
+                scope_by_pair[id(pair)] = scope
+
+            stack.append((section.level, scope))
+
+    attach_side("baseline")
+    attach_side("target")
+
+    for pair in pairs:
+        if id(pair) in scope_by_pair:
+            continue
+        baseline_sections = (
+            [pair.baseline_section] if pair.baseline_section is not None else []
+        )
+        target_sections = (
+            [pair.target_section] if pair.target_section is not None else []
+        )
+        title = (
+            pair.baseline_section.title
+            if pair.baseline_section is not None
+            else pair.target_section.title
+            if pair.target_section is not None
+            else ""
+        )
+        scope = _SectionMatchScope(baseline_sections, target_sections, title)
+        scopes.append(scope)
+        scope_by_pair[id(pair)] = scope
+
+    return scopes
+
+
+def _window_normalized_text(units: list[_ParagraphUnit]) -> str:
+    return "".join(_normalize_match_text(_unit_match_text(unit)) for unit in units)
+
+
+def _merge_window_units(units: list[_ParagraphUnit]) -> _ParagraphUnit:
+    source_ids = [unit.para.paragraph_id for unit in units]
+    text = "\n".join(unit.para.text for unit in units)
+    match_text = "\n".join(_unit_match_text(unit) for unit in units)
+    sentences = [
+        sentence
+        for unit in units
+        for sentence in unit.para.sentences
+    ]
+    return _ParagraphUnit(
+        para=Paragraph(
+            paragraph_id="window:" + ":".join(source_ids),
+            text=text,
+            sentences=sentences,
+            page_no=units[0].para.page_no,
+        ),
+        split_unit=True,
+        match_text=match_text,
+        section_path=next(
+            (unit.section_path for unit in units if unit.section_path),
+            "",
+        ),
+    )
+
+
+def _exact_adjacent_window_matches(
+    b_units: list[_ParagraphUnit],
+    t_units: list[_ParagraphUnit],
+) -> list[
+    tuple[
+        tuple[int, ...],
+        tuple[int, ...],
+        _ParagraphUnit,
+        _ParagraphUnit,
+    ]
+]:
+    baseline_single = [
+        _normalize_match_text(_unit_match_text(unit))
+        for unit in b_units
+    ]
+    target_single = [
+        _normalize_match_text(_unit_match_text(unit))
+        for unit in t_units
+    ]
+    baseline_positions: dict[str, list[int]] = {}
+    target_positions: dict[str, list[int]] = {}
+    for index, normalized in enumerate(baseline_single):
+        if normalized:
+            baseline_positions.setdefault(normalized, []).append(index)
+    for index, normalized in enumerate(target_single):
+        if normalized:
+            target_positions.setdefault(normalized, []).append(index)
+    anchored_baseline: set[int] = set()
+    anchored_target: set[int] = set()
+    for normalized, baseline_indexes in baseline_positions.items():
+        target_indexes = target_positions.get(normalized, [])
+        if len(baseline_indexes) == len(target_indexes) == 1:
+            anchored_baseline.add(baseline_indexes[0])
+            anchored_target.add(target_indexes[0])
+
+    def windows(
+        units: list[_ParagraphUnit],
+        anchored: set[int],
+    ) -> dict[str, list[tuple[tuple[int, ...], _ParagraphUnit]]]:
+        by_text: dict[
+            str,
+            list[tuple[tuple[int, ...], _ParagraphUnit]],
+        ] = {}
+        for size in range(1, _EXACT_WINDOW_MAX_UNITS + 1):
+            for start in range(len(units) - size + 1):
+                indexes = tuple(range(start, start + size))
+                if anchored.intersection(indexes):
+                    continue
+                window = units[start : start + size]
+                if not all(_is_ordinary_unit(unit) for unit in window):
+                    continue
+                normalized = _window_normalized_text(window)
+                if not (
+                    _EXACT_WINDOW_MIN_CHARS
+                    <= len(normalized)
+                    <= _EXACT_WINDOW_MAX_CHARS
+                ):
+                    continue
+                by_text.setdefault(normalized, []).append(
+                    (
+                        indexes,
+                        window[0] if size == 1 else _merge_window_units(window),
+                    )
+                )
+        return by_text
+
+    baseline_windows = windows(b_units, anchored_baseline)
+    target_windows = windows(t_units, anchored_target)
+    candidates: list[
+        tuple[
+            tuple[int, ...],
+            tuple[int, ...],
+            _ParagraphUnit,
+            _ParagraphUnit,
+            str,
+        ]
+    ] = []
+    for normalized in baseline_windows.keys() & target_windows.keys():
+        for baseline_indexes, baseline_unit in baseline_windows[normalized]:
+            for target_indexes, target_unit in target_windows[normalized]:
+                if len(baseline_indexes) == len(target_indexes) == 1:
+                    continue
+                if (
+                    len(baseline_indexes) == len(target_indexes)
+                    and all(
+                        baseline_single[baseline_index]
+                        == target_single[target_index]
+                        for baseline_index, target_index in zip(
+                            baseline_indexes,
+                            target_indexes,
+                        )
+                    )
+                ):
+                    continue
+                candidates.append(
+                    (
+                        baseline_indexes,
+                        target_indexes,
+                        baseline_unit,
+                        target_unit,
+                        normalized,
+                    )
+                )
+
+    signature_counts: dict[tuple[int, int, str], int] = {}
+    for baseline_indexes, target_indexes, _, _, normalized in candidates:
+        signature = (len(baseline_indexes), len(target_indexes), normalized)
+        signature_counts[signature] = signature_counts.get(signature, 0) + 1
+
+    selected = []
+    used_baseline: set[int] = set()
+    used_target: set[int] = set()
+    last_baseline = -1
+    last_target = -1
+    for baseline_indexes, target_indexes, baseline_unit, target_unit, normalized in sorted(
+        candidates,
+        key=lambda item: (
+            item[0][0],
+            item[1][0],
+            len(item[0]) + len(item[1]),
+        ),
+    ):
+        signature = (len(baseline_indexes), len(target_indexes), normalized)
+        if signature_counts[signature] != 1:
+            continue
+        if (
+            baseline_indexes[0] <= last_baseline
+            or target_indexes[0] <= last_target
+            or used_baseline.intersection(baseline_indexes)
+            or used_target.intersection(target_indexes)
+        ):
+            continue
+        selected.append(
+            (
+                baseline_indexes,
+                target_indexes,
+                baseline_unit,
+                target_unit,
+            )
+        )
+        used_baseline.update(baseline_indexes)
+        used_target.update(target_indexes)
+        last_baseline = baseline_indexes[-1]
+        last_target = target_indexes[-1]
+    return selected
+
+
 def match_paragraphs(
     pairs: list[SectionPair],
     embedder: BaseProvider,
@@ -990,17 +1262,20 @@ def match_paragraphs(
     """
     results: list[ParagraphPair] = []
 
-    for sp in pairs:
-        b_paras = sp.baseline_section.paragraphs if sp.baseline_section else []
-        t_paras = sp.target_section.paragraphs if sp.target_section else []
-        b_units = _expand_paragraphs(b_paras)
-        t_units = _expand_paragraphs(t_paras)
+    for scope in _section_match_scopes(pairs):
+        b_units = [
+            unit
+            for section in scope.baseline_sections
+            for unit in _expand_paragraphs(section.paragraphs, section.title)
+        ]
+        t_units = [
+            unit
+            for section in scope.target_sections
+            for unit in _expand_paragraphs(section.paragraphs, section.title)
+        ]
         b_header_counts = _table_header_signature_counts(b_units)
         t_header_counts = _table_header_signature_counts(t_units)
-        sec_path = (
-            sp.baseline_section.title if sp.baseline_section else
-            sp.target_section.title if sp.target_section else ""
-        ) or ""
+        sec_path = scope.title or ""
 
         if not b_units and not t_units:
             continue
@@ -1017,7 +1292,7 @@ def match_paragraphs(
                     None,
                     unit.para,
                     0.0,
-                    section_path=sec_path,
+                    section_path=unit.section_path or sec_path,
                     split_unit=unit.split_unit,
                     target_match_text=unit.match_text,
                     target_table_header=unit.table_header,
@@ -1034,7 +1309,7 @@ def match_paragraphs(
                     unit.para,
                     None,
                     0.0,
-                    section_path=sec_path,
+                    section_path=unit.section_path or sec_path,
                     split_unit=unit.split_unit,
                     baseline_match_text=unit.match_text,
                     baseline_table_header=unit.table_header,
@@ -1052,12 +1327,27 @@ def match_paragraphs(
         all_embeds = embedder.embed(all_texts)
         b_embeds = all_embeds[: len(b_units)]
         t_embeds = all_embeds[len(b_units) :]
+        window_matches = _exact_adjacent_window_matches(b_units, t_units)
+        window_baseline_used = {
+            index
+            for baseline_indexes, _, _, _ in window_matches
+            for index in baseline_indexes
+        }
+        window_target_used = {
+            index
+            for _, target_indexes, _, _ in window_matches
+            for index in target_indexes
+        }
 
         candidates: list[tuple[float, float, int, int]] = []
         candidates_by_baseline: dict[int, list[tuple[float, int]]] = {}
         rerank_floor = min(similarity_threshold, _LLM_RERANK_MIN_SCORE)
         for i, b_unit in enumerate(b_units):
+            if i in window_baseline_used:
+                continue
             for j, t_unit in enumerate(t_units):
+                if j in window_target_used:
+                    continue
                 if _is_ordinary_unit(b_unit) != _is_ordinary_unit(t_unit):
                     continue
                 b_match_text = _unit_match_text(b_unit)
@@ -1130,7 +1420,7 @@ def match_paragraphs(
         )
         t_used: set[int] = {
             target_index for target_index, _ in b_matched.values()
-        }
+        } | window_target_used
         for _, sim, i, j in sorted(candidates, key=lambda item: (-item[0], item[2], item[3])):
             if _is_ordinary_unit(b_units[i]):
                 continue
@@ -1141,7 +1431,28 @@ def match_paragraphs(
             b_matched[i] = (j, sim)
             t_used.add(j)
 
+        for _, _, baseline_unit, target_unit in window_matches:
+            baseline_match_text, target_match_text = _classification_texts(
+                baseline_unit,
+                target_unit,
+            )
+            results.append(ParagraphPair(
+                baseline_unit.para,
+                target_unit.para,
+                1.0,
+                section_path=(
+                    baseline_unit.section_path
+                    or target_unit.section_path
+                    or sec_path
+                ),
+                split_unit=True,
+                baseline_match_text=baseline_match_text,
+                target_match_text=target_match_text,
+            ))
+
         for i, b_unit in enumerate(b_units):
+            if i in window_baseline_used:
+                continue
             if i in b_matched:
                 best_j, similarity = b_matched[i]
                 target_unit = t_units[best_j]
@@ -1150,7 +1461,11 @@ def match_paragraphs(
                     b_unit.para,
                     target_unit.para,
                     similarity,
-                    section_path=sec_path,
+                    section_path=(
+                        b_unit.section_path
+                        or target_unit.section_path
+                        or sec_path
+                    ),
                     split_unit=b_unit.split_unit or target_unit.split_unit,
                     baseline_match_text=baseline_match_text,
                     target_match_text=target_match_text,
@@ -1167,7 +1482,7 @@ def match_paragraphs(
                     b_unit.para,
                     None,
                     0.0,
-                    section_path=sec_path,
+                    section_path=b_unit.section_path or sec_path,
                     split_unit=b_unit.split_unit,
                     baseline_match_text=b_unit.match_text,
                     baseline_table_header=b_unit.table_header,
@@ -1184,7 +1499,7 @@ def match_paragraphs(
                     None,
                     t_unit.para,
                     0.0,
-                    section_path=sec_path,
+                    section_path=t_unit.section_path or sec_path,
                     split_unit=t_unit.split_unit,
                     target_match_text=t_unit.match_text,
                     target_table_header=t_unit.table_header,

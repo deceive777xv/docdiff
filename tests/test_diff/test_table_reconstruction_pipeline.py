@@ -51,7 +51,10 @@ class EchoMergeProvider(BaseProvider):
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         payload = json.loads(messages[-1]["content"])
-        return _response(payload["boundary_id"])
+        return _response(
+            payload["candidate_id"],
+            boundary_id=payload["boundary_id"],
+        )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         raise AssertionError("retrieval is outside reconstruction")
@@ -159,17 +162,24 @@ def _stub_candidates(monkeypatch, candidates: list[ContinuationCandidate]):
     return seen_cross_version
 
 
-def _response(candidate_id: str, decision: str = "merge", confidence: float = 0.9) -> str:
+def _response(
+    candidate_id: str,
+    decision: str = "merge",
+    confidence: float = 0.9,
+    *,
+    boundary_id: str | None = None,
+) -> str:
     merge = decision == "merge"
     return json.dumps(
         {
-            "boundary_id": candidate_id,
+            "boundary_id": boundary_id or candidate_id,
+            "candidate_id": candidate_id,
             "roles": {
                 "previous_row": "body_row",
                 "continuation_row": "continuation_row",
             },
-            "row_action": "merge" if merge else "keep",
-            "table_action": "merge_fragments" if merge else "keep",
+            "action": "merge_row" if merge else "keep",
+            "mapping_id": f"{candidate_id}:mapping:0",
             "confidence": confidence,
             "reason": "bounded structural evidence",
         }

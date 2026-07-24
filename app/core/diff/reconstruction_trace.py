@@ -47,6 +47,7 @@ class LLMJudgment:
     decision: Literal["merge", "keep_separate"]
     confidence: float
     reason: str
+    mapping_id: str = ""
     roles: dict[str, str] = field(default_factory=dict)
     row_action: Literal["merge", "keep"] = "keep"
     table_action: Literal["merge_fragments", "keep"] = "keep"
@@ -197,11 +198,17 @@ def _parse_llm(value: object, label: str) -> LLMJudgment | None:
         f"{label}.table_action",
         {"merge_fragments", "keep"},
     )
+    mapping_id = _require_string(
+        data.get("mapping_id", ""),
+        f"{label}.mapping_id",
+        allow_empty=True,
+    )
     return LLMJudgment(
         model=_require_string(data.get("model"), f"{label}.model"),
         decision=decision,
         confidence=float(confidence),
         reason=_require_string(data.get("reason"), f"{label}.reason"),
+        mapping_id=mapping_id,
         roles=cast(dict[str, str], dict(raw_roles)),
         row_action=cast(Literal["merge", "keep"], row_action),
         table_action=cast(Literal["merge_fragments", "keep"], table_action),

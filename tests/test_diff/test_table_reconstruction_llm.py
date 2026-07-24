@@ -138,7 +138,7 @@ def test_adjudicator_rejects_non_strict_responses(response):
     provider = RecordingProvider(response)
 
     assert adjudicate_continuation(make_medium_candidate(), provider) is None
-    assert len(provider.chat_calls) == 1
+    assert len(provider.chat_calls) in {1, 2}
 
 
 @pytest.mark.parametrize("error", [RuntimeError("offline"), TimeoutError("model timeout")])
@@ -178,6 +178,7 @@ def test_adjudicator_sends_only_bounded_structural_context():
         "next_cells",
         "logical_column_roles",
         "physical_mapping",
+        "mapping_candidates",
         "rule_evidence",
         "rule_conflicts",
         "cross_version_rows",
@@ -226,3 +227,79 @@ def test_adjudicator_rejects_roles_outside_the_bounded_context():
     )
 
     assert adjudicate_continuation(make_medium_candidate(), provider) is None
+
+
+def test_adjudicator_accepts_atomic_row_action_with_supplied_mapping_id():
+    class AtomicProvider(RecordingProvider):
+        def __init__(self):
+            super().__init__("")
+
+        def chat(self, messages: list[dict], **kwargs) -> str:
+            self.chat_calls.append(messages)
+            payload = json.loads(messages[-1]["content"])
+            mapping_id = payload["mapping_candidates"][0]["mapping_id"]
+            return json.dumps(
+                {
+                    "boundary_id": payload["boundary_id"],
+                    "candidate_id": payload["candidate_id"],
+                    "action": "merge_row",
+                    "mapping_id": mapping_id,
+                    "roles": {
+                        "previous_row": "body_row",
+                        "continuation_row": "continuation_row",
+                    },
+                    "confidence": 0.93,
+                    "reason": "continuation content belongs to the previous logical row",
+                }
+            )
+
+    provider = AtomicProvider()
+
+    judgment = adjudicate_continuation(make_medium_candidate(), provider)
+
+    assert judgment is not None
+    assert judgment.decision == "merge"
+    assert judgment.row_action == "merge"
+    assert judgment.table_action == "merge_fragments"
+    payload = json.loads(provider.chat_calls[0][-1]["content"])
+    assert judgment.mapping_id == payload["mapping_candidates"][0]["mapping_id"]
+    assert payload["mapping_candidates"][0]["logical_by_physical"] == [
+        [0, 0],
+        [1, 1],
+        [2, 2],
+    ]
+
+
+def test_adjudicator_retries_once_after_invalid_atomic_response():
+    class RetryProvider(RecordingProvider):
+        def __init__(self):
+            super().__init__("")
+
+        def chat(self, messages: list[dict], **kwargs) -> str:
+            self.chat_calls.append(messages)
+            if len(self.chat_calls) == 1:
+                return '{"action":"merge_row"}'
+            payload = json.loads(messages[-1]["content"])
+            return json.dumps(
+                {
+                    "boundary_id": payload["boundary_id"],
+                    "candidate_id": payload["candidate_id"],
+                    "action": "merge_row",
+                    "mapping_id": payload["mapping_candidates"][0]["mapping_id"],
+                    "roles": {
+                        "previous_row": "body_row",
+                        "continuation_row": "continuation_row",
+                    },
+                    "confidence": 0.91,
+                    "reason": "corrected strict response",
+                }
+            )
+
+    provider = RetryProvider()
+
+    judgment = adjudicate_continuation(make_medium_candidate(), provider)
+
+    assert judgment is not None
+    assert judgment.decision == "merge"
+    assert len(provider.chat_calls) == 2
+    assert "validation" in provider.chat_calls[1][0]["content"].lower()

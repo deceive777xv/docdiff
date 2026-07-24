@@ -538,10 +538,11 @@ def build_reconstruction_operations(
         ) + 1
         if (
             previous_logical_width <= 0
-            or previous_logical_width != continuation_logical_width
+            or continuation_logical_width <= 0
+            or continuation_logical_width > previous_logical_width
         ):
             raise ValueError(
-                "participating fragment projections have different logical widths"
+                "continuation projection exceeds the canonical logical width"
             )
         if candidate.previous_row.source not in {
             row.source for row in candidate.previous_fragment_rows
@@ -575,7 +576,7 @@ def build_reconstruction_operations(
                 _retained_row_projection(
                     row,
                     continuation_mapping,
-                    continuation_logical_width,
+                    previous_logical_width,
                 ),
             )
         operations.extend(

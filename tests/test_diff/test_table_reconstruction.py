@@ -1517,7 +1517,7 @@ def test_operation_builder_rejects_conflicting_retained_row_projections():
         )
 
 
-def test_operation_builder_rejects_fragment_projections_with_different_logical_widths():
+def test_operation_builder_rejects_narrow_mapping_that_drops_retained_content():
     left, right, mapping = make_candidate_fragments()
     candidate = generate_continuation_candidates(
         left,
@@ -1536,12 +1536,60 @@ def test_operation_builder_rejects_fragment_projections_with_different_logical_w
         "merge",
     )
 
-    with pytest.raises(ValueError, match="different logical widths"):
+    with pytest.raises(ValueError, match="unmapped retained cells"):
         reconstruction.build_reconstruction_operations(
             [incomplete],
             {"baseline": set(), "target": set()},
             {"baseline": set(), "target": set()},
         )
+
+
+def test_operation_builder_accepts_sparse_continuation_with_fewer_physical_columns():
+    previous = make_row(
+        ("33", "异响", "开关门过程及动态路试无异响，异响值＜", "/"),
+        0,
+        "different-width-left",
+    )
+    continuation = make_row(
+        ("", "", "", "", "", "0.1。", "", "", ""),
+        0,
+        "different-width-right",
+    )
+    candidate = ContinuationCandidate(
+        candidate_id="different-physical-widths",
+        side="baseline",
+        previous_row=previous,
+        continuation_row=continuation,
+        next_full_row=None,
+        mapping=ColumnMapping((5,), {5: 2}, 0.91),
+        previous_mapping=ColumnMapping(
+            (0, 1, 2, 3),
+            {0: 0, 1: 1, 2: 2, 3: 3},
+            1.0,
+        ),
+        previous_fragment_rows=(previous,),
+        continuation_fragment_rows=(continuation,),
+        evidence=EVIDENCE_CODES[:4],
+        conflicts=(),
+        vetoes=(),
+        cross_version_rows=(),
+    )
+
+    operations = reconstruction.build_reconstruction_operations(
+        [CandidateAssessment(candidate, "high", "merge")],
+        {"baseline": set(), "target": set()},
+        {"baseline": set(), "target": set()},
+    )
+
+    continuation_projection = next(
+        operation
+        for operation in operations
+        if operation.type == "project_columns"
+        and operation.source_rows == [continuation.source]
+    )
+    assert continuation_projection.column_mapping == {5: 2}
+    assert any(operation.type == "merge_rows" for operation in operations)
+    assert any(operation.type == "merge_fragments" for operation in operations)
 
 
 def test_operation_builder_rejects_partial_mapping_that_would_drop_retained_cells():
