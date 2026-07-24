@@ -37,6 +37,7 @@ class _ParagraphUnit:
     table_values: list[str] | None = None
     table_header: bool = False
     section_path: str = ""
+    section_level: int = 0
 
 
 @dataclass
@@ -773,6 +774,7 @@ def _should_split_para(para: Paragraph) -> bool:
 def _expand_paragraphs(
     paras: list[Paragraph],
     section_path: str = "",
+    section_level: int = 0,
 ) -> list[_ParagraphUnit]:
     units: list[_ParagraphUnit] = []
     for para in paras:
@@ -797,6 +799,7 @@ def _expand_paragraphs(
                         else None
                     ),
                     section_path=section_path,
+                    section_level=section_level,
                 )
             )
             continue
@@ -825,6 +828,7 @@ def _expand_paragraphs(
                     table_values=_table_row_values(text) if is_table else None,
                     table_header=_looks_like_structural_table_header(text, following) if is_table else False,
                     section_path=section_path,
+                    section_level=section_level,
                 )
             )
     return units
@@ -1084,6 +1088,7 @@ def _merge_window_units(units: list[_ParagraphUnit]) -> _ParagraphUnit:
         for unit in units
         for sentence in unit.para.sentences
     ]
+    most_specific = max(units, key=lambda unit: unit.section_level)
     return _ParagraphUnit(
         para=Paragraph(
             paragraph_id="window:" + ":".join(source_ids),
@@ -1093,11 +1098,24 @@ def _merge_window_units(units: list[_ParagraphUnit]) -> _ParagraphUnit:
         ),
         split_unit=True,
         match_text=match_text,
-        section_path=next(
-            (unit.section_path for unit in units if unit.section_path),
-            "",
-        ),
+        section_path=most_specific.section_path,
+        section_level=most_specific.section_level,
     )
+
+
+def _specific_section_path(
+    baseline_unit: _ParagraphUnit,
+    target_unit: _ParagraphUnit,
+    default: str,
+) -> str:
+    candidates = [
+        unit
+        for unit in (baseline_unit, target_unit)
+        if unit.section_path
+    ]
+    if not candidates:
+        return default
+    return max(candidates, key=lambda unit: unit.section_level).section_path
 
 
 def _exact_adjacent_window_matches(
@@ -1266,12 +1284,20 @@ def match_paragraphs(
         b_units = [
             unit
             for section in scope.baseline_sections
-            for unit in _expand_paragraphs(section.paragraphs, section.title)
+            for unit in _expand_paragraphs(
+                section.paragraphs,
+                section.title,
+                section.level,
+            )
         ]
         t_units = [
             unit
             for section in scope.target_sections
-            for unit in _expand_paragraphs(section.paragraphs, section.title)
+            for unit in _expand_paragraphs(
+                section.paragraphs,
+                section.title,
+                section.level,
+            )
         ]
         b_header_counts = _table_header_signature_counts(b_units)
         t_header_counts = _table_header_signature_counts(t_units)
@@ -1338,6 +1364,22 @@ def match_paragraphs(
             for _, target_indexes, _, _ in window_matches
             for index in target_indexes
         }
+        baseline_window_segments = {
+            index: sum(
+                baseline_indexes[-1] < index
+                for baseline_indexes, _, _, _ in window_matches
+            )
+            for index in range(len(b_units))
+            if index not in window_baseline_used
+        }
+        target_window_segments = {
+            index: sum(
+                target_indexes[-1] < index
+                for _, target_indexes, _, _ in window_matches
+            )
+            for index in range(len(t_units))
+            if index not in window_target_used
+        }
 
         candidates: list[tuple[float, float, int, int]] = []
         candidates_by_baseline: dict[int, list[tuple[float, int]]] = {}
@@ -1347,6 +1389,8 @@ def match_paragraphs(
                 continue
             for j, t_unit in enumerate(t_units):
                 if j in window_target_used:
+                    continue
+                if baseline_window_segments[i] != target_window_segments[j]:
                     continue
                 if _is_ordinary_unit(b_unit) != _is_ordinary_unit(t_unit):
                     continue
@@ -1440,10 +1484,10 @@ def match_paragraphs(
                 baseline_unit.para,
                 target_unit.para,
                 1.0,
-                section_path=(
-                    baseline_unit.section_path
-                    or target_unit.section_path
-                    or sec_path
+                section_path=_specific_section_path(
+                    baseline_unit,
+                    target_unit,
+                    sec_path,
                 ),
                 split_unit=True,
                 baseline_match_text=baseline_match_text,
@@ -1461,10 +1505,10 @@ def match_paragraphs(
                     b_unit.para,
                     target_unit.para,
                     similarity,
-                    section_path=(
-                        b_unit.section_path
-                        or target_unit.section_path
-                        or sec_path
+                    section_path=_specific_section_path(
+                        b_unit,
+                        target_unit,
+                        sec_path,
                     ),
                     split_unit=b_unit.split_unit or target_unit.split_unit,
                     baseline_match_text=baseline_match_text,

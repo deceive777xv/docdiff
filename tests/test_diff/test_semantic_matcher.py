@@ -901,3 +901,76 @@ def test_exact_window_matches_one_paragraph_to_three_adjacent_paragraphs():
         pair.baseline_para is None or pair.target_para is None
         for pair in pairs
     )
+
+
+def test_exact_window_anchor_prevents_crossing_ordinary_match():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    ordinary = "稍后出现的唯一普通段落，用于验证匹配顺序不能跨过窗口锚点。"
+    combined = "系统检测到故障后记录故障码，并通过CAN向诊断仪输出。"
+    baseline = make_section(
+        "正文",
+        [make_para(ordinary), make_para(combined)],
+    )
+    target = make_section(
+        "正文",
+        [
+            make_para("系统检测到故障后记录故障码，"),
+            make_para("并通过CAN向诊断仪输出。"),
+            make_para(ordinary),
+        ],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert any(
+        pair.baseline_para is not None
+        and pair.baseline_para.text == combined
+        and pair.target_para is not None
+        and pair.target_para.text.count("\n") == 1
+        for pair in pairs
+    )
+    assert not any(
+        pair.baseline_para is not None
+        and pair.baseline_para.text == ordinary
+        and pair.target_para is not None
+        for pair in pairs
+    )
+
+
+def test_target_only_child_uses_the_more_specific_section_path():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    text = "目标侧子章节中的稳定正文内容，应保留最具体的章节路径。"
+    baseline_parent = make_section("1.1.28 附件功能", [make_para(text)])
+    baseline_parent.level = 3
+    target_parent = make_section("1.1.28 附件功能", [])
+    target_parent.level = 3
+    target_child = make_section("失效保护", [make_para(text)])
+    target_child.level = 4
+    baseline = DocumentIR("baseline", "Baseline", "hash-a", [baseline_parent])
+    target = DocumentIR(
+        "target",
+        "Target",
+        "hash-b",
+        [target_parent, target_child],
+    )
+
+    pairs = match_paragraphs(
+        align_sections(baseline, target),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    matched = [
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    ]
+    assert len(matched) == 1
+    assert matched[0].section_path == "失效保护"
