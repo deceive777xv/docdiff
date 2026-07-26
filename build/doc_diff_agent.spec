@@ -5,6 +5,7 @@
 # Requirements (run from repo root):
 #   pip install pyinstaller
 #   pyinstaller build/doc_diff_agent.spec
+#   pyinstaller --clean --noconfirm build/doc_diff_agent.spec
 
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -12,8 +13,23 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 ROOT = Path(SPECPATH).parent
 
 # ── Data files ──────────────────────────────────────────────────────────────
+FONT_AWESOME_DIR = ROOT / "assets" / "fonts" / "fontawesome-free-7.2.0-desktop"
+
 datas = [
-    (str(ROOT / "assets"), "assets"),
+    (str(ROOT / "assets" / "diff_template.html"), "assets"),
+    (str(ROOT / "assets" / "icons"), "assets/icons"),
+    (
+        str(ROOT / "assets" / "fonts" / "HarmonyOS_Sans"),
+        "assets/fonts/HarmonyOS_Sans",
+    ),
+    (
+        str(FONT_AWESOME_DIR / "otfs" / "Font Awesome 7 Free-Solid-900.otf"),
+        "assets/fonts/fontawesome-free-7.2.0-desktop/otfs",
+    ),
+    (
+        str(FONT_AWESOME_DIR / "LICENSE.txt"),
+        "assets/fonts/fontawesome-free-7.2.0-desktop",
+    ),
 ]
 
 # PySide6 WebEngine resources

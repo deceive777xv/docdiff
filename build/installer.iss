@@ -2,7 +2,7 @@
 ; Requires: Inno Setup 6 (https://jrsoftware.org/isinfo.php)
 ;
 ; Build steps:
-;   1. pyinstaller build/doc_diff_agent.spec
+;   1. pyinstaller build/doc_diff_agent.spec / pyinstaller --clean --noconfirm build/doc_diff_agent.spec
 ;   2. iscc build/installer.iss
 
 #define AppName      "Doc-Diff-Agent"
