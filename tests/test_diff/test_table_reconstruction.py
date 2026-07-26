@@ -802,6 +802,51 @@ def test_repeated_structural_header_can_precede_a_continuation():
     assert assessment.final_action == "merge"
 
 
+def test_sparse_header_role_row_remains_a_continuation_after_repeated_page_metadata():
+    left, right, mapping = make_candidate_fragments(
+        right_values=(
+            ("page-label", "version-label", "page-number"),
+            ("", "", "suffix"),
+            ("102", "next", "complete"),
+        )
+    )
+    right = replace(
+        right,
+        regions=(
+            TableRegion(right.rows[:2], 0, 2, "header"),
+            TableRegion(right.rows[2:], 2, 3, "body"),
+        ),
+        body_region_indexes=(1,),
+    )
+    peer_metadata = make_row(
+        ("page-label", "version-label", "page-number"),
+        0,
+        "peer-fragment",
+    )
+    peer_body = make_row(("201", "peer", "complete"), 1, "peer-fragment")
+    peer = TableFragment(
+        "section-1",
+        "peer-fragment",
+        1,
+        (peer_metadata, peer_body),
+        (
+            TableRegion((peer_metadata,), 0, 1, "header"),
+            TableRegion((peer_body,), 1, 2, "body"),
+        ),
+        (1,),
+        (0, 1, 2),
+    )
+
+    candidates = generate_continuation_candidates(
+        left, right, mapping, set(), (peer,), "baseline"
+    )
+
+    assert [candidate.continuation_row.source for candidate in candidates] == [
+        right.rows[1].source,
+        right.rows[2].source,
+    ]
+
+
 def test_cross_version_support_evidence_uses_logical_mapping_not_physical_indexes():
     left, right, mapping = make_candidate_fragments(
         left_columns=(0, 2, 4),

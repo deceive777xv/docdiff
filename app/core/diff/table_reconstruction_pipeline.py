@@ -27,6 +27,7 @@ from app.core.diff.table_reconstruction import (
     build_reconstruction_operations,
     classify_repeated_boundary_regions,
     collect_table_fragments,
+    corresponding_peer_fragments,
     generate_continuation_candidates,
     infer_active_columns,
     infer_monotonic_column_mapping,
@@ -44,6 +45,7 @@ from app.core.types import DocumentIR, Paragraph, Section
 _LLM_MERGE_THRESHOLD = 0.75
 _MAX_BOUNDARY_PARAGRAPH_NORMALIZED_LENGTH = 160
 _UNSAFE_FRAGMENT_PROJECTION = "unsafe_fragment_projection"
+_AMBIGUOUS_CONTINUATION_CHOICES = "ambiguous_continuation_choices"
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,137 @@ class ReconstructionResult:
     target_ir: DocumentIR
     section_pairs: list[SectionPair]
     trace: ReconstructionTrace
+
+
+def _occupied_region_columns(fragment: TableFragment, region_index: int) -> set[int]:
+    return {
+        physical_index
+        for row in fragment.regions[region_index].rows
+        for physical_index, occupied in enumerate(row.occupied)
+        if occupied
+    }
+
+
+def _keyed_body_region_columns(
+    fragment: TableFragment,
+) -> tuple[set[int], set[int]]:
+    body_indexes: set[int] = set()
+    active_columns: set[int] = set()
+    for region_index, region in enumerate(fragment.regions):
+        keyed_rows = [
+            row
+            for row in region.rows
+            if row.kind == "content"
+            and sum(row.occupied) >= 2
+            and any(
+                value_type in {"integer", "hierarchical_number"}
+                for value_type in row.value_types
+            )
+        ]
+        if not keyed_rows:
+            continue
+        body_indexes.add(region_index)
+        active_columns.update(
+            physical_index
+            for row in keyed_rows
+            for physical_index, occupied in enumerate(row.occupied)
+            if occupied
+        )
+    return body_indexes, active_columns
+
+
+def _corresponding_peer_active_columns(
+    fragment: TableFragment,
+    peer_fragments: Sequence[TableFragment],
+) -> tuple[int, ...]:
+    width = max((len(row.raw_cells) for row in fragment.rows), default=0)
+    candidate_columns = {
+        tuple(peer.active_columns)
+        for peer in corresponding_peer_fragments(fragment, peer_fragments)
+        if peer.body_region_indexes
+        and peer.active_columns
+        and max((len(row.raw_cells) for row in peer.rows), default=0) == width
+    }
+    if len(candidate_columns) != 1:
+        return ()
+    return next(iter(candidate_columns))
+
+
+def _rescue_sparse_boundary_fragment(
+    fragment: TableFragment,
+    peer_fragments: Sequence[TableFragment],
+) -> TableFragment:
+    if fragment.body_region_indexes:
+        return fragment
+
+    body_indexes, local_active_columns = _keyed_body_region_columns(fragment)
+    active_columns = tuple(sorted(local_active_columns))
+    if not body_indexes:
+        active_columns = _corresponding_peer_active_columns(
+            fragment,
+            peer_fragments,
+        )
+        if not active_columns:
+            return fragment
+        last_separator = max(
+            (
+                index
+                for index, region in enumerate(fragment.regions)
+                if any(row.kind == "separator" for row in region.rows)
+            ),
+            default=-1,
+        )
+        compatible_regions = [
+            index
+            for index in range(last_separator + 1, len(fragment.regions))
+            if fragment.regions[index].rows
+            and all(row.kind == "content" for row in fragment.regions[index].rows)
+            and (
+                occupied := _occupied_region_columns(fragment, index)
+            )
+            and occupied.issubset(active_columns)
+        ]
+        if not compatible_regions:
+            return fragment
+        body_indexes.add(compatible_regions[-1])
+
+    first_body_index = min(body_indexes)
+    preceding_index = first_body_index - 1
+    while preceding_index >= 0:
+        region = fragment.regions[preceding_index]
+        occupied = _occupied_region_columns(fragment, preceding_index)
+        if (
+            not region.rows
+            or not all(row.kind == "content" for row in region.rows)
+            or not occupied
+            or not occupied.issubset(active_columns)
+        ):
+            break
+        body_indexes.add(preceding_index)
+        preceding_index -= 1
+
+    first_body_index = min(body_indexes)
+    regions = tuple(
+        replace(
+            region,
+            role=(
+                "boundary"
+                if any(row.kind == "separator" for row in region.rows)
+                else "body"
+                if index in body_indexes
+                else "header"
+                if index < first_body_index
+                else "unknown"
+            ),
+        )
+        for index, region in enumerate(fragment.regions)
+    )
+    return replace(
+        fragment,
+        regions=regions,
+        body_region_indexes=tuple(sorted(body_indexes)),
+        active_columns=active_columns,
+    )
 
 
 def _jointly_infer_fragments(
@@ -77,19 +210,38 @@ def _jointly_infer_fragments(
                 for index, region in enumerate(fragment.regions)
                 if region.role == "body"
             ),
+            active_columns=(),
         )
         for fragment in with_regions
     )
-    peers_with_regions = with_body_regions + tuple(cross_version_fragments)
-    return tuple(
-        replace(
+    rescued_fragments = tuple(
+        _rescue_sparse_boundary_fragment(
             fragment,
-            active_columns=infer_active_columns(
-                fragment,
-                tuple(peer for peer in peers_with_regions if peer is not fragment),
+            tuple(
+                peer
+                for peer in (*with_body_regions, *cross_version_fragments)
+                if peer is not fragment
             ),
         )
         for fragment in with_body_regions
+    )
+    peers_with_regions = rescued_fragments + tuple(cross_version_fragments)
+    return tuple(
+        replace(
+            fragment,
+            active_columns=(
+                fragment.active_columns
+                or infer_active_columns(
+                    fragment,
+                    tuple(
+                        peer
+                        for peer in peers_with_regions
+                        if peer is not fragment
+                    ),
+                )
+            ),
+        )
+        for fragment in rescued_fragments
     )
 
 
@@ -336,10 +488,50 @@ def _validate_resolved_assessments(
     boundary_paragraphs: Mapping[str, set[str]],
 ) -> list[CandidateAssessment]:
     validated: list[CandidateAssessment] = []
+    accepted_by_previous: dict[
+        tuple[str, SourceRowRef],
+        list[CandidateAssessment],
+    ] = {}
+    for assessment in assessments:
+        if assessment.final_action == "merge":
+            key = (
+                assessment.candidate.side,
+                assessment.candidate.previous_row.source,
+            )
+            accepted_by_previous.setdefault(key, []).append(assessment)
+    ambiguous_previous_rows = {
+        key
+        for key, choices in accepted_by_previous.items()
+        if len(choices) > 1
+    }
     build_reconstruction_operations([], boundary_rows, boundary_paragraphs)
     for assessment in assessments:
         if assessment.final_action != "merge":
             validated.append(assessment)
+            continue
+        candidate_key = (
+            assessment.candidate.side,
+            assessment.candidate.previous_row.source,
+        )
+        if candidate_key in ambiguous_previous_rows:
+            candidate = replace(
+                assessment.candidate,
+                conflicts=tuple(
+                    dict.fromkeys(
+                        (
+                            *assessment.candidate.conflicts,
+                            _AMBIGUOUS_CONTINUATION_CHOICES,
+                        )
+                    )
+                ),
+            )
+            validated.append(
+                replace(
+                    assessment,
+                    candidate=candidate,
+                    final_action="keep_separate",
+                )
+            )
             continue
         try:
             build_reconstruction_operations(

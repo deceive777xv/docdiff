@@ -253,6 +253,7 @@ def generate_continuation_candidates(
         row
         for row in right.rows[:first_full_position]
         if row.kind == "content" and row.source not in boundary_rows
+        and _row_role(right, row.source) != "boundary"
         and (
             not key_logical_columns
             or all(
@@ -261,82 +262,98 @@ def generate_continuation_candidates(
             )
         )
     )
-    continuation_row = (
-        leading_content_rows[-1] if leading_content_rows else right_body_rows[0]
-    )
-    candidate_context_rows = (
-        (continuation_row, *right_body_rows)
-        if leading_content_rows
-        else right_body_rows
-    )
-    continuation_projection_sources = {
-        row.source for row in right_body_rows
-    } | {continuation_row.source}
-    next_full_row = (
-        first_full_row
-        if leading_content_rows
-        else next(
-            (
-                row
-                for row in candidate_context_rows[1:]
-                if _is_complete_logical_row(row, mapping, key_logical_columns)
-            ),
-            None,
+    continuation_choices: list[tuple[TableRowMatrix, bool]] = []
+    if leading_content_rows:
+        continuation_choices.append((leading_content_rows[-1], True))
+    if not continuation_choices or (
+        continuation_choices[-1][0].source != right_body_rows[0].source
+    ):
+        continuation_choices.append((right_body_rows[0], False))
+
+    candidates: list[ContinuationCandidate] = []
+    for continuation_row, is_leading_row in continuation_choices:
+        candidate_context_rows = (
+            (continuation_row, *right_body_rows)
+            if is_leading_row
+            else right_body_rows
         )
-    )
-    vetoes = _candidate_vetoes(
-        left,
-        right,
-        previous_row,
-        continuation_row,
-        mapping,
-        boundary_rows,
-        cross_version_fragments,
-        key_logical_columns,
-        allow_leading_header=bool(leading_content_rows),
-        allow_non_table_gap=allow_non_table_gap,
-    )
-    evidence: tuple[EvidenceCode, ...] = ()
-    conflicts = () if key_profile_sufficient or vetoes else ("insufficient_key_profile",)
-    cross_version_rows: tuple[TableRowMatrix, ...] = ()
-    if not vetoes and not conflicts:
-        evidence, cross_version_rows = _candidate_evidence(
+        continuation_projection_sources = {
+            row.source for row in right_body_rows
+        } | {continuation_row.source}
+        next_full_row = (
+            first_full_row
+            if is_leading_row
+            else next(
+                (
+                    row
+                    for row in candidate_context_rows[1:]
+                    if _is_complete_logical_row(row, mapping, key_logical_columns)
+                ),
+                None,
+            )
+        )
+        vetoes = _candidate_vetoes(
             left,
             right,
             previous_row,
             continuation_row,
-            next_full_row,
             mapping,
             boundary_rows,
             cross_version_fragments,
             key_logical_columns,
+            allow_leading_header=is_leading_row,
             allow_non_table_gap=allow_non_table_gap,
         )
-    candidate = ContinuationCandidate(
-        candidate_id=_candidate_id(side, previous_row.source, continuation_row.source, mapping),
-        side=side,
-        previous_row=previous_row,
-        continuation_row=continuation_row,
-        next_full_row=next_full_row,
-        mapping=mapping,
-        previous_mapping=previous_mapping,
-        previous_fragment_rows=tuple(
-            row
-            for row in left_body_rows
-            if row.kind == "content"
-        ),
-        continuation_fragment_rows=tuple(
-            row
-            for row in right.rows
-            if row.kind == "content"
-            and row.source in continuation_projection_sources
-        ),
-        evidence=evidence,
-        conflicts=conflicts,
-        vetoes=vetoes,
-        cross_version_rows=cross_version_rows,
-    )
-    return [candidate]
+        evidence: tuple[EvidenceCode, ...] = ()
+        conflicts = (
+            () if key_profile_sufficient or vetoes else ("insufficient_key_profile",)
+        )
+        cross_version_rows: tuple[TableRowMatrix, ...] = ()
+        if not vetoes and not conflicts:
+            evidence, cross_version_rows = _candidate_evidence(
+                left,
+                right,
+                previous_row,
+                continuation_row,
+                next_full_row,
+                mapping,
+                boundary_rows,
+                cross_version_fragments,
+                key_logical_columns,
+                allow_non_table_gap=allow_non_table_gap,
+            )
+        candidates.append(
+            ContinuationCandidate(
+                candidate_id=_candidate_id(
+                    side,
+                    previous_row.source,
+                    continuation_row.source,
+                    mapping,
+                ),
+                side=side,
+                previous_row=previous_row,
+                continuation_row=continuation_row,
+                next_full_row=next_full_row,
+                mapping=mapping,
+                previous_mapping=previous_mapping,
+                previous_fragment_rows=tuple(
+                    row
+                    for row in left_body_rows
+                    if row.kind == "content"
+                ),
+                continuation_fragment_rows=tuple(
+                    row
+                    for row in right.rows
+                    if row.kind == "content"
+                    and row.source in continuation_projection_sources
+                ),
+                evidence=evidence,
+                conflicts=conflicts,
+                vetoes=vetoes,
+                cross_version_rows=cross_version_rows,
+            )
+        )
+    return candidates
 
 
 def assess_candidate(candidate: ContinuationCandidate) -> CandidateAssessment:
@@ -1199,6 +1216,76 @@ def _mapping_peer_similarity(
     )
 
 
+def corresponding_peer_fragments(
+    fragment: TableFragment,
+    peer_fragments: Sequence[TableFragment],
+) -> tuple[TableFragment, ...]:
+    """Match the same table-fragment ordinal despite ordinary paragraph drift."""
+    same_section = sorted(
+        {
+            (peer.paragraph_index, peer.paragraph_id): peer
+            for peer in (fragment, *peer_fragments)
+            if peer.section_id == fragment.section_id
+        }.values(),
+        key=lambda peer: (peer.paragraph_index, peer.paragraph_id),
+    )
+    fragment_key = (fragment.paragraph_index, fragment.paragraph_id)
+    ordinal = next(
+        (
+            index
+            for index, peer in enumerate(same_section)
+            if (peer.paragraph_index, peer.paragraph_id) == fragment_key
+        ),
+        -1,
+    )
+    if ordinal < 0:
+        return ()
+
+    by_section: dict[str, list[TableFragment]] = {}
+    for peer in peer_fragments:
+        if peer.section_id != fragment.section_id:
+            by_section.setdefault(peer.section_id, []).append(peer)
+    matches = []
+    for peers in by_section.values():
+        ordered = sorted(
+            {
+                (peer.paragraph_index, peer.paragraph_id): peer
+                for peer in peers
+            }.values(),
+            key=lambda peer: (peer.paragraph_index, peer.paragraph_id),
+        )
+        if ordinal < len(ordered):
+            matches.append(ordered[ordinal])
+    return tuple(matches)
+
+
+def _backfill_sparse_profiles_from_corresponding_peer(
+    fragment: TableFragment,
+    active_columns: tuple[int, ...],
+    profiles: dict[int, ColumnProfile],
+    peer_fragments: Sequence[TableFragment],
+) -> dict[int, ColumnProfile]:
+    width = max((len(row.raw_cells) for row in fragment.rows), default=0)
+    matching_peers = [
+        peer
+        for peer in corresponding_peer_fragments(fragment, peer_fragments)
+        if peer.body_region_indexes
+        and tuple(peer.active_columns) == active_columns
+        and max((len(row.raw_cells) for row in peer.rows), default=0) == width
+    ]
+    if len(matching_peers) != 1:
+        return profiles
+    peer_profiles = _column_profiles(_body_rows(matching_peers[0]))
+    return {
+        physical_index: (
+            profile
+            if profile.non_empty_ratio > 0.0
+            else peer_profiles.get(physical_index, profile)
+        )
+        for physical_index, profile in profiles.items()
+    }
+
+
 def infer_monotonic_column_mapping(
     left: TableFragment,
     right: TableFragment,
@@ -1218,6 +1305,17 @@ def infer_monotonic_column_mapping(
 
     left_has_key = any(_is_key_profile(left_profiles[column]) for column in left_columns)
     right_has_key = any(_is_key_profile(right_profiles[column]) for column in right_columns)
+    if left_has_key and not right_has_key:
+        right_profiles = _backfill_sparse_profiles_from_corresponding_peer(
+            right,
+            right_columns,
+            right_profiles,
+            (left, *cross_version_fragments),
+        )
+        right_has_key = any(
+            _is_key_profile(right_profiles[column])
+            for column in right_columns
+        )
     if left_has_key != right_has_key:
         return None
 

@@ -63,6 +63,32 @@ class EchoMergeProvider(BaseProvider):
         return True
 
 
+class TextChoiceProvider(BaseProvider):
+    chat_model = "text-choice"
+
+    def __init__(self, continuation_needle: str):
+        self.continuation_needle = continuation_needle
+
+    def chat(self, messages: list[dict], **kwargs) -> str:
+        payload = json.loads(messages[-1]["content"])
+        continuation = " ".join(payload["continuation_cells"])
+        return _response(
+            payload["candidate_id"],
+            decision=(
+                "merge"
+                if self.continuation_needle in continuation
+                else "keep"
+            ),
+            boundary_id=payload["boundary_id"],
+        )
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise AssertionError("retrieval is outside reconstruction")
+
+    def health_check(self) -> bool:
+        return True
+
+
 def _row(cells: tuple[str, ...], index: int, paragraph_id: str, section_id: str = "section-1"):
     row = split_markdown_table_row(
         "|" + "|".join(cells) + "|",
@@ -309,6 +335,35 @@ def test_pipeline_provider_failure_is_nonfatal_and_continues(monkeypatch):
     assert len(provider.chat_calls) == 2
 
 
+def test_pipeline_fails_closed_when_llm_accepts_two_choices_for_same_previous_row(
+    monkeypatch,
+):
+    first = _candidate("choice-a", "medium")
+    second = _candidate("choice-b", "medium")
+    second = replace(
+        second,
+        previous_row=first.previous_row,
+        previous_fragment_rows=first.previous_fragment_rows,
+    )
+    _stub_candidates(monkeypatch, [first, second])
+    baseline, target, pairs = _documents()
+    provider = QueueProvider([_response("choice-a"), _response("choice-b")])
+
+    result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
+
+    decisions = {decision.candidate_id: decision for decision in result.trace.decisions}
+    assert {decision.final_action for decision in decisions.values()} == {
+        "keep_separate"
+    }
+    assert all(
+        "ambiguous_continuation_choices" in decision.rule_conflicts
+        for decision in decisions.values()
+    )
+    assert not any(
+        operation.type == "merge_rows" for operation in result.trace.operations
+    )
+
+
 def test_pipeline_keeps_medium_separate_without_provider(monkeypatch):
     _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
     baseline, target, pairs = _documents()
@@ -453,11 +508,17 @@ def test_pipeline_has_no_retrieval_or_faiss_dependency():
     assert "faiss_index_id" not in source
 
 
-def _paragraph(paragraph_id: str, lines: list[str]) -> Paragraph:
+def _paragraph(
+    paragraph_id: str,
+    lines: list[str],
+    *,
+    page_no: int | None = None,
+) -> Paragraph:
     return Paragraph(
         paragraph_id,
         "\n".join(lines),
         [Sentence(line) for line in lines],
+        page_no=page_no,
     )
 
 
@@ -486,6 +547,147 @@ def _supporting_table_lines(start: int) -> list[str]:
         f"| {start} | bronze | steady | ready |",
         f"| {start + 1} | silver | steady | complete |",
     ]
+
+
+def test_pipeline_recovers_sparse_continuation_columns_from_complete_peer_version():
+    baseline_section = Section(
+        "baseline-regulation",
+        "2.3 法规要求",
+        1,
+        [
+            _paragraph(
+                "baseline-regulation-left",
+                [
+                    "|序号|法规编号|法规名称|条款|要求|",
+                    "|---|---|---|---|---|",
+                    "|5|GB/T 15086|汽车门锁|3.2.3|完整要求|",
+                    "|6|GB/T30512|汽车禁用物质要求|/|完整要求|",
+                    "|7|GB/T 25985-2010|汽车防盗装置的保护|4.6|如果一年中制造的车辆少于1000辆，则其组合数应与车辆数相等。|",
+                ],
+                page_no=6,
+            ),
+            _paragraph(
+                "baseline-regulation-right",
+                [
+                    "|||||文件名称|文件名称|文件名称|文件名称|文件名称|文件名称|",
+                    "|---|---|---|---|---|---|---|---|---|---|",
+                    "|||||文件编号|||版本：001|第6页||",
+                    "|||||||在一种车型的所有汽车中，同一组合的出现率应不大于1/1000。||||",
+                ],
+                page_no=7,
+            ),
+        ],
+    )
+    target_section = Section(
+        "target-regulation",
+        "2.3 法规要求",
+        1,
+        [
+            _paragraph(
+                "target-regulation-left",
+                [
+                    "|序号|法规编号|法规名称|条款|要求|",
+                    "|---|---|---|---|---|",
+                    "|5|GB/T 15086|汽车门锁|3.2.3|完整要求|",
+                    "|6|GB/T30512|汽车禁用物质要求|/|完整要求|",
+                ],
+                page_no=5,
+            ),
+            _paragraph(
+                "target-regulation-footer",
+                ["FMA-272-A19-V01（20171013）"],
+                page_no=5,
+            ),
+            _paragraph(
+                "target-regulation-complete",
+                [
+                    "|||||文件名称|文件名称|文件名称|文件名称|文件名称|文件名称|",
+                    "|---|---|---|---|---|---|---|---|---|---|",
+                    "|||||文件编号|||版本：001|第6页||",
+                    "||6|GB/T30512||汽车禁用物质要求|/|||||",
+                    "||7|GB/T 25985-2010||汽车防盗装置的保护|4.6|如果一年中制造的车辆少于1000辆，则其组合数应与车辆数相等。<br>在一种车型的所有汽车中，同一组合的出现率应不大于1/1000。||||",
+                ],
+                page_no=6,
+            )
+        ],
+    )
+    baseline = DocumentIR(
+        "baseline-regulation-doc",
+        "Baseline",
+        "baseline-regulation-hash",
+        [baseline_section],
+    )
+    target = DocumentIR(
+        "target-regulation-doc",
+        "Target",
+        "target-regulation-hash",
+        [target_section],
+    )
+
+    result = pipeline.reconstruct_table_pairs(
+        [SectionPair(baseline_section, target_section, 1.0)],
+        baseline,
+        target,
+        TextChoiceProvider("在一种车型"),
+    )
+
+    compact = result.baseline_ir.plain_text.replace(" ", "").replace("|", "")
+    assert "与车辆数相等。<br>在一种车型" in compact
+
+
+def test_pipeline_recovers_sparse_continuation_columns_from_next_complete_row():
+    section = Section(
+        "baseline-function",
+        "3.1 系统功能",
+        1,
+        [
+            _paragraph(
+                "baseline-function-left",
+                [
+                    "||序号|功能|要求||备注||||",
+                    "|---|---|---|---|---|---|---|---|---|",
+                    "||20|开关门舒适性|关门反力：300 ± 30 N。||根据分析结果微调。||||",
+                    "||21|防夹要求|关门过程：①电撑杆高位、中位、低位（峰值）≤100 N；开门过程：③电撑杆高位、中位、低位（峰值）≤120 N；||/||||",
+                ],
+                page_no=7,
+            ),
+            _paragraph(
+                "baseline-function-right",
+                [
+                    "|||||文件名称|文件名称|文件名称|文件名称|文件名称|",
+                    "|---|---|---|---|---|---|---|---|---|",
+                    "|||||文件编号||版本：001|第8页||",
+                    "||||电撑杆高位、中位、低位（有效值）≤120 N。<br>2、防夹响应时间：≤0.5 s；||||||",
+                    "||22|障碍物检测|障碍物前停止距离：100-150 mm。||/||||",
+                ],
+                page_no=8,
+            ),
+        ],
+    )
+    baseline = DocumentIR(
+        "baseline-function-doc",
+        "Baseline",
+        "baseline-function-hash",
+        [section],
+    )
+    target = DocumentIR("target-empty", "Target", "target-empty-hash", [])
+
+    result = pipeline.reconstruct_table_pairs(
+        [SectionPair(section, None, 0.0)],
+        baseline,
+        target,
+        EchoMergeProvider(),
+    )
+
+    merged_row = next(
+        sentence.text
+        for output_section in result.baseline_ir.sections
+        for paragraph in output_section.paragraphs
+        for sentence in paragraph.sentences
+        if "21" in sentence.text and "防夹要求" in sentence.text
+    )
+    compact = merged_row.replace(" ", "").replace("|", "")
+    assert "（有效值）≤120N。" in compact
 
 
 def _run_single_side_section(section: Section):
