@@ -217,6 +217,68 @@ def test_llm_none_risk_is_not_strengthened_by_low_similarity():
     assert result.items[0].risk_level == "none"
 
 
+def test_llm_can_suppress_semantically_identical_matched_paragraph():
+    """An explicit boolean should_report=false omits a matched pair."""
+    from app.core.diff.diff_classifier import classify
+
+    provider = type(
+        "Provider",
+        (),
+        {
+            "chat": lambda self, messages: (
+                '{"should_report": false, "diff_type": "格式变化", '
+                '"risk_level": "none", "explanation": "语义完全一致"}'
+            )
+        },
+    )()
+    b_para = make_para("甲方应在收到发票后三十日内完成付款。")
+    t_para = make_para("收到发票后，甲方付款期限为三十日。")
+    pp = ParagraphPair(baseline_para=b_para, target_para=t_para, similarity=0.12)
+
+    result = classify(
+        para_pairs=[pp],
+        policy=ComparePolicy(use_llm_classify=True, rule_strengthen=True),
+        provider=provider,  # type: ignore[arg-type]
+        task_id="t-identical",
+        baseline_version_id="b-identical",
+        target_version_id="v-identical",
+    )
+
+    assert result.items == []
+
+
+def test_llm_string_should_report_false_does_not_suppress_matched_paragraph():
+    """Only the JSON boolean false may suppress a matched pair."""
+    from app.core.diff.diff_classifier import classify
+
+    provider = type(
+        "Provider",
+        (),
+        {
+            "chat": lambda self, messages: (
+                '{"should_report": "false", "diff_type": "格式变化", '
+                '"risk_level": "none", "explanation": "语义完全一致"}'
+            )
+        },
+    )()
+    pp = ParagraphPair(
+        baseline_para=make_para("甲方负责付款。"),
+        target_para=make_para("付款由甲方负责。"),
+        similarity=0.5,
+    )
+
+    result = classify(
+        para_pairs=[pp],
+        policy=ComparePolicy(use_llm_classify=True, rule_strengthen=True),
+        provider=provider,  # type: ignore[arg-type]
+        task_id="t-malformed-report",
+        baseline_version_id="b-malformed-report",
+        target_version_id="v-malformed-report",
+    )
+
+    assert len(result.items) == 1
+
+
 def test_llm_can_suppress_single_sided_table_header():
     """Unmatched table headers can be delegated to LLM before reporting."""
     from app.core.diff.diff_classifier import classify
@@ -361,6 +423,6 @@ def test_llm_chinese_risk_label_is_normalized_to_none():
         },
     )()
 
-    _, risk, _ = _llm_classify("甲方付款。", "甲方应付款。", provider, similarity=0.4)  # type: ignore[arg-type]
+    _, _, risk, _ = _llm_classify("甲方付款。", "甲方应付款。", provider, similarity=0.4)  # type: ignore[arg-type]
 
     assert risk == "none"

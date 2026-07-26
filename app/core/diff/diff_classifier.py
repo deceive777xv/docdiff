@@ -23,12 +23,15 @@ _CLASSIFY_PROMPT = """你是一个专业的文档差异分析助手。请分析�
 
 请以JSON格式回答，只输出JSON，不要有任何其他内容：
 {{
+  "should_report": true,
   "diff_type": "微调|实质修改|重写|格式变化",
   "risk_level": "high|medium|low|none",
   "explanation": "简短的差异说明（30字以内）"
 }}
 
 判断规则：
+- should_report=false：两段语义、业务事实和权利义务完全一致，仅有格式、顺序或等价表达变化
+- should_report=true：存在任何需要用户关注的内容变化，或无法确定两段完全等价
 - 无风险（none）：仅格式、顺序、表达方式变化，语义和义务完全一致
 - 低风险（low）：措辞调整，核心意思不变，业务影响很小
 - 中风险（medium）：表达或范围有变化，但未触及关键金额、日期、责任主体、权利义务
@@ -157,7 +160,7 @@ def _llm_classify(
     target: str,
     provider: BaseProvider,
     similarity: float = 1.0,
-) -> tuple[str, str, str]:
+) -> tuple[bool, str, str, str]:
     prompt = _CLASSIFY_PROMPT.format(
         baseline=baseline[:500],
         target=target[:500],
@@ -169,13 +172,14 @@ def _llm_classify(
         if match:
             data = json.loads(match.group())
             return (
+                data.get("should_report", True) is not False,
                 data.get("diff_type", "微调"),
                 _normalize_risk_level(data.get("risk_level")),
                 data.get("explanation", ""),
             )
     except Exception as e:
         logger.warning("LLM classification failed, using rules: %s", e)
-    return _rule_classify(baseline, target, similarity)
+    return True, *_rule_classify(baseline, target, similarity)
 
 
 def _llm_classify_single_sided_table_header(
@@ -307,9 +311,11 @@ def classify(
                 ))
                 continue
             if policy.use_llm_classify and provider is not None:
-                diff_type, risk_level, explanation = _llm_classify(
+                should_report, diff_type, risk_level, explanation = _llm_classify(
                     baseline_compare, target_compare, provider, pp.similarity
                 )
+                if not should_report:
+                    continue
             else:
                 diff_type, risk_level, explanation = _rule_classify(
                     baseline_compare, target_compare, pp.similarity
