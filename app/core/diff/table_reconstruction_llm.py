@@ -32,8 +32,9 @@ _ROW_ACTIONS = {"merge", "keep"}
 _TABLE_ACTIONS = {"merge_fragments", "keep"}
 _ATOMIC_ACTIONS = {"merge_row", "keep"}
 _ROLES = {
-    "body_row",
+    "previous_row",
     "continuation_row",
+    "body_row",
     "table_header",
     "page_header",
     "page_footer",
@@ -42,12 +43,36 @@ _ROLES = {
 }
 _MAX_CROSS_VERSION_ROWS = 3
 _SYSTEM_MESSAGE = (
-    "Classify a bounded physical-page boundary and decide table reconstruction actions. "
-    "Return only one JSON object with exactly these fields: boundary_id, candidate_id, "
-    "roles, action, mapping_id, confidence, reason. roles may reference only supplied IDs. "
-    "action must be merge_row or keep. mapping_id must be one of the supplied mapping "
-    "candidate IDs. Never invent text, IDs, or column mappings. Markdown fences, prose, "
-    "and extra fields are invalid."
+    "You are a table reconstruction classifier. Given context items from two consecutive "
+    "pages around a page boundary, classify each item's role and decide whether the table "
+    "continues across the boundary.\n\n"
+    "Output a single JSON object with exactly these fields:\n"
+    "- boundary_id: must match the supplied boundary_id.\n"
+    "- candidate_id: must match the supplied candidate_id.\n"
+    "- roles: a dict mapping context item IDs (context_items[*].id) to one of:\n"
+    "  previous_row: the single row immediately before the boundary that is the last"
+    "row of the table on the previous page (corresponds to previous_cells).\n"
+    "  continuation_row: a row on the next page that continues the same table "
+    "(corresponds to continuation_cells).\n"
+    "  body_row: a table body row on the previous page that is the same table "
+    "but is NOT the immediate boundary row (i.e. rows above previous_row).\n"
+    "  table_header: a table header row"
+    "  page_header: page-level artifacts (document title, page number, separator lines, "
+    "etc.) that should be ignored.\n"
+    "  page_footer: page-level footer artifacts.\n"
+    "  ordinary_text: non-table text context.\n"
+    "  new_table: a row belonging to a different table that starts on the next page.\n"
+    "  Only one item should be previous_row. Items above it on the same page should be "
+    "body_row, not previous_row or continuation_row.\n"
+    "- action: merge_row if the continuation row(s) should be merged into the previous "
+    "table, or keep if they should stay separate (e.g. a new table starts on the next "
+    "page).\n"
+    "- mapping_id: must be one of the supplied mapping candidate IDs.\n"
+    "- confidence: a number between 0.0 and 1.0.\n"
+    "- reason: a non-empty string explaining your decision.\n\n"
+    "Rules:\n"
+    "- Never invent text, IDs.\n"
+    "- No Markdown fences, no prose outside the JSON object, no extra fields."
 )
 
 
@@ -202,13 +227,9 @@ def _parse_response(
     roles = data["roles"]
     if not isinstance(roles, dict):
         return None
-    allowed_role_ids = {"previous_row", "continuation_row"}
-    if candidate.next_full_row is not None:
-        allowed_role_ids.add("next_full_row")
+    allowed_role_ids = set()
     if context is not None:
         allowed_role_ids.update(item.item_id for item in context.items)
-    if not {"previous_row", "continuation_row"}.issubset(roles):
-        return None
     if any(
         not isinstance(item_id, str)
         or item_id not in allowed_role_ids
