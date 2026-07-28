@@ -35,12 +35,8 @@
     "next": ["13", "stop", "complete"]
   },
   "nearby_context": {
-    "before": [
-      {"kind": "table_row", "text": "..."}
-    ],
-    "after": [
-      {"kind": "paragraph", "text": "..."}
-    ]
+    "before": ["..."],
+    "after": ["..."]
   },
   "peer_rows": [
     ["12", "drive", "prefix suffix"]
@@ -53,7 +49,7 @@
 - `previous`、`continuation` 和 `next` 使用已确定的逻辑列投影；LLM 不选择或返回列映射。
 - `nearby_context` 排除本次 `previous` 和 `continuation` 行，避免重复。
 - `nearby_context` 沿用现有 `TableBoundaryContext` 的选取范围：前页最后最多六项、后页最前最多六项，以保留多行页眉、页脚和连续边界伪行。
-- 每个上下文项只保留 `kind` 和完整 `text`；删除 ID、section、paragraph、sentence index 和页码。上下文文本不截断。
+- `before` 和 `after` 只保留按原顺序排列的完整文本；删除 `kind`、ID、section、paragraph、sentence index 和页码。上下文文本不截断。
 - `peer_rows` 最多两行；没有跨版本参考时省略该字段。
 - `next` 不存在时省略，不传 `null`。
 - 空的 `nearby_context` 分组和空的可选字段直接省略。
@@ -63,7 +59,7 @@
 - `boundary_id`、`side`
 - `physical_mapping`、`mapping_candidates`、`logical_column_roles`
 - `rule_evidence`、`rule_conflicts`
-- `context_items` 中的来源 ID、页码和其他定位元数据；上下文范围及完整文本继续保留
+- `context_items` 中的 `kind`、来源 ID、页码和其他定位元数据；上下文范围、顺序及完整文本继续保留
 - 超过两行的 `cross_version_rows`
 
 这些数据要么已由程序确定、LLM 无权改变，要么与候选槽位内容重复。
@@ -128,7 +124,7 @@
 
 - 精简输入只包含允许字段；邻近上下文仍覆盖前后页各最多六项，peer rows 最多两行。
 - 候选行不会在 `nearby_context` 中重复出现。
-- 多行页眉或页脚在去除定位元数据后仍完整保留顺序和文本。
+- 多行页眉或页脚在去除 `kind` 和定位元数据后仍完整保留顺序和文本。
 - `merge + continuation_row` 被接受。
 - `merge + 其他 role` 被拒绝并重试一次。
 - 错误 candidate ID、额外字段、缺失字段、非法置信度和空 reason 被拒绝。
