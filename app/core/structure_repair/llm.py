@@ -76,9 +76,14 @@ def adjudicate_section_parent(
             "role": "system",
             "content": (
                 "Judge whether the candidate unnumbered section belongs under the previous "
-                "numbered section. Return exactly one JSON object with candidate_id, action, "
-                "source_ids, target_section_id, confidence, reason. action must be keep or "
-                "move_to_section. Use only supplied IDs. Never rewrite or generate document text."
+                "numbered section. Return exactly one JSON object with these fields:\n"
+                "- candidate_id: the candidate identifier, e.g. \"section:xxx\" (string)\n"
+                "- action: exactly \"keep\" or \"move_to_section\"\n"
+                "- source_ids: a JSON array containing exactly one element, the candidate_id value\n"
+                "- target_section_id: the previous section's section_id (string, without prefix)\n"
+                "- confidence: a number between 0.0 and 1.0\n"
+                "- reason: a non-empty string explaining your decision\n"
+                "Use only supplied IDs. Never rewrite or generate document text."
             ),
         },
         {
@@ -168,10 +173,15 @@ def adjudicate_paragraph_merge(
             "role": "system",
             "content": (
                 "Judge whether two adjacent parsed paragraphs are fragments of one original "
-                "paragraph. Return exactly one JSON object with candidate_id, action, "
-                "source_ids, target_section_id, confidence, reason. action must be keep or "
-                "merge_paragraphs. Use only supplied IDs. Never rewrite, summarize, or "
-                "generate document text."
+                "paragraph. Return exactly one JSON object with these fields:\n"
+                "- candidate_id: the candidate identifier, e.g. \"paragraphs:xxx:yyy\" (string)\n"
+                "- action: exactly \"keep\" or \"merge_paragraphs\"\n"
+                "- source_ids: a JSON array containing exactly two elements: the previous paragraph_id "
+                "and the following paragraph_id (without prefix)\n"
+                "- target_section_id: the section_id of the section containing these paragraphs (string, without prefix)\n"
+                "- confidence: a number between 0.0 and 1.0\n"
+                "- reason: a non-empty string explaining your decision\n"
+                "Use only supplied IDs. Never rewrite, summarize, or generate document text."
             ),
         },
         {
