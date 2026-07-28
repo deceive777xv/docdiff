@@ -30,7 +30,7 @@ _LEGACY_RESPONSE_FIELDS = {
 }
 _ROW_ACTIONS = {"merge", "keep"}
 _TABLE_ACTIONS = {"merge_fragments", "keep"}
-_ATOMIC_ACTIONS = {"merge_row", "keep"}
+_ATOMIC_ACTIONS = {"merge", "keep"}
 _ROLES = {
     "previous_row",
     "continuation_row",
@@ -64,8 +64,8 @@ _SYSTEM_MESSAGE = (
     "  new_table: a row belonging to a different table that starts on the next page.\n"
     "  Only one item should be previous_row. Items above it on the same page should be "
     "body_row, not previous_row or continuation_row.\n"
-    "- action: merge_row if the continuation row(s) should be merged into the previous "
-    "table, or keep if they should stay separate (e.g. a new table starts on the next "
+    "- action: \"merge\" if the continuation row(s) should be merged into the previous "
+    "table, or \"keep\" if they should stay separate (e.g. a new table starts on the next "
     "page).\n"
     "- mapping_id: must be one of the supplied mapping candidate IDs.\n"
     "- confidence: a number between 0.0 and 1.0.\n"
@@ -247,8 +247,8 @@ def _parse_response(
         action = data["action"]
         if not isinstance(action, str) or action not in _ATOMIC_ACTIONS:
             return None
-        row_action = "merge" if action == "merge_row" else "keep"
-        table_action = "merge_fragments" if action == "merge_row" else "keep"
+        row_action = "merge" if action == "merge" else "keep"
+        table_action = "merge_fragments" if action == "merge" else "keep"
     else:
         mapping_id = ""
         row_action = data["row_action"]
