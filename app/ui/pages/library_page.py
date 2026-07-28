@@ -6,11 +6,15 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread, Signal, QObject, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -25,11 +29,133 @@ from app.db import document_repo
 logger = logging.getLogger(__name__)
 
 
+_INGEST_NODE_PROGRESS = {
+    "file_check": ("file_checked", 10, "正在解析文档"),
+    "parse_doc": ("parsed", 35, "正在规范化段落与跨页表格"),
+    "save_document": ("saved", 85, "正在构建检索索引"),
+    "build_embeddings": ("completed", 100, "导入完成"),
+}
+
+
+def _progress_from_graph_update(
+    update: object,
+) -> tuple[int, str] | None:
+    if not isinstance(update, dict):
+        return None
+    for node_name, (expected_status, percent, stage) in _INGEST_NODE_PROGRESS.items():
+        node_update = update.get(node_name)
+        if (
+            isinstance(node_update, dict)
+            and node_update.get("status") == expected_status
+            and not node_update.get("error")
+        ):
+            return percent, stage
+    return None
+
+
+class _ImportProgressDialog(QDialog):
+    """Non-blocking aggregate progress for one import batch."""
+
+    def __init__(self, paths: list[str], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("正在导入文档")
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.setMinimumWidth(520)
+        self._paths = list(paths)
+        self._file_progress = {path: 0 for path in self._paths}
+        self._file_states = {path: "running" for path in self._paths}
+        self._items: dict[str, QListWidgetItem] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("正在导入并规范化文档")
+        title.setStyleSheet(Theme.page_title())
+        layout.addWidget(title)
+
+        self._summary = QLabel(f"已完成 0/{len(self._paths)}")
+        self._summary.setStyleSheet(Theme.label_secondary())
+        layout.addWidget(self._summary)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setTextVisible(True)
+        layout.addWidget(self._progress)
+
+        self._list = QListWidget()
+        self._list.setMinimumHeight(110)
+        self._list.setMaximumHeight(220)
+        for path in self._paths:
+            item = QListWidgetItem(f"{Path(path).name} — 准备导入")
+            self._list.addItem(item)
+            self._items[path] = item
+        layout.addWidget(self._list)
+
+        hint = QLabel("关闭此窗口不会停止后台导入。")
+        hint.setStyleSheet(Theme.label_secondary())
+        layout.addWidget(hint)
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        self.setStyleSheet(
+            f"QDialog{{background:{Theme.BG_PAGE};}}"
+            f"QListWidget{{background:{Theme.BG_CARD};color:{Theme.TEXT_PRIMARY};"
+            f"border:1px solid {Theme.BORDER};border-radius:6px;}}"
+            f"QProgressBar{{background:{Theme.BG_CARD};color:{Theme.TEXT_PRIMARY};"
+            f"border:1px solid {Theme.BORDER};border-radius:5px;text-align:center;}}"
+            f"QProgressBar::chunk{{background:{Theme.COLOR_PRIMARY};border-radius:4px;}}"
+        )
+
+    def update_file(
+        self,
+        file_path: str,
+        percent: int,
+        stage: str,
+        *,
+        state: str = "running",
+    ) -> None:
+        if file_path not in self._file_progress:
+            return
+        self._file_progress[file_path] = max(
+            self._file_progress[file_path],
+            max(0, min(100, int(percent))),
+        )
+        self._file_states[file_path] = state
+        state_prefix = {
+            "success": "完成",
+            "failed": "失败",
+        }.get(state, stage)
+        self._items[file_path].setText(
+            f"{Path(file_path).name} — {state_prefix}"
+        )
+        overall = int(
+            sum(self._file_progress.values()) / max(len(self._file_progress), 1)
+        )
+        completed = sum(
+            state in {"success", "failed"}
+            for state in self._file_states.values()
+        )
+        self._progress.setValue(overall)
+        self._summary.setText(f"已完成 {completed}/{len(self._paths)}")
+
+    def finish(self) -> None:
+        self.hide()
+        self.deleteLater()
+
+    def closeEvent(self, event) -> None:
+        self.hide()
+        event.ignore()
+
+
 class _IngestWorker(QObject):
     """Run ingest in a background thread."""
     finished = Signal()   
-    error = Signal(str)
+    error = Signal(str, str)
     refresh_needed = Signal(str)
+    progress = Signal(str, int, str)
 
     def __init__(self, ctx: AppContext, file_path: str, document_id: str | None = None):
         super().__init__()
@@ -44,7 +170,7 @@ class _IngestWorker(QObject):
 
             conn = open_db(self.ctx.data_dir)
             try:
-                result = ingest_graph.invoke({
+                state = {
                     "file_path": self.file_path,
                     "data_dir": self.ctx.data_dir,
                     "source_type": "standard",
@@ -54,19 +180,29 @@ class _IngestWorker(QObject):
                     "conn": conn,
                     "llm_client": self.ctx.openai_client,
                     "llm_model": self.ctx.openai_model,
-                })
+                }
+                result = dict(state)
+                self.progress.emit(self.file_path, 0, "准备导入")
+                for update in ingest_graph.stream(state, stream_mode="updates"):
+                    if isinstance(update, dict):
+                        for node_update in update.values():
+                            if isinstance(node_update, dict):
+                                result.update(node_update)
+                    progress = _progress_from_graph_update(update)
+                    if progress is not None:
+                        self.progress.emit(self.file_path, *progress)
             finally:
                 conn.close()
 
             if result.get("error"):
-                self.error.emit(result["error"])
+                self.error.emit(self.file_path, str(result["error"]))
             else:
                 self.refresh_needed.emit(self.file_path)
                 self.finished.emit()
                 
         except Exception as e:
             logger.exception("Ingest worker failed")
-            self.error.emit(f"导入失败：{e}")
+            self.error.emit(self.file_path, f"导入失败：{e}")
 
 
 class LibraryPage(QWidget):
@@ -77,6 +213,10 @@ class LibraryPage(QWidget):
         self.ctx = ctx
         self._thread: QThread | None = None
         self._threads: set[QThread] = set()
+        self._workers: set[QObject] = set()
+        self._worker_by_thread: dict[QThread, QObject] = {}
+        self._import_batch: dict[str, object] | None = None
+        self._progress_dialog: _ImportProgressDialog | None = None
         self._build_ui()
         self._apply_theme()
         from app.ui.theme_manager import ThemeManager
@@ -192,10 +332,39 @@ class LibraryPage(QWidget):
         )
         if not paths:
             return
-        for path in paths:
-            self._run_ingest(path)
+        self._start_ingest_batch(paths)
+
+    def _start_ingest_batch(
+        self,
+        paths: list[str],
+        document_id: str | None = None,
+    ) -> None:
+        unique_paths = list(dict.fromkeys(paths))
+        if not unique_paths:
+            return
+        if self._import_batch is not None:
+            if self._progress_dialog is not None:
+                self._progress_dialog.show()
+                self._progress_dialog.raise_()
+                self._progress_dialog.activateWindow()
+            return
+        self._import_batch = {
+            "pending": set(unique_paths),
+            "successes": set(),
+            "failures": {},
+        }
+        self._progress_dialog = _ImportProgressDialog(unique_paths, self)
+        self._import_btn.setEnabled(False)
+        self._add_version_btn.setEnabled(False)
+        self._delete_btn.setEnabled(False)
+        self._progress_dialog.show()
+        for path in unique_paths:
+            self._run_ingest(path, document_id=document_id)
 
     def _run_ingest(self, file_path: str, document_id: str | None = None) -> None:
+        if self._import_batch is None:
+            self._start_ingest_batch([file_path], document_id=document_id)
+            return
         thread = QThread()
         worker = _IngestWorker(self.ctx, file_path, document_id=document_id)
         self._thread = thread
@@ -203,29 +372,125 @@ class LibraryPage(QWidget):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.refresh_needed.connect(self._on_ingest_done)
+        worker.progress.connect(self._on_ingest_progress)
         worker.finished.connect(thread.quit)
         worker.error.connect(self._on_ingest_error)
         worker.error.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_ingest_thread_finished)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda th=thread: self._threads.discard(th))
         self._threads.add(thread)
+        self._workers.add(worker)
+        self._worker_by_thread[thread] = worker
         thread.start()
+
+    @Slot()
+    def _on_ingest_thread_finished(self, thread: QThread | None = None) -> None:
+        finished_thread = thread or self.sender()
+        if finished_thread not in self._threads:
+            return
+        self._threads.discard(finished_thread)
+        worker = self._worker_by_thread.pop(finished_thread, None)
+        if worker is not None:
+            self._workers.discard(worker)
+        self._finish_import_batch_if_ready()
+
+    @Slot(str, int, str)
+    def _on_ingest_progress(
+        self,
+        file_path: str,
+        percent: int,
+        stage: str,
+    ) -> None:
+        if self._progress_dialog is not None:
+            self._progress_dialog.update_file(file_path, percent, stage)
 
     @Slot(str)
     def _on_ingest_done(self, file_path: str) -> None:
-        name = Path(file_path).name
-        QMessageBox.information(self, "导入成功", f"《{name}》已成功导入文档库。")
-        self.refresh()
+        if self._import_batch is None:
+            return
+        pending = self._import_batch["pending"]
+        successes = self._import_batch["successes"]
+        if isinstance(pending, set) and file_path in pending:
+            pending.discard(file_path)
+            if isinstance(successes, set):
+                successes.add(file_path)
+            if self._progress_dialog is not None:
+                self._progress_dialog.update_file(
+                    file_path,
+                    100,
+                    "导入完成",
+                    state="success",
+                )
+        self._finish_import_batch_if_ready()
 
-    @Slot(str)
-    def _on_ingest_error(self, msg: str) -> None:
-        QMessageBox.warning(self, "导入错误", msg)
+    @Slot(str, str)
+    def _on_ingest_error(self, file_path: str, msg: str) -> None:
+        if self._import_batch is None:
+            return
+        pending = self._import_batch["pending"]
+        failures = self._import_batch["failures"]
+        if isinstance(pending, set) and file_path in pending:
+            pending.discard(file_path)
+            if isinstance(failures, dict):
+                failures[file_path] = msg
+            if self._progress_dialog is not None:
+                self._progress_dialog.update_file(
+                    file_path,
+                    100,
+                    msg,
+                    state="failed",
+                )
+        self._finish_import_batch_if_ready()
+
+    def _finish_import_batch_if_ready(self) -> None:
+        batch = self._import_batch
+        if batch is None:
+            return
+        pending = batch["pending"]
+        if not isinstance(pending, set) or pending or self._threads:
+            return
+        successes = batch["successes"]
+        failures = batch["failures"]
+        success_count = len(successes) if isinstance(successes, set) else 0
+        failure_count = len(failures) if isinstance(failures, dict) else 0
+        if self._progress_dialog is not None:
+            self._progress_dialog.finish()
+        self._import_batch = None
+        self._progress_dialog = None
+        self._import_btn.setEnabled(True)
+        self._on_selection_changed()
+        self.refresh()
+        if failure_count:
+            failure_lines = [
+                f"- {Path(path).name}: {message}"
+                for path, message in failures.items()
+            ] if isinstance(failures, dict) else []
+            QMessageBox.warning(
+                self,
+                "导入完成（部分失败）",
+                "\n".join(
+                    [
+                        f"成功 {success_count} 个，失败 {failure_count} 个。",
+                        *failure_lines,
+                    ]
+                ),
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "导入完成",
+                f"成功导入 {success_count} 个文档。",
+            )
 
     def _on_selection_changed(self) -> None:
         has_selection = len(self._table.selectedItems()) > 0
-        self._add_version_btn.setEnabled(has_selection)
-        self._delete_btn.setEnabled(has_selection)
+        self._add_version_btn.setEnabled(
+            has_selection and self._import_batch is None
+        )
+        self._delete_btn.setEnabled(
+            has_selection and self._import_batch is None
+        )
 
     def _add_version(self) -> None:
         rows = self._table.selectionModel().selectedRows()
@@ -243,8 +508,7 @@ class LibraryPage(QWidget):
             ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;Markdown (*.md *.markdown)"
             ";;其他 (*.csv *.json *.xml *.epub *.txt)",
         )
-        for path in paths:
-            self._run_ingest(path, document_id=doc_id)
+        self._start_ingest_batch(paths, document_id=doc_id)
 
     def _delete_document(self) -> None:
         rows = self._table.selectionModel().selectedRows()

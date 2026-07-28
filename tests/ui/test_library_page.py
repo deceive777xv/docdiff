@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -38,7 +38,7 @@ class _FakeQThread:
     def start(self):
         self.started_called = True
 
-    def quit(self):
+    def quit(self, *_args):
         self.quit_called = True
 
     def deleteLater(self):
@@ -55,6 +55,7 @@ class _FakeIngestWorker:
         self.finished = _FakeSignal()
         self.error = _FakeSignal()
         self.refresh_needed = _FakeSignal()
+        self.progress = _FakeSignal()
         self.thread = None
         self.deleted = False
         _FakeIngestWorker.instances.append(self)
@@ -67,6 +68,33 @@ class _FakeIngestWorker:
 
     def deleteLater(self):
         self.deleted = True
+
+
+class _FakeProgressDialog:
+    instances = []
+
+    def __init__(self, paths, parent=None):
+        self.paths = list(paths)
+        self.parent = parent
+        self.updates = []
+        self.shown = False
+        self.hidden = False
+        _FakeProgressDialog.instances.append(self)
+
+    def show(self):
+        self.shown = True
+
+    def raise_(self):
+        pass
+
+    def activateWindow(self):
+        pass
+
+    def update_file(self, file_path, percent, stage, state="running"):
+        self.updates.append((file_path, percent, stage, state))
+
+    def finish(self):
+        self.hidden = True
 
 
 @pytest.fixture()
@@ -114,6 +142,7 @@ def test_run_ingest_connects_ui_updates_to_page_slots(library_page):
     assert worker.refresh_needed.connections[0].__name__ == "_on_ingest_done"
     assert worker.error.connections[0].__self__ is library_page
     assert worker.error.connections[0].__name__ == "_on_ingest_error"
+    assert worker.progress.connections
 
 
 def test_run_ingest_finished_discards_the_finished_thread(library_page):
@@ -123,15 +152,15 @@ def test_run_ingest_finished_discards_the_finished_thread(library_page):
 
     with patch("app.ui.pages.library_page.QThread", _FakeQThread):
         with patch("app.ui.pages.library_page._IngestWorker", _FakeIngestWorker):
-            library_page._run_ingest("C:/docs/one.pdf")
-            first_thread = _FakeQThread.instances[-1]
-            library_page._run_ingest("C:/docs/two.pdf")
-            second_thread = _FakeQThread.instances[-1]
+            library_page._start_ingest_batch(
+                ["C:/docs/one.pdf", "C:/docs/two.pdf"]
+            )
+            first_thread, second_thread = _FakeQThread.instances
 
     assert first_thread in library_page._threads
     assert second_thread in library_page._threads
 
-    first_thread.finished.emit()
+    library_page._on_ingest_thread_finished(first_thread)
 
     assert first_thread not in library_page._threads
     assert second_thread in library_page._threads
@@ -166,3 +195,167 @@ def test_refresh_shows_latest_version_and_version_count(library_page, mem_conn):
     assert library_page._table.horizontalHeaderItem(2).text() == "版本"
     assert library_page._table.item(0, 2).text() == "v2（终稿） · 共 2 版"
     assert library_page._status.text() == "共 1 份文档，2 个版本"
+
+
+@pytest.mark.parametrize(
+    ("update", "expected"),
+    [
+        ({"file_check": {"status": "file_checked"}}, (10, "正在解析文档")),
+        ({"parse_doc": {"status": "parsed"}}, (35, "正在规范化段落与跨页表格")),
+        ({"save_document": {"status": "saved"}}, (85, "正在构建检索索引")),
+        ({"build_embeddings": {"status": "completed"}}, (100, "导入完成")),
+        ({"parse_doc": {"status": "failed"}}, None),
+        ({"parse_doc": {"status": "parsed", "error": "parse failed"}}, None),
+        ({"unknown_node": {"status": "completed"}}, None),
+    ],
+)
+def test_ingest_graph_updates_map_to_monotonic_progress(update, expected):
+    from app.ui.pages.library_page import _progress_from_graph_update
+
+    assert _progress_from_graph_update(update) == expected
+
+
+def test_ingest_worker_streams_graph_stage_progress(ctx):
+    from app.ui.pages.library_page import _IngestWorker
+
+    graph = MagicMock()
+    graph.stream.return_value = iter(
+        [
+            {"file_check": {"status": "file_checked"}},
+            {"parse_doc": {"status": "parsed"}},
+            {"save_document": {"status": "saved"}},
+            {"build_embeddings": {"status": "completed"}},
+        ]
+    )
+    conn = MagicMock()
+    worker = _IngestWorker(ctx, "C:/docs/example.pdf")
+    progress = []
+    completed = []
+    worker.progress.connect(
+        lambda path, percent, stage: progress.append((path, percent, stage))
+    )
+    worker.refresh_needed.connect(completed.append)
+
+    with (
+        patch("app.agent.ingest_graph.ingest_graph", graph),
+        patch("app.db.schema.open_db", return_value=conn),
+    ):
+        worker.run()
+
+    assert [percent for _, percent, _ in progress] == [0, 10, 35, 85, 100]
+    assert completed == ["C:/docs/example.pdf"]
+    graph.stream.assert_called_once()
+    assert graph.stream.call_args.kwargs == {"stream_mode": "updates"}
+    conn.close.assert_called_once_with()
+
+
+def test_progress_dialog_averages_file_progress_and_counts_completion(qtbot):
+    from app.ui.pages.library_page import _ImportProgressDialog
+
+    dialog = _ImportProgressDialog(["C:/docs/a.pdf", "C:/docs/b.pdf"])
+    qtbot.addWidget(dialog)
+
+    dialog.update_file("C:/docs/a.pdf", 100, "导入完成", state="success")
+    dialog.update_file("C:/docs/b.pdf", 35, "正在规范化段落与跨页表格")
+
+    assert dialog._progress.value() == 67
+    assert dialog._summary.text() == "已完成 1/2"
+    assert "a.pdf" in dialog._items["C:/docs/a.pdf"].text()
+    assert "正在规范化段落与跨页表格" in dialog._items["C:/docs/b.pdf"].text()
+
+
+def test_closing_progress_dialog_only_hides_it(qtbot):
+    from app.ui.pages.library_page import _ImportProgressDialog
+
+    dialog = _ImportProgressDialog(["C:/docs/a.pdf"])
+    qtbot.addWidget(dialog)
+    event = MagicMock()
+
+    dialog.show()
+    dialog.closeEvent(event)
+
+    assert dialog.isHidden()
+    event.ignore.assert_called_once_with()
+
+
+def test_multi_file_batch_uses_one_dialog_and_one_completion_message(
+    library_page,
+):
+    _FakeQThread.instances.clear()
+    _FakeIngestWorker.instances.clear()
+    _FakeProgressDialog.instances.clear()
+
+    with (
+        patch("app.ui.pages.library_page.QThread", _FakeQThread),
+        patch("app.ui.pages.library_page._IngestWorker", _FakeIngestWorker),
+        patch("app.ui.pages.library_page._ImportProgressDialog", _FakeProgressDialog),
+        patch.object(library_page, "refresh") as refresh,
+        patch("app.ui.pages.library_page.QMessageBox.information") as information,
+    ):
+        library_page._delete_btn.setEnabled(True)
+        library_page._start_ingest_batch(
+            ["C:/docs/a.pdf", "C:/docs/b.pdf"]
+        )
+
+        assert len(_FakeProgressDialog.instances) == 1
+        assert len(_FakeIngestWorker.instances) == 2
+        assert not library_page._import_btn.isEnabled()
+        assert not library_page._add_version_btn.isEnabled()
+        assert not library_page._delete_btn.isEnabled()
+
+        first, second = _FakeIngestWorker.instances
+        first.progress.emit("C:/docs/a.pdf", 35, "正在规范化段落与跨页表格")
+        first.refresh_needed.emit("C:/docs/a.pdf")
+        library_page._on_ingest_thread_finished(first.thread)
+
+        assert refresh.call_count == 0
+        assert information.call_count == 0
+
+        second.refresh_needed.emit("C:/docs/b.pdf")
+
+        assert refresh.call_count == 0
+        assert information.call_count == 0
+
+        library_page._on_ingest_thread_finished(second.thread)
+
+        assert refresh.call_count == 1
+        assert information.call_count == 1
+        assert library_page._import_btn.isEnabled()
+        assert _FakeProgressDialog.instances[0].hidden
+
+
+def test_batch_reports_partial_failure_after_other_files_continue(library_page):
+    _FakeQThread.instances.clear()
+    _FakeIngestWorker.instances.clear()
+    _FakeProgressDialog.instances.clear()
+
+    with (
+        patch("app.ui.pages.library_page.QThread", _FakeQThread),
+        patch("app.ui.pages.library_page._IngestWorker", _FakeIngestWorker),
+        patch("app.ui.pages.library_page._ImportProgressDialog", _FakeProgressDialog),
+        patch.object(library_page, "refresh") as refresh,
+        patch("app.ui.pages.library_page.QMessageBox.warning") as warning,
+    ):
+        library_page._start_ingest_batch(
+            ["C:/docs/good.pdf", "C:/docs/bad.pdf"]
+        )
+        good, bad = _FakeIngestWorker.instances
+
+        bad.error.emit("C:/docs/bad.pdf", "parse failed")
+        library_page._on_ingest_thread_finished(bad.thread)
+        assert good.thread.quit_called is False
+        assert warning.call_count == 0
+
+        good.refresh_needed.emit("C:/docs/good.pdf")
+
+        assert refresh.call_count == 0
+        assert warning.call_count == 0
+
+        library_page._on_ingest_thread_finished(good.thread)
+
+        assert refresh.call_count == 1
+        assert warning.call_count == 1
+        message = warning.call_args.args[2]
+        assert "成功 1 个" in message
+        assert "失败 1 个" in message
+        assert "bad.pdf" in message
