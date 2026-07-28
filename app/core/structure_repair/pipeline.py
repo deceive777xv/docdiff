@@ -37,7 +37,7 @@ _TERMINAL_RE = re.compile(r"[。！？!?；;：:]\s*$")
 _HEADING_END_RE = re.compile(r"[。！？!?；;]\s*$")
 _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 _IMAGE_PLACEHOLDER_RE = re.compile(
-    r"^\s*==>\s*picture\s*\[\s*\d+\s*x\s*\d+\s*]\s*"
+    r"^\s*(?:\*\*)?==>\s*picture\s*\[\s*\d+\s*x\s*\d+\s*]\s*"
     r"intentionally omitted\s*<==\s*$",
     re.IGNORECASE,
 )
@@ -399,6 +399,8 @@ def _certain_continuation(previous: Paragraph, following: Paragraph) -> bool:
     left = previous.text.rstrip()
     right = following.text.lstrip()
     if not left or not right or _is_table(previous) or _is_table(following):
+        return False
+    if _IMAGE_PLACEHOLDER_RE.fullmatch(previous.text) or _IMAGE_PLACEHOLDER_RE.fullmatch(following.text):
         return False
     if _TERMINAL_RE.search(left) or _is_heading_like(right):
         return False
