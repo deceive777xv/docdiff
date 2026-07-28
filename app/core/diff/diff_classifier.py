@@ -37,6 +37,7 @@ _CLASSIFY_PROMPT = """你是一个专业的文档差异分析助手。请分析�
 - 中风险（medium）：表达或范围有变化，但未触及关键金额、日期、责任主体、权利义务
 - 高风险（high）：金额、日期、责任主体、权利义务、否定词、禁止/必须等关键内容变化
 - 相似度只能作为参考；如果你判断语义一致，应给 low 或 none，不要仅因相似度低给 high
+- 无风险（none）对应 should_report=false
 """
 
 _SINGLE_SIDED_TABLE_HEADER_PROMPT = """你是文档表格差异审核助手。以下是一条只在一侧文档出现的表格行，解析器认为它可能是表头。
@@ -51,7 +52,7 @@ _SINGLE_SIDED_TABLE_HEADER_PROMPT = """你是文档表格差异审核助手。�
 
 请只输出JSON：
 {{
-  "should_report": false,
+  "should_report": false|true,
   "diff_type": "新增|删减|格式变化",
   "risk_level": "high|medium|low|none",
   "explanation": "简短原因（30字以内）"
