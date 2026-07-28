@@ -51,10 +51,7 @@ class EchoMergeProvider(BaseProvider):
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         payload = json.loads(messages[-1]["content"])
-        return _response(
-            payload["candidate_id"],
-            boundary_id=payload["boundary_id"],
-        )
+        return _response(payload["candidate_id"])
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         raise AssertionError("retrieval is outside reconstruction")
@@ -71,7 +68,7 @@ class TextChoiceProvider(BaseProvider):
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         payload = json.loads(messages[-1]["content"])
-        continuation = " ".join(payload["continuation_cells"])
+        continuation = " ".join(payload["candidate"]["continuation"])
         return _response(
             payload["candidate_id"],
             decision=(
@@ -79,7 +76,6 @@ class TextChoiceProvider(BaseProvider):
                 if self.continuation_needle in continuation
                 else "keep"
             ),
-            boundary_id=payload["boundary_id"],
         )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -193,19 +189,13 @@ def _response(
     decision: str = "merge",
     confidence: float = 0.9,
     *,
-    boundary_id: str | None = None,
+    continuation_role: str = "continuation_row",
 ) -> str:
-    merge = decision == "merge"
     return json.dumps(
         {
-            "boundary_id": boundary_id or candidate_id,
             "candidate_id": candidate_id,
-            "roles": {
-                "previous_row": "body_row",
-                "continuation_row": "continuation_row",
-            },
-            "action": "merge_row" if merge else "keep",
-            "mapping_id": f"{candidate_id}:mapping:0",
+            "continuation_role": continuation_role,
+            "action": "merge" if decision == "merge" else "keep",
             "confidence": confidence,
             "reason": "bounded structural evidence",
         }
@@ -364,6 +354,141 @@ def test_pipeline_fails_closed_when_llm_accepts_two_choices_for_same_previous_ro
     )
 
 
+def test_pipeline_selects_only_clearly_higher_confidence_choice(monkeypatch):
+    first = _candidate("choice-a", "medium")
+    second = _candidate("choice-b", "medium")
+    second = replace(
+        second,
+        previous_row=first.previous_row,
+        previous_fragment_rows=first.previous_fragment_rows,
+    )
+    _stub_candidates(monkeypatch, [first, second])
+    baseline, target, pairs = _documents()
+    provider = QueueProvider(
+        [
+            _response("choice-a", confidence=0.85),
+            _response("choice-b", confidence=0.80),
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
+
+    decisions = {decision.candidate_id: decision for decision in result.trace.decisions}
+    assert decisions["choice-a"].final_action == "merge"
+    assert decisions["choice-b"].final_action == "keep_separate"
+    assert (
+        "lower_confidence_continuation_choice"
+        in decisions["choice-b"].rule_conflicts
+    )
+    assert "ambiguous_continuation_choices" not in decisions["choice-a"].rule_conflicts
+
+
+def test_pipeline_keeps_near_tied_choices_separate(monkeypatch):
+    first = _candidate("choice-a", "medium")
+    second = _candidate("choice-b", "medium")
+    second = replace(
+        second,
+        previous_row=first.previous_row,
+        previous_fragment_rows=first.previous_fragment_rows,
+    )
+    _stub_candidates(monkeypatch, [first, second])
+    baseline, target, pairs = _documents()
+    provider = QueueProvider(
+        [
+            _response("choice-a", confidence=0.85),
+            _response("choice-b", confidence=0.8000000000005),
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
+
+    assert all(
+        decision.final_action == "keep_separate"
+        and "ambiguous_continuation_choices" in decision.rule_conflicts
+        for decision in result.trace.decisions
+    )
+
+
+def test_pipeline_excludes_role_invalid_high_confidence_choice(monkeypatch):
+    invalid = _candidate("choice-a", "medium")
+    valid = _candidate("choice-b", "medium")
+    valid = replace(
+        valid,
+        previous_row=invalid.previous_row,
+        previous_fragment_rows=invalid.previous_fragment_rows,
+    )
+    _stub_candidates(monkeypatch, [invalid, valid])
+    baseline, target, pairs = _documents()
+    invalid_response = _response(
+        "choice-a",
+        confidence=0.99,
+        continuation_role="page_header",
+    )
+    provider = QueueProvider(
+        [
+            invalid_response,
+            invalid_response,
+            _response("choice-b", confidence=0.80),
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
+
+    decisions = {decision.candidate_id: decision for decision in result.trace.decisions}
+    assert decisions["choice-a"].llm is None
+    assert decisions["choice-a"].final_action == "keep_separate"
+    assert decisions["choice-b"].final_action == "merge"
+
+
+def test_pipeline_does_not_fallback_when_confidence_winner_is_unsafe(monkeypatch):
+    winner = _candidate("choice-a", "medium")
+    unsafe_extra_row = _row(
+        ("102", "next", "complete", "retained-extra"),
+        1,
+        "choice-a-right",
+    )
+    winner = replace(
+        winner,
+        continuation_fragment_rows=(
+            *winner.continuation_fragment_rows,
+            unsafe_extra_row,
+        ),
+    )
+    runner_up = _candidate("choice-b", "medium")
+    runner_up = replace(
+        runner_up,
+        previous_row=winner.previous_row,
+        previous_fragment_rows=winner.previous_fragment_rows,
+    )
+    _stub_candidates(monkeypatch, [winner, runner_up])
+    monkeypatch.setattr(
+        pipeline,
+        "build_reconstruction_operations",
+        build_reconstruction_operations,
+    )
+    baseline, target, pairs = _documents()
+    provider = QueueProvider(
+        [
+            _response("choice-a", confidence=0.95),
+            _response("choice-b", confidence=0.80),
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
+
+    decisions = {decision.candidate_id: decision for decision in result.trace.decisions}
+    assert decisions["choice-a"].final_action == "keep_separate"
+    assert "unsafe_fragment_projection" in decisions["choice-a"].rule_conflicts
+    assert decisions["choice-b"].final_action == "keep_separate"
+    assert (
+        "lower_confidence_continuation_choice"
+        in decisions["choice-b"].rule_conflicts
+    )
+    assert not any(
+        operation.type == "merge_rows" for operation in result.trace.operations
+    )
+
+
 def test_pipeline_keeps_medium_separate_without_provider(monkeypatch):
     _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
     baseline, target, pairs = _documents()
@@ -392,7 +517,8 @@ def test_pipeline_keeps_medium_separate_for_duplicate_response_member(monkeypatc
     _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
     baseline, target, pairs = _documents()
     duplicate_response = (
-        '{"candidate_id":"other","candidate_id":"medium","decision":"merge",'
+        '{"candidate_id":"other","candidate_id":"medium",'
+        '"continuation_role":"continuation_row","action":"merge",'
         '"confidence":0.99,"reason":"duplicate"}'
     )
 

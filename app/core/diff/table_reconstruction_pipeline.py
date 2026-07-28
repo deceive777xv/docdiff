@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from decimal import Decimal
 import re
 from typing import Literal, Mapping, Sequence, cast
 
@@ -43,9 +44,11 @@ from app.core.types import DocumentIR, Paragraph, Section
 
 
 _LLM_MERGE_THRESHOLD = 0.75
+_LLM_CHOICE_MARGIN = Decimal("0.05")
 _MAX_BOUNDARY_PARAGRAPH_NORMALIZED_LENGTH = 160
 _UNSAFE_FRAGMENT_PROJECTION = "unsafe_fragment_projection"
 _AMBIGUOUS_CONTINUATION_CHOICES = "ambiguous_continuation_choices"
+_LOWER_CONFIDENCE_CONTINUATION_CHOICE = "lower_confidence_continuation_choice"
 
 
 @dataclass(frozen=True)
@@ -482,11 +485,35 @@ def _resolve_assessment(
     return replace(assessment, final_action=final_action), judgment
 
 
+def _downgrade_with_conflict(
+    assessment: CandidateAssessment,
+    conflict: str,
+) -> CandidateAssessment:
+    candidate = replace(
+        assessment.candidate,
+        conflicts=tuple(
+            dict.fromkeys((*assessment.candidate.conflicts, conflict))
+        ),
+    )
+    return replace(
+        assessment,
+        candidate=candidate,
+        final_action="keep_separate",
+    )
+
+
 def _validate_resolved_assessments(
     assessments: Sequence[CandidateAssessment],
+    judgments: Mapping[tuple[str, str], LLMJudgment | None],
     boundary_rows: Mapping[str, set[SourceRowRef]],
     boundary_paragraphs: Mapping[str, set[str]],
 ) -> list[CandidateAssessment]:
+    def judgment_confidence(choice: CandidateAssessment) -> float:
+        judgment = judgments.get(
+            (choice.candidate.side, choice.candidate.candidate_id)
+        )
+        return judgment.confidence if judgment is not None else -1.0
+
     validated: list[CandidateAssessment] = []
     accepted_by_previous: dict[
         tuple[str, SourceRowRef],
@@ -499,11 +526,37 @@ def _validate_resolved_assessments(
                 assessment.candidate.previous_row.source,
             )
             accepted_by_previous.setdefault(key, []).append(assessment)
-    ambiguous_previous_rows = {
-        key
-        for key, choices in accepted_by_previous.items()
-        if len(choices) > 1
-    }
+    ambiguous_previous_rows: set[tuple[str, SourceRowRef]] = set()
+    lower_confidence_choices: set[tuple[str, str]] = set()
+    for previous_key, choices in accepted_by_previous.items():
+        if len(choices) <= 1:
+            continue
+        ranked = sorted(
+            choices,
+            key=lambda choice: (
+                -judgment_confidence(choice),
+                choice.candidate.candidate_id,
+            ),
+        )
+        winner_judgment = judgments.get(
+            (ranked[0].candidate.side, ranked[0].candidate.candidate_id)
+        )
+        runner_up_judgment = judgments.get(
+            (ranked[1].candidate.side, ranked[1].candidate.candidate_id)
+        )
+        if (
+            winner_judgment is None
+            or runner_up_judgment is None
+            or Decimal(str(winner_judgment.confidence))
+            - Decimal(str(runner_up_judgment.confidence))
+            < _LLM_CHOICE_MARGIN
+        ):
+            ambiguous_previous_rows.add(previous_key)
+            continue
+        lower_confidence_choices.update(
+            (choice.candidate.side, choice.candidate.candidate_id)
+            for choice in ranked[1:]
+        )
     build_reconstruction_operations([], boundary_rows, boundary_paragraphs)
     for assessment in assessments:
         if assessment.final_action != "merge":
@@ -513,23 +566,23 @@ def _validate_resolved_assessments(
             assessment.candidate.side,
             assessment.candidate.previous_row.source,
         )
-        if candidate_key in ambiguous_previous_rows:
-            candidate = replace(
-                assessment.candidate,
-                conflicts=tuple(
-                    dict.fromkeys(
-                        (
-                            *assessment.candidate.conflicts,
-                            _AMBIGUOUS_CONTINUATION_CHOICES,
-                        )
-                    )
-                ),
-            )
+        decision_key = (
+            assessment.candidate.side,
+            assessment.candidate.candidate_id,
+        )
+        if decision_key in lower_confidence_choices:
             validated.append(
-                replace(
+                _downgrade_with_conflict(
                     assessment,
-                    candidate=candidate,
-                    final_action="keep_separate",
+                    _LOWER_CONFIDENCE_CONTINUATION_CHOICE,
+                )
+            )
+            continue
+        if candidate_key in ambiguous_previous_rows:
+            validated.append(
+                _downgrade_with_conflict(
+                    assessment,
+                    _AMBIGUOUS_CONTINUATION_CHOICES,
                 )
             )
             continue
@@ -540,22 +593,10 @@ def _validate_resolved_assessments(
                 boundary_paragraphs,
             )
         except ValueError:
-            candidate = replace(
-                assessment.candidate,
-                conflicts=tuple(
-                    dict.fromkeys(
-                        (
-                            *assessment.candidate.conflicts,
-                            _UNSAFE_FRAGMENT_PROJECTION,
-                        )
-                    )
-                ),
-            )
             validated.append(
-                replace(
+                _downgrade_with_conflict(
                     assessment,
-                    candidate=candidate,
-                    final_action="keep_separate",
+                    _UNSAFE_FRAGMENT_PROJECTION,
                 )
             )
         else:
@@ -701,6 +742,7 @@ def reconstruct_table_pairs(
 
     resolved = _validate_resolved_assessments(
         resolved,
+        judgments,
         boundary_rows,
         boundary_paragraphs,
     )

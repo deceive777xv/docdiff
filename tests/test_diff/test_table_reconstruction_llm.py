@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
+import json
 
 import pytest
 
 from app.core.diff.reconstruction_trace import SourceRowRef
+from app.core.diff.table_boundary_context import (
+    BoundaryContextItem,
+    TableBoundaryContext,
+)
 from app.core.diff.table_reconstruction import (
     ColumnMapping,
     ContinuationCandidate,
@@ -18,15 +22,16 @@ from app.core.model.base_provider import BaseProvider
 class RecordingProvider(BaseProvider):
     chat_model = "recording-model"
 
-    def __init__(self, response: str | BaseException):
-        self.response = response
+    def __init__(self, responses: str | BaseException | list[str | BaseException]):
+        self.responses = list(responses) if isinstance(responses, list) else [responses]
         self.chat_calls: list[list[dict]] = []
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         self.chat_calls.append(messages)
-        if isinstance(self.response, BaseException):
-            raise self.response
-        return self.response
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         raise AssertionError("embedding is outside reconstruction adjudication")
@@ -36,25 +41,20 @@ class RecordingProvider(BaseProvider):
 
 
 def _response(
-    boundary_id: str = "candidate-1",
+    candidate_id: str = "candidate-1",
     *,
-    row_action: str = "merge",
-    table_action: str = "merge_fragments",
+    continuation_role: str = "continuation_row",
+    action: str = "merge",
     confidence: float = 0.75,
-    roles: dict[str, str] | None = None,
+    reason: str = "bounded structural evidence",
 ) -> str:
     return json.dumps(
         {
-            "boundary_id": boundary_id,
-            "roles": roles
-            or {
-                "previous_row": "body_row",
-                "continuation_row": "continuation_row",
-            },
-            "row_action": row_action,
-            "table_action": table_action,
+            "candidate_id": candidate_id,
+            "continuation_role": continuation_role,
+            "action": action,
             "confidence": confidence,
-            "reason": "bounded structural evidence",
+            "reason": reason,
         }
     )
 
@@ -92,53 +92,109 @@ def make_medium_candidate(candidate_id: str = "candidate-1") -> ContinuationCand
     )
 
 
-@pytest.mark.parametrize(
-    ("decision", "confidence"),
-    [("merge", 0.75), ("keep_separate", 0.82)],
-)
-def test_adjudicator_parses_matching_valid_response(decision, confidence):
-    candidate = make_medium_candidate("candidate-1")
-    provider = RecordingProvider(
-        _response(
-            row_action="merge" if decision == "merge" else "keep",
-            table_action="merge_fragments" if decision == "merge" else "keep",
-            confidence=confidence,
+def _context(candidate: ContinuationCandidate) -> TableBoundaryContext:
+    def item(
+        item_id: str,
+        paragraph_id: str,
+        sentence_index: int | None,
+        page_no: int,
+        kind: str,
+        text: str,
+    ) -> BoundaryContextItem:
+        return BoundaryContextItem(
+            item_id,
+            "section-1",
+            paragraph_id,
+            sentence_index,
+            page_no,
+            kind,
+            text,
         )
+
+    return TableBoundaryContext(
+        boundary_id="opaque-boundary",
+        side="baseline",
+        previous_page_no=1,
+        next_page_no=2,
+        inferred=False,
+        items=(
+            item("before-0", "before-0", None, 1, "paragraph", "before text 0"),
+            item("before-1", "before-1", None, 1, "paragraph", "before text 1"),
+            item("before-2", "before-2", None, 1, "paragraph", "before text 2"),
+            item("before-3", "before-3", None, 1, "paragraph", "before text 3"),
+            item("before-4", "before-4", None, 1, "paragraph", "before text 4"),
+            item("previous", "left", 0, 1, "table_row", candidate.previous_row.raw_text),
+            item("header-0", "header-0", 0, 2, "table_row", "|page header 0|"),
+            item("header-1", "header-1", None, 2, "paragraph", "page header 1"),
+            item("continuation", "right", 0, 2, "table_row", candidate.continuation_row.raw_text),
+            item("next", "right", 1, 2, "table_row", candidate.next_full_row.raw_text),
+            item("footer", "footer", None, 2, "paragraph", "page footer"),
+            item("after", "after", 0, 2, "table_row", "|after row|"),
+        ),
     )
 
-    judgment = adjudicate_continuation(candidate, provider)
+
+@pytest.mark.parametrize(
+    ("action", "continuation_role", "decision"),
+    [
+        ("merge", "continuation_row", "merge"),
+        ("keep", "new_table", "keep_separate"),
+        ("keep", "continuation_row", "keep_separate"),
+    ],
+)
+def test_adjudicator_parses_candidate_bound_response(
+    action,
+    continuation_role,
+    decision,
+):
+    provider = RecordingProvider(
+        _response(action=action, continuation_role=continuation_role)
+    )
+
+    judgment = adjudicate_continuation(make_medium_candidate(), provider)
 
     assert judgment is not None
     assert judgment.model == "recording-model"
     assert judgment.decision == decision
-    assert judgment.confidence == confidence
-    assert judgment.roles["continuation_row"] == "continuation_row"
+    assert judgment.roles == {"continuation": continuation_role}
+    assert judgment.row_action == ("merge" if action == "merge" else "keep")
+    assert judgment.table_action == (
+        "merge_fragments" if action == "merge" else "keep"
+    )
     assert len(provider.chat_calls) == 1
 
 
 @pytest.mark.parametrize(
     "response",
     [
-        '{"candidate_id":"other","decision":"merge","confidence":0.99,"reason":"mismatch"}',
-        '{"candidate_id":"candidate-1","decision":"rewrite","confidence":0.99,"reason":"invalid"}',
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":1.2,"reason":"invalid"}',
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":true,"reason":"invalid"}',
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":0.99}',
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":0.99,"reason":"ok","cells":["new"]}',
-        '{"candidate_id":"other","candidate_id":"candidate-1","decision":"merge","confidence":0.99,"reason":"duplicate"}',
-        '{"candidate_id":"candidate-1","decision":"keep_separate","decision":"merge","confidence":0.99,"reason":"duplicate"}',
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":1.2,"confidence":0.99,"reason":"duplicate"}',
-        '{"candidate_id":"candidate-1","decision":"merge","confidence":0.99,"reason":"","reason":"duplicate"}',
-        '```json\n{"candidate_id":"candidate-1","decision":"merge","confidence":0.99,"reason":"fenced"}\n```',
-        'prefix {"candidate_id":"candidate-1","decision":"merge","confidence":0.99,"reason":"embedded"}',
-        '[{"candidate_id":"candidate-1","decision":"merge","confidence":0.99,"reason":"array"}]',
+        _response("other"),
+        _response(continuation_role="body_row"),
+        _response(action="rewrite"),
+        _response(continuation_role="page_header", action="merge"),
+        _response(confidence=1.2),
+        '{"candidate_id":"candidate-1","continuation_role":"continuation_row",'
+        '"action":"merge","confidence":true,"reason":"invalid"}',
+        '{"candidate_id":"candidate-1","continuation_role":"continuation_row",'
+        '"action":"merge","confidence":"0.9","reason":"invalid"}',
+        '{"candidate_id":"candidate-1","continuation_role":"continuation_row",'
+        '"action":"merge","confidence":0.9}',
+        '{"candidate_id":"candidate-1","continuation_role":"continuation_row",'
+        '"action":"merge","confidence":0.9,"reason":"ok","extra":true}',
+        '{"candidate_id":"other","candidate_id":"candidate-1",'
+        '"continuation_role":"continuation_row","action":"merge",'
+        '"confidence":0.9,"reason":"duplicate"}',
+        _response(reason=""),
+        _response(reason="x" * 201),
+        '```json\n' + _response() + '\n```',
+        "prefix " + _response(),
+        "[" + _response() + "]",
     ],
 )
-def test_adjudicator_rejects_non_strict_responses(response):
-    provider = RecordingProvider(response)
+def test_adjudicator_rejects_non_strict_or_unbound_responses(response):
+    provider = RecordingProvider([response, response])
 
     assert adjudicate_continuation(make_medium_candidate(), provider) is None
-    assert len(provider.chat_calls) in {1, 2}
+    assert len(provider.chat_calls) == 2
 
 
 @pytest.mark.parametrize("error", [RuntimeError("offline"), TimeoutError("model timeout")])
@@ -160,35 +216,81 @@ def test_adjudicator_preserves_valid_sub_threshold_judgment():
     assert judgment.reason == "bounded structural evidence"
 
 
-def test_adjudicator_sends_only_bounded_structural_context():
+def test_adjudicator_sends_minimized_candidate_bound_payload():
+    candidate = make_medium_candidate()
     provider = RecordingProvider(_response())
 
-    adjudicate_continuation(make_medium_candidate(), provider)
+    adjudicate_continuation(candidate, provider, _context(candidate))
 
     assert len(provider.chat_calls) == 1
     messages = provider.chat_calls[0]
     assert [message["role"] for message in messages] == ["system", "user"]
     payload = json.loads(messages[1]["content"])
-    assert set(payload) == {
+    assert payload == {
+        "candidate_id": "candidate-1",
+        "candidate": {
+            "previous": ["12", "drive", "0.5 s"],
+            "continuation": ["", "", "within"],
+            "next": ["13", "stop", "0.8 s"],
+        },
+        "nearby_context": {
+            "before": [
+                "before text 0",
+                "before text 1",
+                "before text 2",
+                "before text 3",
+                "before text 4",
+            ],
+            "after": [
+                "|page header 0|",
+                "page header 1",
+                "|13|stop|0.8 s|",
+                "page footer",
+                "|after row|",
+            ],
+        },
+        "peer_rows": [
+            ["20", "peer", "context-0"],
+            ["21", "peer", "context-1"],
+        ],
+    }
+    serialized = messages[1]["content"]
+    for removed_field in (
         "boundary_id",
-        "candidate_id",
         "side",
-        "previous_cells",
-        "continuation_cells",
-        "next_cells",
-        "logical_column_roles",
+        "kind",
+        "page_no",
         "physical_mapping",
         "mapping_candidates",
+        "logical_column_roles",
         "rule_evidence",
         "rule_conflicts",
-        "cross_version_rows",
         "context_items",
+    ):
+        assert removed_field not in serialized
+
+
+def test_adjudicator_omits_empty_optional_payload_fields():
+    candidate = replace(
+        make_medium_candidate(),
+        next_full_row=None,
+        cross_version_rows=(),
+    )
+    provider = RecordingProvider(_response())
+
+    adjudicate_continuation(candidate, provider)
+
+    payload = json.loads(provider.chat_calls[0][1]["content"])
+    assert payload == {
+        "candidate_id": "candidate-1",
+        "candidate": {
+            "previous": ["12", "drive", "0.5 s"],
+            "continuation": ["", "", "within"],
+        },
     }
-    assert len(payload["cross_version_rows"]) == 3
-    assert "paragraph_id" not in messages[1]["content"]
 
 
-def test_adjudicator_projects_sparse_previous_row_to_logical_cells():
+def test_adjudicator_projects_sparse_previous_row_without_mapping_metadata():
     candidate = make_medium_candidate()
     sparse_previous = _row(("", "beta", "", "", "", "prefix"), 0, "left")
     candidate = replace(
@@ -206,100 +308,45 @@ def test_adjudicator_projects_sparse_previous_row_to_logical_cells():
     adjudicate_continuation(candidate, provider)
 
     payload = json.loads(provider.chat_calls[0][1]["content"])
-    assert payload["previous_cells"] == ["", "beta", "prefix"]
-    assert payload["physical_mapping"]["previous_logical_by_physical"] == [
-        [0, 0],
-        [1, 1],
-        [5, 2],
-    ]
-    assert len(payload["logical_column_roles"]) == 3
+    assert payload["candidate"]["previous"] == ["", "beta", "prefix"]
+    assert "physical_mapping" not in payload
 
 
-def test_adjudicator_rejects_roles_outside_the_bounded_context():
+def test_adjudicator_sends_detailed_strict_system_contract():
+    provider = RecordingProvider(_response())
+
+    adjudicate_continuation(make_medium_candidate(), provider)
+
+    prompt = provider.chat_calls[0][0]["content"]
+    for required_instruction in (
+        "fixed candidate slots",
+        "exactly these five fields",
+        "candidate_id",
+        "continuation_role",
+        "action",
+        "confidence",
+        "reason",
+        "duplicate",
+        "Markdown",
+        "200 characters",
+        "JSON number",
+        "merge is valid only",
+    ):
+        assert required_instruction in prompt
+
+
+def test_adjudicator_retries_once_with_same_payload_after_invalid_response():
     provider = RecordingProvider(
-        _response(
-            roles={
-                "previous_row": "body_row",
-                "continuation_row": "continuation_row",
-                "invented-row": "ordinary_text",
-            }
-        )
+        [
+            '{"action":"merge"}',
+            _response(confidence=0.91, reason="corrected strict response"),
+        ]
     )
-
-    assert adjudicate_continuation(make_medium_candidate(), provider) is None
-
-
-def test_adjudicator_accepts_atomic_row_action_with_supplied_mapping_id():
-    class AtomicProvider(RecordingProvider):
-        def __init__(self):
-            super().__init__("")
-
-        def chat(self, messages: list[dict], **kwargs) -> str:
-            self.chat_calls.append(messages)
-            payload = json.loads(messages[-1]["content"])
-            mapping_id = payload["mapping_candidates"][0]["mapping_id"]
-            return json.dumps(
-                {
-                    "boundary_id": payload["boundary_id"],
-                    "candidate_id": payload["candidate_id"],
-                    "action": "merge_row",
-                    "mapping_id": mapping_id,
-                    "roles": {
-                        "previous_row": "body_row",
-                        "continuation_row": "continuation_row",
-                    },
-                    "confidence": 0.93,
-                    "reason": "continuation content belongs to the previous logical row",
-                }
-            )
-
-    provider = AtomicProvider()
-
-    judgment = adjudicate_continuation(make_medium_candidate(), provider)
-
-    assert judgment is not None
-    assert judgment.decision == "merge"
-    assert judgment.row_action == "merge"
-    assert judgment.table_action == "merge_fragments"
-    payload = json.loads(provider.chat_calls[0][-1]["content"])
-    assert judgment.mapping_id == payload["mapping_candidates"][0]["mapping_id"]
-    assert payload["mapping_candidates"][0]["logical_by_physical"] == [
-        [0, 0],
-        [1, 1],
-        [2, 2],
-    ]
-
-
-def test_adjudicator_retries_once_after_invalid_atomic_response():
-    class RetryProvider(RecordingProvider):
-        def __init__(self):
-            super().__init__("")
-
-        def chat(self, messages: list[dict], **kwargs) -> str:
-            self.chat_calls.append(messages)
-            if len(self.chat_calls) == 1:
-                return '{"action":"merge_row"}'
-            payload = json.loads(messages[-1]["content"])
-            return json.dumps(
-                {
-                    "boundary_id": payload["boundary_id"],
-                    "candidate_id": payload["candidate_id"],
-                    "action": "merge_row",
-                    "mapping_id": payload["mapping_candidates"][0]["mapping_id"],
-                    "roles": {
-                        "previous_row": "body_row",
-                        "continuation_row": "continuation_row",
-                    },
-                    "confidence": 0.91,
-                    "reason": "corrected strict response",
-                }
-            )
-
-    provider = RetryProvider()
 
     judgment = adjudicate_continuation(make_medium_candidate(), provider)
 
     assert judgment is not None
     assert judgment.decision == "merge"
     assert len(provider.chat_calls) == 2
-    assert "validation" in provider.chat_calls[1][0]["content"].lower()
+    assert "strict validation" in provider.chat_calls[1][0]["content"]
+    assert provider.chat_calls[1][1] == provider.chat_calls[0][1]
