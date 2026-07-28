@@ -18,6 +18,7 @@ class IngestState(TypedDict, total=False):
     conn: Any                  # sqlite3.Connection, opened and closed by caller
     llm_client: Any            # openai.OpenAI, for markitdown-ocr; None → OCR skipped
     llm_model: str
+    provider: Any              # BaseProvider used for semantic normalization
 
     # ── Node-internal intermediate values ───────────────────────────────────
     _file_hash: str

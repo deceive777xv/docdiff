@@ -31,6 +31,7 @@ from app.core.diff.table_reconstruction import (
     corresponding_peer_fragments,
     generate_continuation_candidates,
     infer_active_columns,
+    infer_bounded_rescue_mappings,
     infer_monotonic_column_mapping,
     infer_regions,
 )
@@ -56,6 +57,12 @@ class ReconstructionResult:
     baseline_ir: DocumentIR
     target_ir: DocumentIR
     section_pairs: list[SectionPair]
+    trace: ReconstructionTrace
+
+
+@dataclass(frozen=True)
+class DocumentReconstructionResult:
+    document: DocumentIR
     trace: ReconstructionTrace
 
 
@@ -292,6 +299,15 @@ def _compatible_fragment_pairs(
         mapping = infer_monotonic_column_mapping(left, right, cross_version_fragments)
         if mapping is not None:
             compatible.append((left, right, mapping))
+            continue
+        compatible.extend(
+            (left, right, rescue_mapping)
+            for rescue_mapping in infer_bounded_rescue_mappings(
+                left,
+                right,
+                cross_version_fragments,
+            )
+        )
     return tuple(compatible)
 
 
@@ -468,10 +484,7 @@ def _resolve_assessment(
     context: TableBoundaryContext | None = None,
 ) -> tuple[CandidateAssessment, LLMJudgment | None]:
     candidate = assessment.candidate
-    requires_semantic_decision = (
-        assessment.rule_confidence in {"high", "medium"}
-        and not candidate.vetoes
-    )
+    requires_semantic_decision = not candidate.vetoes
     if not requires_semantic_decision or provider is None:
         return replace(assessment, final_action="keep_separate"), None
     judgment = adjudicate_continuation(candidate, provider, context)
@@ -704,17 +717,36 @@ def reconstruct_table_pairs(
     baseline_ir: DocumentIR,
     target_ir: DocumentIR,
     provider: BaseProvider | None,
+    *,
+    candidate_source_filter: Mapping[
+        str,
+        set[tuple[SourceRowRef, SourceRowRef]] | None,
+    ]
+    | None = None,
 ) -> ReconstructionResult:
     """Analyze aligned versions jointly and emit normalized IR plus replay trace."""
     candidates: dict[tuple[str, str], ContinuationCandidate] = {}
     boundary_rows: dict[str, set[SourceRowRef]] = {"baseline": set(), "target": set()}
     boundary_paragraphs: dict[str, set[str]] = {"baseline": set(), "target": set()}
-    for section_pair in section_pairs:
-        pair_candidates, pair_rows, pair_paragraphs = _collect_pair_analysis(section_pair)
-        for candidate in pair_candidates:
-            candidates.setdefault((candidate.side, candidate.candidate_id), candidate)
-        _merge_sets(boundary_rows, pair_rows)
-        _merge_sets(boundary_paragraphs, pair_paragraphs)
+    has_any_allowed_candidate = candidate_source_filter is None or any(
+        allowed is None or bool(allowed)
+        for allowed in candidate_source_filter.values()
+    )
+    if has_any_allowed_candidate:
+        for section_pair in section_pairs:
+            pair_candidates, pair_rows, pair_paragraphs = _collect_pair_analysis(section_pair)
+            for candidate in pair_candidates:
+                if candidate_source_filter is not None:
+                    allowed = candidate_source_filter.get(candidate.side, set())
+                    source_pair = (
+                        candidate.previous_row.source,
+                        candidate.continuation_row.source,
+                    )
+                    if allowed is not None and source_pair not in allowed:
+                        continue
+                candidates.setdefault((candidate.side, candidate.candidate_id), candidate)
+            _merge_sets(boundary_rows, pair_rows)
+            _merge_sets(boundary_paragraphs, pair_paragraphs)
 
     resolved: list[CandidateAssessment] = []
     judgments: dict[tuple[str, str], LLMJudgment | None] = {}
@@ -780,4 +812,28 @@ def reconstruct_table_pairs(
         normalized_target,
         normalized_pairs,
         trace,
+    )
+
+
+def reconstruct_document_tables(
+    document: DocumentIR,
+    provider: BaseProvider | None,
+) -> DocumentReconstructionResult:
+    """Reconstruct one document without requiring cross-version evidence."""
+    empty_peer = DocumentIR(
+        doc_id=f"{document.doc_id}:normalization-empty-peer",
+        title="",
+        file_hash="0" * 64,
+        sections=[],
+        plain_text="",
+    )
+    result = reconstruct_table_pairs(
+        align_sections(document, empty_peer),
+        document,
+        empty_peer,
+        provider,
+    )
+    return DocumentReconstructionResult(
+        document=result.baseline_ir,
+        trace=result.trace,
     )

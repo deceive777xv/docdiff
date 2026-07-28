@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from copy import deepcopy
+from dataclasses import replace
 import hashlib
 import json
 import re
@@ -11,7 +12,11 @@ from typing import Iterable
 from app.core.document_ir_codec import document_ir_to_dict
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
-from .llm import adjudicate_paragraph_merge, adjudicate_section_parent
+from .llm import (
+    adjudicate_paragraph_merge,
+    adjudicate_section_parent,
+    adjudicate_table_fragment_merge,
+)
 from .models import (
     RejectedStructureCandidate,
     StructureRepairDecision,
@@ -98,9 +103,6 @@ _CONTINUATION_PREFIXES = (
     "而",
     "但",
 )
-_MAX_LLM_PARAGRAPH_CANDIDATES = 24
-
-
 def _stable_id(prefix: str, source_ids: Iterable[str]) -> str:
     digest = hashlib.sha256(
         "\x1f".join(source_ids).encode("utf-8")
@@ -402,61 +404,21 @@ def _certain_continuation(previous: Paragraph, following: Paragraph) -> bool:
         return False
     if _IMAGE_PLACEHOLDER_RE.fullmatch(previous.text) or _IMAGE_PLACEHOLDER_RE.fullmatch(following.text):
         return False
-    if _TERMINAL_RE.search(left) or _is_heading_like(right):
+    if _TERMINAL_RE.search(left):
         return False
     if previous.page_no is None or following.page_no is None:
         return False
     if following.page_no - previous.page_no not in {0, 1}:
         return False
-    return left.endswith(_CONTINUATION_SUFFIXES) or right.startswith(
-        _CONTINUATION_PREFIXES
+    has_explicit_continuity = left.endswith(
+        _CONTINUATION_SUFFIXES
+    ) or right.startswith(_CONTINUATION_PREFIXES)
+    if not has_explicit_continuity:
+        return False
+    return not (
+        _NUMBERED_TITLE_RE.match(right)
+        or _GENERIC_STRUCTURE_RE.match(right)
     )
-
-
-def _merge_certain_paragraphs(
-    document: DocumentIR,
-    operations: list[StructureRepairOperation],
-) -> None:
-    for section in document.sections:
-        repaired: list[Paragraph] = []
-        index = 0
-        while index < len(section.paragraphs):
-            current = section.paragraphs[index]
-            if (
-                index + 1 < len(section.paragraphs)
-                and _certain_continuation(current, section.paragraphs[index + 1])
-            ):
-                following = section.paragraphs[index + 1]
-                output_id = _stable_id(
-                    "paragraph",
-                    [current.paragraph_id, following.paragraph_id],
-                )
-                merged_text = current.text.rstrip() + following.text.lstrip()
-                repaired.append(
-                    Paragraph(
-                        paragraph_id=output_id,
-                        text=merged_text,
-                        sentences=[Sentence(text=merged_text)],
-                        page_no=current.page_no,
-                    )
-                )
-                operations.append(
-                    StructureRepairOperation(
-                        operation_id=_operation_id(
-                            "merge_paragraphs",
-                            [current.paragraph_id, following.paragraph_id],
-                        ),
-                        type="merge_paragraphs",
-                        source_ids=[current.paragraph_id, following.paragraph_id],
-                        output_id=output_id,
-                        reason="adjacent sentence fragments have explicit continuity",
-                    )
-                )
-                index += 2
-                continue
-            repaired.append(current)
-            index += 1
-        section.paragraphs = repaired
 
 
 def _table_rows(paragraph: Paragraph) -> list[str]:
@@ -497,52 +459,97 @@ def _can_merge_table_fragments(
     )
 
 
-def _merge_table_fragments(
+def _adjudicate_simple_table_fragments(
     document: DocumentIR,
+    provider: object | None,
+    model: str,
     operations: list[StructureRepairOperation],
+    decisions: list[StructureRepairDecision],
+    rejected: list[RejectedStructureCandidate],
 ) -> None:
+    if provider is None:
+        return
     for section in document.sections:
-        repaired: list[Paragraph] = []
+        repaired = list(section.paragraphs)
+        end_pages = {
+            paragraph.paragraph_id: paragraph.page_no
+            for paragraph in repaired
+        }
         index = 0
-        while index < len(section.paragraphs):
-            current = section.paragraphs[index]
-            if (
-                index + 1 < len(section.paragraphs)
-                and _can_merge_table_fragments(
-                    current,
-                    section.paragraphs[index + 1],
-                )
-            ):
-                following = section.paragraphs[index + 1]
-                rows = _table_rows(current) + _table_rows(following)[2:]
-                output_id = _stable_id(
-                    "table",
-                    [current.paragraph_id, following.paragraph_id],
-                )
-                repaired.append(
-                    Paragraph(
-                        paragraph_id=output_id,
-                        text="\n".join(rows),
-                        sentences=[Sentence(text=row) for row in rows],
-                        page_no=current.page_no,
-                    )
-                )
-                operations.append(
-                    StructureRepairOperation(
-                        operation_id=_operation_id(
-                            "merge_table_fragments",
-                            [current.paragraph_id, following.paragraph_id],
-                        ),
-                        type="merge_table_fragments",
-                        source_ids=[current.paragraph_id, following.paragraph_id],
-                        output_id=output_id,
-                        reason="adjacent table fragments repeat an identical header and width",
-                    )
-                )
-                index += 2
+        while index + 1 < len(repaired):
+            current = repaired[index]
+            following = repaired[index + 1]
+            boundary_view = replace(
+                current,
+                page_no=end_pages.get(current.paragraph_id, current.page_no),
+            )
+            if not _can_merge_table_fragments(boundary_view, following):
+                index += 1
                 continue
-            repaired.append(current)
-            index += 1
+            judgment, rejection_code = adjudicate_table_fragment_merge(
+                boundary_view,
+                following,
+                provider,
+                model,
+            )
+            candidate_id = (
+                f"tables:{current.paragraph_id}:{following.paragraph_id}"
+            )
+            if judgment is None:
+                rejected.append(
+                    RejectedStructureCandidate(
+                        candidate_id=candidate_id,
+                        code=rejection_code,
+                        reason="LLM judgment was unavailable or failed validation",
+                    )
+                )
+                index += 1
+                continue
+            decisions.append(
+                StructureRepairDecision(
+                    candidate_id=candidate_id,
+                    action=judgment.action,
+                    source_ids=[current.paragraph_id, following.paragraph_id],
+                    target_section_id=section.section_id,
+                    confidence=judgment.confidence,
+                    reason=judgment.reason,
+                )
+            )
+            if judgment.action == "keep":
+                index += 1
+                continue
+            rows = _table_rows(current) + _table_rows(following)[2:]
+            output_id = _stable_id(
+                "table",
+                [current.paragraph_id, following.paragraph_id],
+            )
+            merged = Paragraph(
+                paragraph_id=output_id,
+                text="\n".join(rows),
+                sentences=[Sentence(text=row) for row in rows],
+                page_no=current.page_no,
+            )
+            end_pages[output_id] = end_pages.get(
+                following.paragraph_id,
+                following.page_no,
+            )
+            repaired[index : index + 2] = [merged]
+            operations.append(
+                StructureRepairOperation(
+                    operation_id=_operation_id(
+                        "merge_table_fragments",
+                        [current.paragraph_id, following.paragraph_id],
+                    ),
+                    type="merge_table_fragments",
+                    source_ids=[current.paragraph_id, following.paragraph_id],
+                    output_id=output_id,
+                    target_section_id=section.section_id,
+                    reason=judgment.reason,
+                    actor="llm",
+                    confidence=judgment.confidence,
+                )
+            )
+            index = max(0, index - 1)
         section.paragraphs = repaired
 
 
@@ -639,35 +646,44 @@ def _adjudicate_paragraph_fragments(
 ) -> None:
     if provider is None:
         return
-    candidate_count = 0
     for section in document.sections:
-        repaired: list[Paragraph] = []
+        repaired = list(section.paragraphs)
+        end_pages = {
+            paragraph.paragraph_id: paragraph.page_no
+            for paragraph in repaired
+        }
         index = 0
-        while index < len(section.paragraphs):
-            previous = section.paragraphs[index]
-            if (
-                index + 1 >= len(section.paragraphs)
-                or candidate_count >= _MAX_LLM_PARAGRAPH_CANDIDATES
-                or not _is_ambiguous_fragment_candidate(
-                    previous,
-                    section.paragraphs[index + 1],
+        while index + 1 < len(repaired):
+            previous = repaired[index]
+            following = repaired[index + 1]
+            previous_boundary_view = replace(
+                previous,
+                page_no=end_pages.get(previous.paragraph_id, previous.page_no),
+            )
+            if not (
+                _certain_continuation(previous_boundary_view, following)
+                or _is_ambiguous_fragment_candidate(
+                    previous_boundary_view,
+                    following,
                 )
             ):
-                repaired.append(previous)
                 index += 1
                 continue
-            following = section.paragraphs[index + 1]
-            candidate_count += 1
-            context = section.paragraphs[
-                max(0, index - 2) : min(len(section.paragraphs), index + 4)
+            context = repaired[
+                max(0, index - 6) : min(len(repaired), index + 8)
             ]
             judgment, rejection_code = adjudicate_paragraph_merge(
                 section,
-                previous,
+                previous_boundary_view,
                 following,
                 context,
                 provider,
                 model,
+                rule_evidence=(
+                    ("explicit_syntactic_continuity",)
+                    if _certain_continuation(previous_boundary_view, following)
+                    else ()
+                ),
             )
             candidate_id = (
                 f"paragraphs:{previous.paragraph_id}:{following.paragraph_id}"
@@ -680,7 +696,6 @@ def _adjudicate_paragraph_fragments(
                         reason="LLM judgment was unavailable or failed validation",
                     )
                 )
-                repaired.append(previous)
                 index += 1
                 continue
             decisions.append(
@@ -697,7 +712,6 @@ def _adjudicate_paragraph_fragments(
                 )
             )
             if judgment.action == "keep":
-                repaired.append(previous)
                 index += 1
                 continue
             output_id = _stable_id(
@@ -705,14 +719,17 @@ def _adjudicate_paragraph_fragments(
                 [previous.paragraph_id, following.paragraph_id],
             )
             merged_text = previous.text.rstrip() + following.text.lstrip()
-            repaired.append(
-                Paragraph(
-                    paragraph_id=output_id,
-                    text=merged_text,
-                    sentences=[Sentence(text=merged_text)],
-                    page_no=previous.page_no,
-                )
+            merged = Paragraph(
+                paragraph_id=output_id,
+                text=merged_text,
+                sentences=[Sentence(text=merged_text)],
+                page_no=previous.page_no,
             )
+            end_pages[output_id] = end_pages.get(
+                following.paragraph_id,
+                following.page_no,
+            )
+            repaired[index : index + 2] = [merged]
             operations.append(
                 StructureRepairOperation(
                     operation_id=_operation_id(
@@ -728,7 +745,7 @@ def _adjudicate_paragraph_fragments(
                     confidence=judgment.confidence,
                 )
             )
-            index += 2
+            index = max(0, index - 1)
         section.paragraphs = repaired
 
 
@@ -834,8 +851,14 @@ def repair_document(
     _demote_generic_sections(repaired, operations)
     _promote_numbered_paragraphs(repaired, operations)
     _remove_noise(repaired, operations)
-    _merge_certain_paragraphs(repaired, operations)
-    _merge_table_fragments(repaired, operations)
+    _adjudicate_simple_table_fragments(
+        repaired,
+        provider,
+        model,
+        operations,
+        decisions,
+        rejected,
+    )
     _adjudicate_paragraph_fragments(
         repaired,
         provider,

@@ -219,7 +219,11 @@ def test_run_compare_marks_failed_and_reraises_when_sidecar_publish_fails(tmp_pa
     monkeypatch.setattr(compare_service.compare_repo, "insert_diff_items", lambda *args: None)
     monkeypatch.setattr(compare_service, "_load_ir", lambda *args: mock_ir)
     monkeypatch.setattr(compare_service, "align_sections", lambda *args: [])
-    monkeypatch.setattr(compare_service, "reconstruct_table_pairs", lambda *args: reconstruction)
+    monkeypatch.setattr(
+        compare_service,
+        "normalize_pair",
+        lambda *args, **kwargs: reconstruction,
+    )
     monkeypatch.setattr(compare_service, "match_paragraphs", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         compare_service,

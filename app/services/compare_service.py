@@ -9,8 +9,8 @@ from app.core.diff.diff_classifier import classify
 from app.core.diff.reconstruction_trace import persist_compare_artifacts
 from app.core.diff.semantic_matcher import match_paragraphs
 from app.core.diff.structure_aligner import align_sections
-from app.core.diff.table_reconstruction_pipeline import reconstruct_table_pairs
 from app.core.model.base_provider import BaseProvider
+from app.core.normalization import load_deferred_table_candidates, normalize_pair
 from app.core.types import ComparePolicy, DiffResult, DocumentIR
 from app.db import compare_repo, document_repo
 
@@ -66,11 +66,13 @@ def run_compare(
         target_ir = _load_ir(target_version_id, conn)
 
         section_pairs = align_sections(baseline_ir, target_ir)
-        reconstructed = reconstruct_table_pairs(
-            section_pairs,
+        reconstructed = normalize_pair(
             baseline_ir,
             target_ir,
-            provider,
+            provider=provider,
+            baseline_deferred=load_deferred_table_candidates(data_dir, baseline_ir),
+            target_deferred=load_deferred_table_candidates(data_dir, target_ir),
+            section_pairs=section_pairs,
         )
         baseline_ir = reconstructed.baseline_ir
         target_ir = reconstructed.target_ir

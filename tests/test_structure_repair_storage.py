@@ -39,13 +39,30 @@ def test_prepare_import_ir_persists_raw_normalized_and_trace(tmp_path):
     assert artifacts.trace_path == (
         tmp_path / "parsed" / "traces" / "raw-doc.structure.json"
     )
+    assert artifacts.normalization_trace_path == (
+        tmp_path / "parsed" / "traces" / "raw-doc.normalization.json"
+    )
+    assert artifacts.boundary_profile_path == (
+        tmp_path / "parsed" / "profiles" / "raw-doc.boundary.json"
+    )
     raw = json.loads(artifacts.raw_path.read_text(encoding="utf-8"))
     normalized = json.loads(artifacts.normalized_path.read_text(encoding="utf-8"))
     trace = json.loads(artifacts.trace_path.read_text(encoding="utf-8"))
+    normalization_trace = json.loads(
+        artifacts.normalization_trace_path.read_text(encoding="utf-8")
+    )
+    boundary_profile = json.loads(
+        artifacts.boundary_profile_path.read_text(encoding="utf-8")
+    )
     assert raw["sections"][0]["title"] == "**1.1 测试**"
     assert normalized["sections"][0]["title"] == "1.1 测试"
     assert trace["status"] == "repaired"
     assert trace["raw_hash"] != trace["normalized_hash"]
+    assert normalization_trace["scope"] == "document"
+    assert normalization_trace["structure_trace"] == trace
+    assert normalization_trace["table_trace"]["baseline"]["doc_id"] == "raw-doc"
+    assert boundary_profile["doc_id"] == "raw-doc"
+    assert boundary_profile["deferred_table_candidates"] == []
 
 
 def test_prepare_import_ir_falls_back_to_raw_when_repair_raises(
@@ -57,14 +74,18 @@ def test_prepare_import_ir_falls_back_to_raw_when_repair_raises(
     def fail(*_args, **_kwargs):
         raise RuntimeError("repair failed")
 
-    monkeypatch.setattr(storage, "repair_document", fail)
+    monkeypatch.setattr(storage, "normalize_document", fail)
 
     artifacts = storage.prepare_import_ir(tmp_path, _raw_document())
 
     raw = json.loads(artifacts.raw_path.read_text(encoding="utf-8"))
     normalized = json.loads(artifacts.normalized_path.read_text(encoding="utf-8"))
     trace = json.loads(artifacts.trace_path.read_text(encoding="utf-8"))
+    normalization_trace = json.loads(
+        artifacts.normalization_trace_path.read_text(encoding="utf-8")
+    )
     assert normalized == raw
     assert artifacts.document == _raw_document()
     assert trace["status"] == "fallback"
     assert trace["warnings"] == ["RuntimeError: repair failed"]
+    assert normalization_trace["status"] == "fallback"

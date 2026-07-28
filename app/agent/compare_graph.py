@@ -11,8 +11,8 @@ from app.core.diff.diff_classifier import classify
 from app.core.diff.reconstruction_trace import persist_compare_artifacts
 from app.core.diff.semantic_matcher import match_paragraphs
 from app.core.diff.structure_aligner import align_sections
-from app.core.diff.table_reconstruction_pipeline import reconstruct_table_pairs
 from app.core.document_ir_codec import load_document_ir
+from app.core.normalization import load_deferred_table_candidates, normalize_pair
 from app.core.types import ComparePolicy, DocumentIR
 from app.db import compare_repo, document_repo
 
@@ -82,11 +82,19 @@ def do_align(state: CompareState) -> dict:
 def do_reconstruct_tables(state: CompareState) -> dict:
     """Normalize cross-page table fragments before paragraph matching."""
     try:
-        reconstructed = reconstruct_table_pairs(
-            state["_section_pairs"],
+        baseline_deferred = load_deferred_table_candidates(
+            state["data_dir"], state["_baseline_ir"]
+        )
+        target_deferred = load_deferred_table_candidates(
+            state["data_dir"], state["_target_ir"]
+        )
+        reconstructed = normalize_pair(
             state["_baseline_ir"],
             state["_target_ir"],
-            state.get("provider"),
+            provider=state.get("provider"),
+            baseline_deferred=baseline_deferred,
+            target_deferred=target_deferred,
+            section_pairs=state["_section_pairs"],
         )
         return {
             "_baseline_ir": reconstructed.baseline_ir,

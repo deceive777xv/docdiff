@@ -97,9 +97,10 @@ def test_compare_graph_reconstructs_before_matching_and_persists_trace(base_stat
         calls.append("align")
         return initial_pairs
 
-    def record_reconstruct(*args):
+    def record_reconstruct(*args, **kwargs):
         calls.append("reconstruct")
-        assert args[:3] == (initial_pairs, mock_ir, mock_ir)
+        assert args == (mock_ir, mock_ir)
+        assert kwargs["section_pairs"] is initial_pairs
         return reconstruction
 
     def record_match(pairs, *args, **kwargs):
@@ -124,7 +125,7 @@ def test_compare_graph_reconstructs_before_matching_and_persists_trace(base_stat
         patch("app.agent.compare_graph.compare_repo.insert_diff_items"),
         patch("app.agent.compare_graph._load_ir", return_value=mock_ir),
         patch("app.agent.compare_graph.align_sections", side_effect=record_align),
-        patch("app.agent.compare_graph.reconstruct_table_pairs", side_effect=record_reconstruct),
+        patch("app.agent.compare_graph.normalize_pair", side_effect=record_reconstruct),
         patch("app.agent.compare_graph.match_paragraphs", side_effect=record_match),
         patch("app.agent.compare_graph.classify", return_value=mock_result),
         patch("app.agent.compare_graph.persist_compare_artifacts", side_effect=record_persist),
@@ -173,7 +174,7 @@ def test_graph_marks_failed_when_sidecar_publish_fails(base_state, tmp_path):
         patch("app.agent.compare_graph.compare_repo.insert_diff_items"),
         patch("app.agent.compare_graph._load_ir", return_value=mock_ir),
         patch("app.agent.compare_graph.align_sections", return_value=[]),
-        patch("app.agent.compare_graph.reconstruct_table_pairs", return_value=reconstruction),
+        patch("app.agent.compare_graph.normalize_pair", return_value=reconstruction),
         patch("app.agent.compare_graph.match_paragraphs", return_value=[]),
         patch("app.agent.compare_graph.classify", return_value=mock_result),
         patch(

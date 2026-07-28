@@ -25,6 +25,7 @@ def ingest_document(
     embedder: BaseProvider | None = None,
     llm_client=None,
     llm_model: str = "",
+    provider: BaseProvider | None = None,
 ) -> tuple[str, str]:
     """
     Import a document file.
@@ -65,7 +66,7 @@ def ingest_document(
     artifacts = prepare_import_ir(
         data_dir,
         ir,
-        provider=llm_client,
+        provider=provider or llm_client,
         model=llm_model,
     )
     ir = artifacts.document
@@ -111,6 +112,7 @@ def ingest_new_version(
     embedder: BaseProvider | None = None,
     llm_client=None,
     llm_model: str = "",
+    provider: BaseProvider | None = None,
 ) -> str:
     """Add a new version to an existing document. Returns version_id."""
     path = Path(file_path)
@@ -126,7 +128,7 @@ def ingest_new_version(
     artifacts = prepare_import_ir(
         data_dir,
         ir,
-        provider=llm_client,
+        provider=provider or llm_client,
         model=llm_model,
     )
     ir = artifacts.document

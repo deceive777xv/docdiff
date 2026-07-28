@@ -222,7 +222,7 @@ def test_repair_removes_repeated_isolated_punctuation_between_body_text():
     ]
 
 
-def test_repair_merges_only_certain_sentence_fragments():
+def test_repair_does_not_rule_merge_certain_sentence_fragments_without_llm():
     from app.core.structure_repair import repair_document
 
     raw = _document(
@@ -244,17 +244,15 @@ def test_repair_merges_only_certain_sentence_fragments():
     result = repair_document(raw)
 
     assert [p.text for p in result.document.sections[0].paragraphs] == [
-        "当车窗上升过程中检测到障碍物时，车窗立即下降。",
+        "当车窗上升过程中检测到",
+        "障碍物时，车窗立即下降。",
         "短标题",
         "这是独立正文。",
     ]
-    merge = next(
-        operation
+    assert all(
+        operation.type != "merge_paragraphs"
         for operation in result.trace.operations
-        if operation.type == "merge_paragraphs"
     )
-    assert merge.source_ids == ["p1", "p2"]
-    assert merge.output_id
 
 
 def test_repair_does_not_merge_fragments_without_physical_page_evidence():
@@ -286,7 +284,7 @@ def test_repair_does_not_merge_fragments_without_physical_page_evidence():
     )
 
 
-def test_repair_merges_adjacent_repeated_header_table_fragments():
+def test_repair_leaves_table_fragment_ownership_to_table_normalization():
     from app.core.structure_repair import repair_document
 
     first = "\n".join(
@@ -316,16 +314,13 @@ def test_repair_merges_adjacent_repeated_header_table_fragments():
 
     result = repair_document(raw)
 
-    assert len(result.document.sections[0].paragraphs) == 1
-    assert result.document.sections[0].paragraphs[0].text == "\n".join(
-        [
-            "| 序号 | 项目 |",
-            "| --- | --- |",
-            "| 1 | A |",
-            "| 2 | B |",
-        ]
+    assert [
+        paragraph.text for paragraph in result.document.sections[0].paragraphs
+    ] == [first, second]
+    assert all(
+        operation.type != "merge_table_fragments"
+        for operation in result.trace.operations
     )
-    assert result.trace.operations[-1].type == "merge_table_fragments"
 
 
 def test_repair_is_idempotent_and_preserves_raw_document():
@@ -377,7 +372,7 @@ def test_unexplained_content_loss_falls_back_to_raw(monkeypatch):
     def corrupt(document, _operations):
         document.sections[0].paragraphs.pop()
 
-    monkeypatch.setattr(pipeline, "_merge_certain_paragraphs", corrupt)
+    monkeypatch.setattr(pipeline, "_remove_noise", corrupt)
 
     result = pipeline.repair_document(raw)
 

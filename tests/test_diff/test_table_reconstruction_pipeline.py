@@ -213,22 +213,27 @@ def test_pipeline_calls_llm_once_per_nontrivial_candidate(monkeypatch):
     _stub_candidates(monkeypatch, candidates)
     baseline, target, pairs = _documents()
     provider = QueueProvider(
-        [_response("high"), _response("medium-1"), _response("medium-2")]
+        [
+            _response("high"),
+            _response("low"),
+            _response("medium-1"),
+            _response("medium-2"),
+        ]
     )
 
     result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
 
-    assert len(provider.chat_calls) == 3
+    assert len(provider.chat_calls) == 4
     assert [(decision.candidate_id, decision.final_action) for decision in result.trace.decisions] == [
         ("high", "merge"),
-        ("low", "keep_separate"),
+        ("low", "merge"),
         ("medium-1", "merge"),
         ("medium-2", "merge"),
         ("vetoed", "keep_separate"),
     ]
     decisions = {decision.candidate_id: decision for decision in result.trace.decisions}
     assert decisions["high"].llm is not None
-    assert decisions["low"].llm is None
+    assert decisions["low"].llm is not None
     assert decisions["vetoed"].llm is None
     assert decisions["medium-1"].llm is not None
     assert decisions["medium-2"].llm is not None
@@ -814,6 +819,115 @@ def test_pipeline_recovers_sparse_continuation_columns_from_next_complete_row():
     )
     compact = merged_row.replace(" ", "").replace("|", "")
     assert "（有效值）≤120N。" in compact
+
+
+def test_pipeline_routes_extreme_width_rescue_mapping_to_llm(monkeypatch):
+    left_rows = (
+        _row(("20", "switch", "complete"), 0, "extreme-left", "extreme-section"),
+        _row(("21", "guard", "prefix"), 1, "extreme-left", "extreme-section"),
+    )
+    right_rows = (
+        _row(
+            ("", "", "", "", "", "", "", "suffix"),
+            0,
+            "extreme-right",
+            "extreme-section",
+        ),
+        _row(
+            ("", "", "", "22", "", "next", "", "complete"),
+            1,
+            "extreme-right",
+            "extreme-section",
+        ),
+    )
+    left = TableFragment(
+        "extreme-section",
+        "extreme-left",
+        0,
+        left_rows,
+        (TableRegion(left_rows, 0, len(left_rows), "body"),),
+        (0,),
+        (0, 1, 2),
+    )
+    right = TableFragment(
+        "extreme-section",
+        "extreme-right",
+        1,
+        right_rows,
+        (TableRegion(right_rows, 0, len(right_rows), "body"),),
+        (0,),
+        tuple(range(8)),
+    )
+    section = Section(
+        "extreme-section",
+        "Extreme width",
+        1,
+        [
+            Paragraph(
+                "extreme-left",
+                "\n".join(row.raw_text for row in left_rows),
+                [Sentence(row.raw_text) for row in left_rows],
+                1,
+            ),
+            Paragraph(
+                "extreme-right",
+                "\n".join(row.raw_text for row in right_rows),
+                [Sentence(row.raw_text) for row in right_rows],
+                2,
+            ),
+        ],
+    )
+    baseline = DocumentIR(
+        "extreme-doc",
+        "Extreme",
+        "extreme-hash",
+        [section],
+    )
+    target = DocumentIR("empty-doc", "", "empty-hash", [])
+    monkeypatch.setattr(
+        pipeline,
+        "collect_table_fragments",
+        lambda found_section: [left, right] if found_section is not None else [],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_jointly_infer_fragments",
+        lambda fragments, peers: tuple(fragments),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "classify_repeated_boundary_regions",
+        lambda fragments: set(),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "infer_monotonic_column_mapping",
+        lambda *args: None,
+    )
+
+    class CountingEchoProvider(EchoMergeProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages: list[dict], **kwargs) -> str:
+            self.calls += 1
+            return super().chat(messages, **kwargs)
+
+    provider = CountingEchoProvider()
+
+    result = pipeline.reconstruct_table_pairs(
+        [SectionPair(section, None, 0.0)],
+        baseline,
+        target,
+        provider,
+    )
+
+    assert provider.calls == 1
+    assert result.trace.decisions[0].column_mapping == {3: 0, 5: 1, 7: 2}
+    assert result.trace.decisions[0].final_action == "merge"
+    assert any(
+        operation.type == "merge_rows" for operation in result.trace.operations
+    )
 
 
 def _run_single_side_section(section: Section):

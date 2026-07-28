@@ -100,6 +100,7 @@ def test_graph_happy_path(tmp_path):
 
 def test_save_document_uses_normalized_ir_for_chunks(tmp_path):
     from app.agent.ingest_graph import save_document
+    from app.core.structure_repair.storage import prepare_import_ir as real_prepare_import_ir
     from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
     source = tmp_path / "source.pdf"
@@ -119,10 +120,15 @@ def test_save_document_uses_normalized_ir_for_chunks(tmp_path):
         plain_text="正文。",
     )
 
+    provider = MagicMock()
     with (
         patch("app.agent.ingest_graph.document_repo.insert_document", return_value="doc"),
         patch("app.agent.ingest_graph.document_repo.insert_version", return_value="version"),
         patch("app.agent.ingest_graph.chunk_repo.insert_chunks") as insert_chunks,
+        patch(
+            "app.agent.ingest_graph.prepare_import_ir",
+            wraps=real_prepare_import_ir,
+        ) as prepare_import_ir,
     ):
         result = save_document(
             {
@@ -130,6 +136,7 @@ def test_save_document_uses_normalized_ir_for_chunks(tmp_path):
                 "data_dir": str(tmp_path),
                 "source_type": "standard",
                 "conn": MagicMock(),
+                "provider": provider,
                 "_file_hash": "file-hash",
                 "_ir": raw,
             }
@@ -138,4 +145,5 @@ def test_save_document_uses_normalized_ir_for_chunks(tmp_path):
     assert result["status"] == "saved"
     assert result["_ir"].sections[0].title == "1.1 图流程"
     assert result["_chunks"][0].section_path == "1.1 图流程"
+    assert prepare_import_ir.call_args.kwargs["provider"] is provider
     insert_chunks.assert_called_once()

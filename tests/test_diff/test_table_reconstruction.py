@@ -21,6 +21,7 @@ from app.core.diff.table_reconstruction import (
     collect_table_fragments,
     generate_continuation_candidates,
     infer_active_columns,
+    infer_bounded_rescue_mappings,
     infer_monotonic_column_mapping,
     infer_regions,
     split_markdown_table_row,
@@ -330,6 +331,58 @@ def test_infer_mapping_projects_different_physical_widths_in_order():
     assert mapping.logical_by_physical == {1: 0, 4: 1, 6: 2}
     assert mapping.source_columns == (1, 4, 6)
     assert list(mapping.logical_by_physical.values()) == sorted(mapping.logical_by_physical.values())
+
+
+def test_bounded_mapping_rescue_ignores_unoccupied_header_width_without_dropping_business_cells():
+    left = make_fragment(body_columns=(0, 1, 2), width=3, paragraph_id="left")
+    right = make_fragment(body_columns=(3, 5, 7), width=8, paragraph_id="right")
+    right = replace(
+        right,
+        paragraph_index=1,
+        active_columns=tuple(range(8)),
+    )
+
+    assert infer_monotonic_column_mapping(left, right, ()) is None
+
+    mappings = infer_bounded_rescue_mappings(left, right, ())
+
+    assert len(mappings) == 1
+    assert mappings[0].logical_by_physical == {3: 0, 5: 1, 7: 2}
+    assert mappings[0].bounded_rescue is True
+    occupied_business_columns = {
+        index
+        for row in right.rows
+        for index, occupied in enumerate(row.occupied)
+        if occupied
+    }
+    assert occupied_business_columns <= set(mappings[0].logical_by_physical)
+
+
+def test_bounded_mapping_rescue_returns_at_most_three_monotonic_choices():
+    left = make_fragment(body_columns=(0, 1, 2, 3), width=4, paragraph_id="left")
+    sparse_rows = tuple(
+        make_row(("", "", "continuation", "", "", ""), index, "right")
+        for index in range(2)
+    )
+    right = TableFragment(
+        "section-1",
+        "right",
+        1,
+        sparse_rows,
+        (TableRegion(sparse_rows, 0, len(sparse_rows), "body"),),
+        (0,),
+        tuple(range(6)),
+    )
+
+    mappings = infer_bounded_rescue_mappings(left, right, ())
+
+    assert len(mappings) == 3
+    assert all(mapping.bounded_rescue for mapping in mappings)
+    assert all(
+        list(mapping.logical_by_physical.values())
+        == sorted(mapping.logical_by_physical.values())
+        for mapping in mappings
+    )
 
 
 def make_numeric_keyed_fragment() -> TableFragment:

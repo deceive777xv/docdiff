@@ -144,6 +144,7 @@ class ColumnMapping:
     source_columns: tuple[int, ...]
     logical_by_physical: dict[int, int]
     score: float
+    bounded_rescue: bool = False
 
 
 EvidenceCode = Literal[
@@ -1387,6 +1388,122 @@ def infer_monotonic_column_mapping(
     return ColumnMapping(tuple(logical_by_physical), logical_by_physical, normalized_score)
 
 
+def infer_bounded_rescue_mappings(
+    left: TableFragment,
+    right: TableFragment,
+    cross_version_fragments: Sequence[TableFragment],
+    *,
+    limit: int = 3,
+) -> tuple[ColumnMapping, ...]:
+    """Return safe local mappings after the normal schema mapping has failed.
+
+    Coverage is measured only against non-empty cells in retained body rows.  Every
+    such cell must be represented, and mappings remain order-preserving and
+    injective.  The LLM may choose among these mappings but can never create one.
+    """
+    if limit <= 0 or left.section_id != right.section_id:
+        return ()
+    left_columns = _active_columns(left)
+    if not left_columns:
+        return ()
+    right_body_rows = tuple(
+        row for row in _body_rows(right) if row.kind == "content"
+    )
+    required_right_columns = tuple(
+        sorted(
+            {
+                physical_index
+                for row in right_body_rows
+                for physical_index, occupied in enumerate(row.occupied)
+                if occupied
+            }
+        )
+    )
+    if (
+        not required_right_columns
+        or len(required_right_columns) > len(left_columns)
+    ):
+        return ()
+
+    left_profiles = _column_profiles(_body_rows(left))
+    right_profiles = _column_profiles(right_body_rows)
+    if any(column not in right_profiles for column in required_right_columns):
+        return ()
+
+    pair_scores: list[list[float]] = []
+    for right_rank, physical_index in enumerate(required_right_columns):
+        right_profile = right_profiles[physical_index]
+        logical_scores = []
+        for logical_index, left_physical_index in enumerate(left_columns):
+            left_profile = left_profiles.get(left_physical_index)
+            logical_scores.append(
+                0.0
+                if left_profile is None
+                else _profile_similarity(
+                    left_profile,
+                    right_profile,
+                    logical_index / max(len(left_columns) - 1, 1),
+                    right_rank / max(len(required_right_columns) - 1, 1),
+                    _mapping_peer_similarity(
+                        left_profile,
+                        right_profile,
+                        cross_version_fragments,
+                    ),
+                )
+            )
+        pair_scores.append(logical_scores)
+
+    # Keep the best ``limit`` paths for each ending logical column.  This bounds
+    # work by O(required * logical_width^2 * limit) instead of enumerating every
+    # possible column combination.
+    paths_by_last: dict[int, list[tuple[float, tuple[int, ...]]]] = {
+        -1: [(0.0, ())]
+    }
+    for right_rank in range(len(required_right_columns)):
+        remaining = len(required_right_columns) - right_rank - 1
+        next_paths: dict[int, list[tuple[float, tuple[int, ...]]]] = {}
+        for last_logical, paths in paths_by_last.items():
+            for logical_index in range(
+                last_logical + 1,
+                len(left_columns) - remaining,
+            ):
+                bucket = next_paths.setdefault(logical_index, [])
+                bucket.extend(
+                    (
+                        score + pair_scores[right_rank][logical_index],
+                        (*logical_indexes, logical_index),
+                    )
+                    for score, logical_indexes in paths
+                )
+                bucket.sort(key=lambda item: (-item[0], item[1]))
+                del bucket[limit:]
+        paths_by_last = next_paths
+
+    ranked_paths = sorted(
+        (
+            path
+            for paths in paths_by_last.values()
+            for path in paths
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )[:limit]
+    mappings: list[ColumnMapping] = []
+    for score_sum, logical_indexes in ranked_paths:
+        score = score_sum / len(required_right_columns)
+        logical_by_physical = dict(
+            zip(required_right_columns, logical_indexes)
+        )
+        mappings.append(
+            ColumnMapping(
+                source_columns=required_right_columns,
+                logical_by_physical=logical_by_physical,
+                score=score,
+                bounded_rescue=True,
+            )
+        )
+    return tuple(mappings)
+
+
 def _row_fingerprint(row: TableRowMatrix) -> tuple[str, ...]:
     return row.normalized_cells
 
@@ -1793,6 +1910,21 @@ def _mapping_is_incompatible(
         len(left_columns), len(right_columns), 1
     )
     logical_indexes = tuple(mapping.logical_by_physical.values())
+    if mapping.bounded_rescue:
+        required_business_columns = {
+            physical_index
+            for row in _body_rows(right)
+            if row.kind == "content"
+            for physical_index, occupied in enumerate(row.occupied)
+            if occupied
+        }
+        return (
+            not required_business_columns
+            or not required_business_columns.issubset(mapped_columns)
+            or len(set(logical_indexes)) != len(logical_indexes)
+            or list(logical_indexes) != sorted(logical_indexes)
+            or any(index < 0 or index >= len(left_columns) for index in logical_indexes)
+        )
     return (
         mapping.score < COLUMN_CONFIG.mapping_compatibility_threshold
         or coverage < COLUMN_CONFIG.minimum_mapping_coverage

@@ -81,7 +81,7 @@ def save_document(state: IngestState) -> dict:
         artifacts = prepare_import_ir(
             data_dir,
             ir,
-            provider=state.get("llm_client"),
+            provider=state.get("provider") or state.get("llm_client"),
             model=state.get("llm_model", ""),
         )
         ir = artifacts.document
