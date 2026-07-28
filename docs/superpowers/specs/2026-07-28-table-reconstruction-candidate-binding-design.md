@@ -83,9 +83,69 @@
 - `action` 只能是 `merge` 或 `keep`。
 - `action=merge` 时，`continuation_role` 必须是 `continuation_row`。
 - `confidence` 必须是 `0.0..1.0` 的非布尔数字。
-- `reason` 必须是非空短字符串。
+- `reason` 必须是长度不超过 200 字符的非空字符串。
 
 不再输出 `roles`、`boundary_id`、`mapping_id`、`row_action` 或 `table_action`。内部 `LLMJudgment` 仍可由程序从 `action` 派生兼容字段，避免扩大 Trace 变更范围。
+
+## System prompt 规范
+
+精简的是每次请求携带的数据，不是 system prompt 的约束强度。System prompt 必须完整说明任务语义和可由程序逐项验证的格式，至少包含以下内容。
+
+### 任务边界
+
+- 当前请求只判断 `candidate.previous` 与 `candidate.continuation` 是否属于同一逻辑表格行。
+- `candidate.previous` 和 `candidate.continuation` 是固定槽位；不得从 `nearby_context` 或 `peer_rows` 中改选其他行。
+- `candidate.next`、`nearby_context` 和 `peer_rows` 只提供判断背景，不能成为本次 `action` 的目标。
+- LLM 不得改写单元格、创建文本、选择列映射或返回重构操作。
+
+### 输出格式
+
+System prompt 必须逐字段声明以下严格 schema：
+
+```text
+Return exactly one JSON object with exactly these five members:
+candidate_id, continuation_role, action, confidence, reason.
+
+candidate_id:
+- JSON string.
+- Copy the supplied candidate_id exactly.
+
+continuation_role:
+- JSON string.
+- One of: continuation_row, table_header, page_header,
+  page_footer, ordinary_text, new_table.
+- Classifies only candidate.continuation.
+
+action:
+- JSON string.
+- Exactly merge or keep.
+- merge is valid only when continuation_role is continuation_row.
+
+confidence:
+- JSON number from 0.0 through 1.0 inclusive.
+- Do not return a quoted number, boolean, null, NaN, or infinity.
+
+reason:
+- Non-empty JSON string of at most 200 characters.
+- Explain the relationship between candidate.previous and
+  candidate.continuation only.
+```
+
+### JSON 严格性
+
+System prompt 还必须明确：
+
+- 只输出一个 JSON object，前后不得包含解释文字。
+- 不得使用 Markdown code fence。
+- 不得缺少字段、增加字段或重复字段。
+- 所有键名和枚举值区分大小写，必须与 schema 完全一致。
+- 不得发明或修改 `candidate_id`。
+- `action=merge` 与非 `continuation_row` 的组合属于无效响应，而不是保守判断。
+- 如果认为候选可能是续行但证据不足，可以返回 `continuation_role=continuation_row` 与 `action=keep`；此组合是合法的保守判断。
+
+解析器必须执行与 system prompt 相同的全部检查，不能把提示词约束当作可信输入。首次响应无效时，重试 system prompt 应指出响应未通过严格校验，但不得回显或猜测具体错误字段，仍要求模型依据同一输入重新生成完整对象。
+
+System prompt 可包含一个合法输出示例，但不包含多个冗长示例；字段规范和无效格式清单是主要约束来源。
 
 ## 响应失败处理
 
@@ -127,7 +187,7 @@
 - 多行页眉或页脚在去除 `kind` 和定位元数据后仍完整保留顺序和文本。
 - `merge + continuation_row` 被接受。
 - `merge + 其他 role` 被拒绝并重试一次。
-- 错误 candidate ID、额外字段、缺失字段、非法置信度和空 reason 被拒绝。
+- 错误 candidate ID、额外或重复字段、缺失字段、非法置信度、空 reason 和超长 reason 被拒绝。
 - `keep` 允许所有合法的非 continuation role，也允许模型保守地把 continuation row 保持分离。
 
 ### 流水线
