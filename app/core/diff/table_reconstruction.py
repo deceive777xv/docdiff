@@ -2601,6 +2601,7 @@ def _apply_merge_fragments(
         paragraph_id=_expected_paragraph_id(operation),
         text="",
         sentences=sentences,
+        page_no=paragraphs[0].page_no,
     )
     merged._reconstruction_source_paragraph_ids = frozenset(
         source_id

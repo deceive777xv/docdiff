@@ -102,6 +102,20 @@ def test_normalize_document_reconstructs_cross_page_tables_without_a_peer_docume
     )
 
 
+def test_normalize_document_preserves_page_number_when_merging_table_fragments():
+    raw = _document_with_sparse_cross_page_table()
+
+    result = normalize_document(raw, provider=_EchoTableMergeProvider())
+
+    paragraphs = [
+        paragraph
+        for section in result.document.sections
+        for paragraph in section.paragraphs
+    ]
+    assert len(paragraphs) == 1
+    assert paragraphs[0].page_no == 7
+
+
 def test_normalize_pair_rechecks_only_document_candidates_deferred_at_import():
     raw = _document_with_sparse_cross_page_table()
     imported = normalize_document(raw, provider=None)
