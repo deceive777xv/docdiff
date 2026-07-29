@@ -20,6 +20,7 @@ class StructureRepairOperation:
     reason: str = ""
     actor: Literal["rule", "llm"] = "rule"
     confidence: float | None = None
+    source_sentence_indexes: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

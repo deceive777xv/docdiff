@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import re
@@ -13,6 +13,7 @@ from app.core.document_ir_codec import document_ir_to_dict
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 from .llm import (
+    adjudicate_page_noise,
     adjudicate_paragraph_merge,
     adjudicate_section_parent,
     adjudicate_table_fragment_merge,
@@ -26,8 +27,8 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 1
-ALGORITHM_VERSION = "post-parse-structure-v1"
+SCHEMA_VERSION = 2
+ALGORITHM_VERSION = "post-parse-structure-v2"
 
 _NUMBERED_TITLE_RE = re.compile(
     r"^\s*(?P<number>\d+(?:\.\d+)+)\s+(?P<title>\S.{0,100})\s*$"
@@ -381,6 +382,219 @@ def _remove_noise(
                 )
             )
         section.paragraphs = retained
+
+
+@dataclass(frozen=True)
+class _PageBoundaryItem:
+    paragraph: Paragraph
+    sentence_index: int | None
+    text: str
+
+    @property
+    def key(self) -> tuple[str, int | None]:
+        return self.paragraph.paragraph_id, self.sentence_index
+
+
+def _adjudicate_page_boundary_noise(
+    document: DocumentIR,
+    provider: object | None,
+    model: str,
+    operations: list[StructureRepairOperation],
+    decisions: list[StructureRepairDecision],
+    rejected: list[RejectedStructureCandidate],
+) -> None:
+    if provider is None:
+        return
+    ordered_paragraphs = [
+        paragraph
+        for section in document.sections
+        for paragraph in section.paragraphs
+    ]
+    ordered: list[_PageBoundaryItem] = []
+    for paragraph in ordered_paragraphs:
+        if _is_table(paragraph) and paragraph.sentences:
+            ordered.extend(
+                _PageBoundaryItem(paragraph, sentence_index, sentence.text)
+                for sentence_index, sentence in enumerate(paragraph.sentences)
+                if sentence.text.strip() and not _is_separator(sentence.text)
+            )
+        else:
+            ordered.append(_PageBoundaryItem(paragraph, None, paragraph.text))
+    by_page: dict[int, list[_PageBoundaryItem]] = defaultdict(list)
+    for item in ordered:
+        if item.paragraph.page_no is not None:
+            by_page[item.paragraph.page_no].append(item)
+    ordered_index = {
+        item.key: index
+        for index, item in enumerate(ordered)
+    }
+    removed_paragraph_ids: set[str] = set()
+    removed_sentence_indexes: dict[str, set[int]] = defaultdict(set)
+    row_removal_judgments: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    outcomes: dict[tuple[str, int | None], str] = {}
+
+    def item_is_removed(item: _PageBoundaryItem) -> bool:
+        return (
+            item.paragraph.paragraph_id in removed_paragraph_ids
+            or (
+                item.sentence_index is not None
+                and item.sentence_index
+                in removed_sentence_indexes.get(
+                    item.paragraph.paragraph_id,
+                    set(),
+                )
+            )
+        )
+
+    def classify(item: _PageBoundaryItem, boundary_side: str) -> str:
+        existing = outcomes.get(item.key)
+        if existing is not None:
+            return existing
+        index = ordered_index[item.key]
+        context = [
+            {
+                "relative_position": context_index - index,
+                "text": context_item.text[:1200],
+            }
+            for context_index, context_item in enumerate(ordered)
+            if not item_is_removed(context_item)
+            and context_item.key != item.key
+            and 0 < abs(context_index - index) <= 6
+        ]
+        candidate_id = _stable_id(
+            "page-noise",
+            [
+                ALGORITHM_VERSION,
+                document.doc_id,
+                str(item.paragraph.page_no),
+                item.paragraph.paragraph_id,
+                (
+                    f"sentence:{item.sentence_index}"
+                    if item.sentence_index is not None
+                    else "paragraph"
+                ),
+            ],
+        )
+        judgment, failure_code = adjudicate_page_noise(
+            candidate_id,
+            item.text,
+            item.paragraph.page_no or 0,
+            boundary_side,
+            context,
+            provider,
+            model,
+        )
+        if judgment is None:
+            outcomes[item.key] = "keep"
+            rejected.append(
+                RejectedStructureCandidate(
+                    candidate_id=candidate_id,
+                    code=failure_code,
+                    reason="page-boundary LLM judgment was unavailable or invalid",
+                )
+            )
+            return "keep"
+        decisions.append(
+            StructureRepairDecision(
+                candidate_id=candidate_id,
+                action=judgment.action,
+                source_ids=[item.paragraph.paragraph_id],
+                target_section_id="",
+                confidence=judgment.confidence,
+                reason=judgment.reason,
+            )
+        )
+        outcomes[item.key] = judgment.action
+        if judgment.action == "remove_as_page_noise":
+            if item.sentence_index is None:
+                removed_paragraph_ids.add(item.paragraph.paragraph_id)
+                operations.append(
+                    StructureRepairOperation(
+                        operation_id=_operation_id(
+                            "remove_noise",
+                            [item.paragraph.paragraph_id],
+                        ),
+                        type="remove_noise",
+                        source_ids=[item.paragraph.paragraph_id],
+                        reason=judgment.reason,
+                        actor="llm",
+                        confidence=judgment.confidence,
+                    )
+                )
+            else:
+                removed_sentence_indexes[item.paragraph.paragraph_id].add(
+                    item.sentence_index
+                )
+                following_index = item.sentence_index + 1
+                if (
+                    following_index < len(item.paragraph.sentences)
+                    and _is_separator(
+                        item.paragraph.sentences[following_index].text
+                    )
+                ):
+                    removed_sentence_indexes[item.paragraph.paragraph_id].add(
+                        following_index
+                    )
+                row_removal_judgments[item.paragraph.paragraph_id].append(
+                    (judgment.confidence, judgment.reason)
+                )
+        return judgment.action
+
+    for page_no in sorted(by_page):
+        page_items = by_page[page_no]
+        for boundary_side, candidates in (
+            ("page_start", page_items[:6]),
+            ("page_end", list(reversed(page_items[-6:]))),
+        ):
+            for item in candidates:
+                action = classify(item, boundary_side)
+                if action != "remove_as_page_noise":
+                    break
+
+    for paragraph_id, sentence_indexes in removed_sentence_indexes.items():
+        judgments = row_removal_judgments[paragraph_id]
+        operations.append(
+            StructureRepairOperation(
+                operation_id=_operation_id(
+                    "remove_noise_rows",
+                    [
+                        paragraph_id,
+                        *(str(index) for index in sorted(sentence_indexes)),
+                    ],
+                ),
+                type="remove_noise_rows",
+                source_ids=[paragraph_id],
+                source_sentence_indexes=sorted(sentence_indexes),
+                reason="; ".join(dict.fromkeys(reason for _, reason in judgments)),
+                actor="llm",
+                confidence=min(confidence for confidence, _ in judgments),
+            )
+        )
+
+    if not removed_paragraph_ids and not removed_sentence_indexes:
+        return
+    for section in document.sections:
+        for paragraph in section.paragraphs:
+            sentence_indexes = removed_sentence_indexes.get(
+                paragraph.paragraph_id
+            )
+            if not sentence_indexes:
+                continue
+            paragraph.sentences = [
+                sentence
+                for sentence_index, sentence in enumerate(paragraph.sentences)
+                if sentence_index not in sentence_indexes
+            ]
+            paragraph.text = "\n".join(
+                sentence.text for sentence in paragraph.sentences
+            )
+            if not paragraph.sentences:
+                removed_paragraph_ids.add(paragraph.paragraph_id)
+        section.paragraphs = [
+            paragraph
+            for paragraph in section.paragraphs
+            if paragraph.paragraph_id not in removed_paragraph_ids
+        ]
 
 
 def _is_table(paragraph: Paragraph) -> bool:
@@ -801,6 +1015,20 @@ def _allowed_removed_content(
                 if paragraph is None:
                     raise ValueError("noise operation references an unknown paragraph")
                 removed.update(_characters(paragraph.text))
+        elif operation.type == "remove_noise_rows":
+            if len(operation.source_ids) != 1:
+                raise ValueError("row noise operation must reference one paragraph")
+            paragraph = paragraphs.get(operation.source_ids[0])
+            if paragraph is None:
+                raise ValueError("row noise operation references an unknown paragraph")
+            if len(operation.source_sentence_indexes) != len(
+                set(operation.source_sentence_indexes)
+            ):
+                raise ValueError("row noise operation contains duplicate indexes")
+            for sentence_index in operation.source_sentence_indexes:
+                if not 0 <= sentence_index < len(paragraph.sentences):
+                    raise ValueError("row noise operation references an unknown sentence")
+                removed.update(_characters(paragraph.sentences[sentence_index].text))
         elif operation.type == "merge_table_fragments":
             if len(operation.source_ids) != 2:
                 raise ValueError("table merge must reference exactly two paragraphs")
@@ -861,6 +1089,14 @@ def repair_document(
     _demote_generic_sections(repaired, operations)
     _promote_numbered_paragraphs(repaired, operations)
     _remove_noise(repaired, operations)
+    _adjudicate_page_boundary_noise(
+        repaired,
+        provider,
+        model,
+        operations,
+        decisions,
+        rejected,
+    )
     _adjudicate_simple_table_fragments(
         repaired,
         provider,

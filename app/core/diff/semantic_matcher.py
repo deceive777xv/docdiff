@@ -854,8 +854,8 @@ def _context_side_similarity(left: str, right: str) -> float | None:
 
 
 def _ordinary_context_similarity(
-    b_units: list[_ParagraphUnit],
-    t_units: list[_ParagraphUnit],
+    b_ordinary_units: list[_ParagraphUnit],
+    t_ordinary_units: list[_ParagraphUnit],
     i: int,
     j: int,
 ) -> float:
@@ -864,13 +864,13 @@ def _ordinary_context_similarity(
         b_index = i + offset
         t_index = j + offset
         b_text = (
-            _unit_match_text(b_units[b_index])
-            if 0 <= b_index < len(b_units) and _is_ordinary_unit(b_units[b_index])
+            _unit_match_text(b_ordinary_units[b_index])
+            if 0 <= b_index < len(b_ordinary_units)
             else ""
         )
         t_text = (
-            _unit_match_text(t_units[t_index])
-            if 0 <= t_index < len(t_units) and _is_ordinary_unit(t_units[t_index])
+            _unit_match_text(t_ordinary_units[t_index])
+            if 0 <= t_index < len(t_ordinary_units)
             else ""
         )
         score = _context_side_similarity(b_text, t_text)
@@ -896,22 +896,20 @@ def _relative_position_similarity(
 
 def _ordinary_match_score(
     base_score: float,
-    b_units: list[_ParagraphUnit],
-    t_units: list[_ParagraphUnit],
+    b_ordinary_units: list[_ParagraphUnit],
+    t_ordinary_units: list[_ParagraphUnit],
     i: int,
     j: int,
 ) -> float:
-    b_text = _normalize_match_text(_unit_match_text(b_units[i]))
-    t_text = _normalize_match_text(_unit_match_text(t_units[j]))
+    b_text = _normalize_match_text(_unit_match_text(b_ordinary_units[i]))
+    t_text = _normalize_match_text(_unit_match_text(t_ordinary_units[j]))
     b_duplicates = sum(
         _normalize_match_text(_unit_match_text(unit)) == b_text
-        for unit in b_units
-        if _is_ordinary_unit(unit)
+        for unit in b_ordinary_units
     )
     t_duplicates = sum(
         _normalize_match_text(_unit_match_text(unit)) == t_text
-        for unit in t_units
-        if _is_ordinary_unit(unit)
+        for unit in t_ordinary_units
     )
     ambiguous = (
         min(len(b_text), len(t_text)) <= 24
@@ -921,8 +919,18 @@ def _ordinary_match_score(
     if not ambiguous:
         return base_score
 
-    context_score = _ordinary_context_similarity(b_units, t_units, i, j)
-    position_score = _relative_position_similarity(i, len(b_units), j, len(t_units))
+    context_score = _ordinary_context_similarity(
+        b_ordinary_units,
+        t_ordinary_units,
+        i,
+        j,
+    )
+    position_score = _relative_position_similarity(
+        i,
+        len(b_ordinary_units),
+        j,
+        len(t_ordinary_units),
+    )
     role_score = 1.0
     return (
         0.55 * base_score
@@ -1299,6 +1307,24 @@ def match_paragraphs(
                 section.level,
             )
         ]
+        b_ordinary_units = [unit for unit in b_units if _is_ordinary_unit(unit)]
+        t_ordinary_units = [unit for unit in t_units if _is_ordinary_unit(unit)]
+        b_ordinary_indexes = {
+            raw_index: ordinary_index
+            for ordinary_index, raw_index in enumerate(
+                index
+                for index, unit in enumerate(b_units)
+                if _is_ordinary_unit(unit)
+            )
+        }
+        t_ordinary_indexes = {
+            raw_index: ordinary_index
+            for ordinary_index, raw_index in enumerate(
+                index
+                for index, unit in enumerate(t_units)
+                if _is_ordinary_unit(unit)
+            )
+        }
         b_header_counts = _table_header_signature_counts(b_units)
         t_header_counts = _table_header_signature_counts(t_units)
         sec_path = scope.title or ""
@@ -1404,10 +1430,10 @@ def match_paragraphs(
                 sim = (
                     _ordinary_match_score(
                         base_sim,
-                        b_units,
-                        t_units,
-                        i,
-                        j,
+                        b_ordinary_units,
+                        t_ordinary_units,
+                        b_ordinary_indexes[i],
+                        t_ordinary_indexes[j],
                     )
                     if _is_ordinary_unit(b_unit)
                     else base_sim

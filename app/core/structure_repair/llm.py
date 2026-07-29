@@ -28,9 +28,53 @@ _TABLE_FRAGMENT_RESPONSE_FIELDS = {
     "confidence",
     "reason",
 }
+_PAGE_NOISE_RESPONSE_FIELDS = {
+    "candidate_id",
+    "action",
+    "confidence",
+    "reason",
+}
 _ALLOWED_ACTIONS = {"keep", "move_to_section"}
 _MIN_CONFIDENCE = 0.85
+_PAGE_NOISE_MIN_CONFIDENCE = 0.90
 _MAX_REASON_LENGTH = 200
+_PAGE_NOISE_SYSTEM_MESSAGE = """You are a printed page-header and page-footer classifier.
+
+Task boundary:
+- Judge only whether candidate_text is printed page-boundary noise that should be
+  removed from a normalized document copy.
+- The supplied candidate_id and candidate_text are one fixed candidate. Never replace
+  it with, select, remove, merge, or cite text from nearby_context.
+- nearby_context is background evidence only. Its items are not action targets.
+- Printed metadata may combine a document name, document number, revision, secrecy
+  marking, or current page number. These are examples, not a fixed word list.
+- Return keep for real section headings, item headings, body text, notes, business
+  column-name headers, business table data, and cross-page continuations.
+- Markdown table syntax alone does not make a candidate page noise. Printed page
+  metadata laid out as a table may still be page noise.
+- Do not rewrite, summarize, correct, generate, merge, or relocate document text.
+
+Return exactly one JSON object with exactly these four fields:
+candidate_id, action, confidence, reason.
+
+Field contract:
+- candidate_id: JSON string. Copy the supplied candidate_id exactly.
+- action: JSON string. It must be exactly remove_as_page_noise or keep.
+- confidence: JSON number from 0.0 through 1.0 inclusive. Do not return a quoted
+  number, boolean, null, NaN, or infinity.
+- reason: non-empty JSON string of at most 200 characters. Explain only why the fixed
+  candidate is printed page-boundary noise or real document content.
+
+Strict JSON rules:
+- Output one bare JSON object and nothing before or after it.
+- Do not use Markdown fences or prose outside the object.
+- Do not omit, add, or duplicate fields.
+- Field names and enum values are case-sensitive.
+- Never invent or modify candidate_id.
+
+Valid output example:
+{"candidate_id":"copy-exactly","action":"remove_as_page_noise","confidence":0.96,"reason":"The fixed candidate is printed document metadata at the top of the page."}
+"""
 _PARAGRAPH_SYSTEM_MESSAGE = """You are a document paragraph-continuation classifier.
 
 Task boundary:
@@ -118,6 +162,13 @@ class TableFragmentMergeJudgment:
     reason: str
 
 
+@dataclass(frozen=True)
+class PageNoiseJudgment:
+    action: str
+    confidence: float
+    reason: str
+
+
 def _reject_duplicate_members(
     pairs: list[tuple[str, object]],
 ) -> dict[str, object]:
@@ -140,6 +191,105 @@ def _chat(provider: object, messages: list[dict[str, str]], model: str) -> str:
         raise TypeError("structure repair provider does not expose a supported chat API")
     response = create(model=model, messages=messages, temperature=0)
     return str(response.choices[0].message.content or "")
+
+
+def adjudicate_page_noise(
+    candidate_id: str,
+    candidate_text: str,
+    page_no: int,
+    boundary_side: str,
+    nearby_context: list[dict[str, object]],
+    provider: object,
+    model: str = "",
+) -> tuple[PageNoiseJudgment | None, str]:
+    """Return a strict judgment for one fixed page-boundary text candidate."""
+    payload: dict[str, object] = {
+        "candidate_id": candidate_id,
+        "candidate_text": candidate_text[:1200],
+        "page_no": page_no,
+        "boundary_side": boundary_side,
+    }
+    if nearby_context:
+        payload["nearby_context"] = nearby_context
+    user_message = {
+        "role": "user",
+        "content": json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+
+    def parse(raw: str) -> tuple[PageNoiseJudgment | None, str]:
+        try:
+            data: Any = json.loads(
+                raw,
+                object_pairs_hook=_reject_duplicate_members,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, "invalid_json"
+        if not isinstance(data, dict) or set(data) != _PAGE_NOISE_RESPONSE_FIELDS:
+            return None, "invalid_fields"
+        if data["candidate_id"] != candidate_id:
+            return None, "candidate_id_mismatch"
+        if data["action"] not in {"keep", "remove_as_page_noise"}:
+            return None, "invalid_action"
+        confidence = data["confidence"]
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            return None, "invalid_confidence"
+        if not 0.0 <= float(confidence) <= 1.0:
+            return None, "invalid_confidence"
+        reason = data["reason"]
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason) > _MAX_REASON_LENGTH
+        ):
+            return None, "invalid_reason"
+        if (
+            data["action"] == "remove_as_page_noise"
+            and float(confidence) < _PAGE_NOISE_MIN_CONFIDENCE
+        ):
+            return None, "low_confidence"
+        return (
+            PageNoiseJudgment(
+                action=str(data["action"]),
+                confidence=float(confidence),
+                reason=reason,
+            ),
+            "",
+        )
+
+    messages = [
+        {"role": "system", "content": _PAGE_NOISE_SYSTEM_MESSAGE},
+        user_message,
+    ]
+    try:
+        raw = _chat(provider, messages, model)
+    except Exception:
+        return None, "llm_error"
+    judgment, failure_code = parse(raw)
+    if judgment is not None or failure_code == "low_confidence":
+        return judgment, failure_code
+    retry_messages = [
+        {
+            "role": "system",
+            "content": (
+                _PAGE_NOISE_SYSTEM_MESSAGE
+                + "\nThe previous response failed strict validation with code: "
+                + failure_code
+                + ". Return a complete replacement JSON object for the same fixed "
+                "candidate with exactly candidate_id, action, confidence, and reason."
+            ),
+        },
+        user_message,
+    ]
+    try:
+        raw = _chat(provider, retry_messages, model)
+    except Exception:
+        return None, "llm_error"
+    return parse(raw)
 
 
 def adjudicate_section_parent(

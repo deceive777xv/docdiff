@@ -700,6 +700,50 @@ def test_repeated_short_paragraph_uses_neighbor_context():
     assert heading_match.baseline_para is surviving_heading
 
 
+def test_repeated_short_paragraph_context_skips_all_table_units():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    first_heading = make_para("A）工作条件")
+    surviving_heading = make_para("A）工作条件")
+    baseline = make_section(
+        "要求",
+        [
+            first_heading,
+            make_para("仅旧版本保留的甲项说明"),
+            surviving_heading,
+            make_para("稳定保留的乙项说明"),
+        ],
+    )
+    table_rows = [
+        "| 文件名称 | 文件编号 | 页码 |",
+        "| --- | --- | --- |",
+        "| 示例文档 | DOC-001 | 第11页 |",
+    ]
+    target_heading = make_para("A）工作条件")
+    target = make_section(
+        "要求",
+        [
+            target_heading,
+            make_para_with_sentences(table_rows),
+            make_para("稳定保留的乙项说明"),
+        ],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    heading_match = next(
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None
+        and pair.target_para is target_heading
+    )
+    assert heading_match.baseline_para is surviving_heading
+
+
 def test_ordinary_paragraph_matches_are_monotonic():
     from app.core.diff.semantic_matcher import match_paragraphs
 

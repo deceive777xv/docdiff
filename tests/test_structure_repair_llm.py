@@ -194,8 +194,17 @@ def test_small_heading_is_not_sent_to_paragraph_merge_llm():
             self.calls = 0
 
         def chat(self, messages: list[dict], **_kwargs) -> str:
-            self.calls += 1
             payload = json.loads(messages[-1]["content"])
+            if "candidate_text" in payload:
+                return json.dumps(
+                    {
+                        "candidate_id": payload["candidate_id"],
+                        "action": "keep",
+                        "confidence": 0.99,
+                        "reason": "real page-boundary content",
+                    }
+                )
+            self.calls += 1
             return json.dumps(
                 {
                     "candidate_id": payload["candidate_id"],
@@ -327,6 +336,313 @@ def test_small_heading_in_continuation_slot_is_not_sent_to_paragraph_merge_llm()
     )
 
 
+def test_complex_page_header_is_removed_before_paragraph_merge_adjudication():
+    from app.core.structure_repair import repair_document
+
+    class BoundaryAwareProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.merge_payloads: list[dict] = []
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "candidate_text" in payload:
+                action = (
+                    "remove_as_page_noise"
+                    if payload["candidate_text"].startswith("文件名称：")
+                    else "keep"
+                )
+                return json.dumps(
+                    {
+                        "candidate_id": payload["candidate_id"],
+                        "action": action,
+                        "confidence": 0.97,
+                        "reason": "fixed page-boundary candidate classification",
+                    }
+                )
+            self.merge_payloads.append(payload)
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "keep",
+                    "confidence": 0.97,
+                    "reason": "independent paragraphs",
+                }
+            )
+
+    prefix = (
+        "文件名称：EREA 项目蝴蝶门开闭系统设计说明书 "
+        "文件编号：EREA_STS_A19-10006 版本：001"
+    )
+    document = DocumentIR(
+        "complex-page-header",
+        "Complex page header",
+        "complex-page-header-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [
+                    Paragraph(
+                        "h10",
+                        f"{prefix} 第10页",
+                        [Sentence(f"{prefix} 第10页")],
+                        10,
+                    ),
+                    Paragraph("b10", "第一页真实正文。", [Sentence("第一页真实正文。")], 10),
+                    Paragraph(
+                        "h11",
+                        f"{prefix} 第11页",
+                        [Sentence(f"{prefix} 第11页")],
+                        11,
+                    ),
+                    Paragraph("b11", "第二页真实正文。", [Sentence("第二页真实正文。")], 11),
+                ],
+            )
+        ],
+    )
+    provider = BoundaryAwareProvider()
+
+    result = repair_document(document, provider=provider)
+
+    assert [
+        paragraph.text for paragraph in result.document.sections[0].paragraphs
+    ] == ["第一页真实正文。", "第二页真实正文。"]
+    assert all(
+        prefix not in json.dumps(payload, ensure_ascii=False)
+        for payload in provider.merge_payloads
+    )
+    assert [
+        operation.source_ids
+        for operation in result.trace.operations
+        if operation.type == "remove_noise"
+    ] == [["h10"], ["h11"]]
+
+
+def test_table_page_header_sentences_are_removed_before_table_merge_adjudication():
+    from app.core.structure_repair import repair_document
+
+    class RowBoundaryProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.table_merge_payloads: list[dict] = []
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "candidate_text" in payload:
+                action = (
+                    "remove_as_page_noise"
+                    if payload["candidate_text"].startswith("| 文件名称：")
+                    else "keep"
+                )
+                return json.dumps(
+                    {
+                        "candidate_id": payload["candidate_id"],
+                        "action": action,
+                        "confidence": 0.98,
+                        "reason": "fixed table-row boundary classification",
+                    }
+                )
+            self.table_merge_payloads.append(payload)
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "keep",
+                    "confidence": 0.98,
+                    "reason": "independent table content",
+                }
+            )
+
+    header = (
+        "| 文件名称：EREA 项目蝴蝶门开闭系统设计说明书 "
+        "| 文件编号：EREA_STS_A19-10006 | 版本：001 | 第11页 |"
+    )
+    separator = "| --- | --- | --- | --- |"
+    body = "| 33 | 异响 | 运行过程中无异常噪声 |"
+    table = Paragraph(
+        "mixed-table",
+        "\n".join([header, separator, body]),
+        [Sentence(header), Sentence(separator), Sentence(body)],
+        11,
+    )
+    document = DocumentIR(
+        "table-page-header",
+        "Table page header",
+        "table-page-header-hash",
+        [Section("s1", "1 Scope", 1, [table])],
+    )
+    provider = RowBoundaryProvider()
+
+    result = repair_document(document, provider=provider)
+
+    repaired = result.document.sections[0].paragraphs
+    assert len(repaired) == 1
+    assert repaired[0].text == body
+    assert [sentence.text for sentence in repaired[0].sentences] == [body]
+    assert document.sections[0].paragraphs[0].text == "\n".join(
+        [header, separator, body]
+    )
+    assert all(
+        header not in json.dumps(payload, ensure_ascii=False)
+        for payload in provider.table_merge_payloads
+    )
+
+
+def test_independent_table_page_header_is_removed_when_all_sentences_are_noise():
+    from app.core.structure_repair import repair_document
+
+    class HeaderProvider:
+        chat_model = "fake-model"
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "candidate_text" not in payload:
+                raise AssertionError("empty boundary table must not reach merge LLM")
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "remove_as_page_noise",
+                    "confidence": 0.98,
+                    "reason": "printed metadata table at the page boundary",
+                }
+            )
+
+    header = "| 文档名称：示例说明书 | 版本：002 | 第3页 |"
+    separator = "| --- | --- | --- |"
+    document = DocumentIR(
+        "independent-table-header",
+        "Independent table header",
+        "independent-table-header-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [
+                    Paragraph(
+                        "header-table",
+                        "\n".join([header, separator]),
+                        [Sentence(header), Sentence(separator)],
+                        3,
+                    )
+                ],
+            )
+        ],
+    )
+
+    result = repair_document(document, provider=HeaderProvider())
+
+    assert result.document.sections[0].paragraphs == []
+    row_operation = next(
+        operation
+        for operation in result.trace.operations
+        if operation.type == "remove_noise_rows"
+    )
+    assert row_operation.source_ids == ["header-table"]
+    assert row_operation.source_sentence_indexes == [0, 1]
+
+
+def test_page_noise_llm_retries_invalid_fields_with_detailed_fixed_candidate_contract():
+    from app.core.structure_repair import repair_document
+
+    class RetryProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.messages: list[list[dict]] = []
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            self.messages.append(messages)
+            payload = json.loads(messages[-1]["content"])
+            response = {
+                "candidate_id": payload["candidate_id"],
+                "action": "keep",
+                "confidence": 0.96,
+                "reason": "the fixed candidate is real body content",
+            }
+            if len(self.messages) == 1:
+                response["selected_context"] = 1
+            return json.dumps(response)
+
+    document = DocumentIR(
+        "strict-page-noise",
+        "Strict page noise",
+        "strict-page-noise-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [Paragraph("body", "真实正文。", [Sentence("真实正文。")], 1)],
+            )
+        ],
+    )
+    provider = RetryProvider()
+
+    result = repair_document(document, provider=provider)
+
+    assert len(provider.messages) == 2
+    retry_prompt = provider.messages[1][0]["content"]
+    assert "same fixed candidate" in retry_prompt
+    assert "exactly candidate_id, action, confidence, and reason" in retry_prompt
+    assert "nearby_context is background evidence only" in retry_prompt
+    assert [
+        paragraph.text for paragraph in result.document.sections[0].paragraphs
+    ] == ["真实正文。"]
+
+
+def test_page_noise_llm_cannot_replace_the_fixed_candidate():
+    from app.core.structure_repair import repair_document
+
+    class WrongCandidateProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            self.calls += 1
+            return json.dumps(
+                {
+                    "candidate_id": "page-noise:context-item",
+                    "action": "remove_as_page_noise",
+                    "confidence": 0.99,
+                    "reason": "selected a different context item",
+                }
+            )
+
+    document = DocumentIR(
+        "wrong-page-noise-candidate",
+        "Wrong page-noise candidate",
+        "wrong-page-noise-candidate-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [Paragraph("body", "真实正文。", [Sentence("真实正文。")], 1)],
+            )
+        ],
+    )
+    provider = WrongCandidateProvider()
+
+    result = repair_document(document, provider=provider)
+
+    assert provider.calls == 2
+    assert [
+        paragraph.text for paragraph in result.document.sections[0].paragraphs
+    ] == ["真实正文。"]
+    rejection = next(
+        rejected
+        for rejected in result.trace.rejected
+        if rejected.candidate_id.startswith("page-noise-")
+    )
+    assert rejection.code == "candidate_id_mismatch"
+
+
 def test_import_normalization_adjudicates_every_eligible_paragraph_candidate():
     from app.core.structure_repair import repair_document
 
@@ -338,6 +654,15 @@ def test_import_normalization_adjudicates_every_eligible_paragraph_candidate():
 
         def chat(self, messages: list[dict], **_kwargs) -> str:
             payload = json.loads(messages[-1]["content"])
+            if "candidate_text" in payload:
+                return json.dumps(
+                    {
+                        "candidate_id": payload["candidate_id"],
+                        "action": "keep",
+                        "confidence": 0.91,
+                        "reason": "real page-boundary content",
+                    }
+                )
             candidate_id = payload["candidate_id"]
             self.candidate_ids.append(candidate_id)
             return json.dumps(
@@ -379,10 +704,15 @@ def test_import_normalization_adjudicates_every_eligible_paragraph_candidate():
 
     result = repair_document(document, provider=provider)
 
+    paragraph_decisions = [
+        decision
+        for decision in result.trace.decisions
+        if decision.candidate_id.startswith("paragraphs:")
+    ]
     assert len(provider.candidate_ids) == 49
-    assert len(result.trace.decisions) == 49
+    assert len(paragraph_decisions) == 49
     assert provider.candidate_ids[-1] == "paragraphs:p48:p49"
-    assert result.trace.decisions[-1].candidate_id == "paragraphs:p48:p49"
+    assert paragraph_decisions[-1].candidate_id == "paragraphs:p48:p49"
 
 
 def test_llm_paragraph_merge_rechecks_the_new_fragment_across_three_pages():
@@ -396,6 +726,15 @@ def test_llm_paragraph_merge_rechecks_the_new_fragment_across_three_pages():
 
         def chat(self, messages: list[dict], **_kwargs) -> str:
             payload = json.loads(messages[-1]["content"])
+            if "candidate_text" in payload:
+                return json.dumps(
+                    {
+                        "candidate_id": payload["candidate_id"],
+                        "action": "keep",
+                        "confidence": 0.94,
+                        "reason": "real page-boundary content",
+                    }
+                )
             self.payloads.append(payload)
             return json.dumps(
                 {
@@ -474,8 +813,17 @@ def test_paragraph_llm_retries_extra_fields_and_enforces_detailed_contract():
             self.messages: list[list[dict]] = []
 
         def chat(self, messages: list[dict], **_kwargs) -> str:
-            self.messages.append(messages)
             payload = json.loads(messages[-1]["content"])
+            if "candidate_text" in payload:
+                return json.dumps(
+                    {
+                        "candidate_id": payload["candidate_id"],
+                        "action": "keep",
+                        "confidence": 0.93,
+                        "reason": "real page-boundary content",
+                    }
+                )
+            self.messages.append(messages)
             response = {
                 "candidate_id": payload["candidate_id"],
                 "action": "merge_paragraphs",

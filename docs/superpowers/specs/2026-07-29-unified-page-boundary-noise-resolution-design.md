@@ -45,7 +45,7 @@
 - paragraph：`paragraph_id`；
 - table sentence：`paragraph_id + 原始 sentence_index`。
 
-sentence index 仅用于程序内部定位和 trace。LLM 不接收或返回任意行定位字段。`candidate_id` 由算法版本、文档、物理页、边界方向和固定内部来源生成；LLM 只能原样回显该 ID。
+sentence index 仅用于程序内部定位和 trace。LLM 不接收或返回任意行定位字段。`candidate_id` 由算法版本、文档、物理页和固定内部来源生成；边界方向作为判断证据单独输入。同一候选即使同时位于页首和页尾也只判断一次，LLM 只能原样回显该 ID。
 
 ## LLM 输入与输出
 
