@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -262,6 +263,66 @@ def test_progress_dialog_averages_file_progress_and_counts_completion(qtbot):
     assert dialog._summary.text() == "已完成 1/2"
     assert "a.pdf" in dialog._items["C:/docs/a.pdf"].text()
     assert "正在规范化段落与跨页表格" in dialog._items["C:/docs/b.pdf"].text()
+
+
+def test_open_progress_dialog_refreshes_inline_styles_when_theme_changes(qtbot):
+    from PySide6.QtWidgets import QApplication, QLabel
+
+    from app.ui.pages.library_page import _ImportProgressDialog
+    from app.ui.theme import LATTE, MOCHA, Theme
+    from app.ui.theme_manager import ThemeManager
+
+    app = QApplication.instance()
+    assert app is not None
+    previous_manager = ThemeManager._instance
+    previous_stylesheet = app.styleSheet()
+    previous_theme = {
+        name: getattr(Theme, name)
+        for name in LATTE
+        if hasattr(Theme, name)
+    }
+    dialog = None
+    try:
+        ThemeManager._instance = None
+        manager = ThemeManager.instance()
+        with patch("app.config.settings.save"):
+            manager.setup(SimpleNamespace(theme="light"), app)
+            dialog = _ImportProgressDialog(["C:/docs/a.pdf"])
+            qtbot.addWidget(dialog)
+
+            labels = {
+                label.text(): label
+                for label in dialog.findChildren(QLabel)
+            }
+            title = labels["正在导入并规范化文档"]
+            summary = labels["已完成 0/1"]
+            hint = labels["关闭此窗口不会停止后台导入。"]
+
+            assert LATTE["BG_PAGE"] in dialog.styleSheet()
+            assert LATTE["TEXT_PRIMARY"] in title.styleSheet()
+            assert LATTE["TEXT_SECONDARY"] in summary.styleSheet()
+            assert LATTE["TEXT_SECONDARY"] in hint.styleSheet()
+
+            manager.toggle()
+
+            assert MOCHA["BG_PAGE"] in dialog.styleSheet()
+            assert MOCHA["TEXT_PRIMARY"] in title.styleSheet()
+            assert MOCHA["TEXT_SECONDARY"] in summary.styleSheet()
+            assert MOCHA["TEXT_SECONDARY"] in hint.styleSheet()
+
+            manager.toggle()
+
+            assert LATTE["BG_PAGE"] in dialog.styleSheet()
+            assert LATTE["TEXT_PRIMARY"] in title.styleSheet()
+            assert LATTE["TEXT_SECONDARY"] in summary.styleSheet()
+            assert LATTE["TEXT_SECONDARY"] in hint.styleSheet()
+    finally:
+        if dialog is not None:
+            dialog.close()
+        app.setStyleSheet(previous_stylesheet)
+        for name, value in previous_theme.items():
+            setattr(Theme, name, value)
+        ThemeManager._instance = previous_manager
 
 
 def test_closing_progress_dialog_only_hides_it(qtbot):

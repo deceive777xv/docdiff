@@ -71,12 +71,10 @@ class _ImportProgressDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title = QLabel("正在导入并规范化文档")
-        title.setStyleSheet(Theme.page_title())
-        layout.addWidget(title)
+        self._title = QLabel("正在导入并规范化文档")
+        layout.addWidget(self._title)
 
         self._summary = QLabel(f"已完成 0/{len(self._paths)}")
-        self._summary.setStyleSheet(Theme.label_secondary())
         layout.addWidget(self._summary)
 
         self._progress = QProgressBar()
@@ -94,12 +92,16 @@ class _ImportProgressDialog(QDialog):
             self._items[path] = item
         layout.addWidget(self._list)
 
-        hint = QLabel("关闭此窗口不会停止后台导入。")
-        hint.setStyleSheet(Theme.label_secondary())
-        layout.addWidget(hint)
+        self._hint = QLabel("关闭此窗口不会停止后台导入。")
+        layout.addWidget(self._hint)
         self._apply_theme()
+        from app.ui.theme_manager import ThemeManager
+        ThemeManager.instance().theme_changed.connect(self._apply_theme)
 
     def _apply_theme(self) -> None:
+        self._title.setStyleSheet(Theme.page_title())
+        self._summary.setStyleSheet(Theme.label_secondary())
+        self._hint.setStyleSheet(Theme.label_secondary())
         self.setStyleSheet(
             f"QDialog{{background:{Theme.BG_PAGE};}}"
             f"QListWidget{{background:{Theme.BG_CARD};color:{Theme.TEXT_PRIMARY};"
