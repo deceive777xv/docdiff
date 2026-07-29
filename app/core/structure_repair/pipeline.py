@@ -13,10 +13,11 @@ from app.core.document_ir_codec import document_ir_to_dict
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 from .llm import (
-    adjudicate_page_noise,
+    adjudicate_page_noise_batch,
     adjudicate_paragraph_merge,
     adjudicate_section_parent,
     adjudicate_table_fragment_merge,
+    review_page_noise_batch,
 )
 from .models import (
     RejectedStructureCandidate,
@@ -28,7 +29,7 @@ from .models import (
 
 
 SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "post-parse-structure-v2"
+ALGORITHM_VERSION = "post-parse-structure-v3"
 
 _NUMBERED_TITLE_RE = re.compile(
     r"^\s*(?P<number>\d+(?:\.\d+)+)\s+(?P<title>\S.{0,100})\s*$"
@@ -390,9 +391,13 @@ class _PageBoundaryItem:
     sentence_index: int | None
     text: str
 
-    @property
-    def key(self) -> tuple[str, int | None]:
-        return self.paragraph.paragraph_id, self.sentence_index
+
+def _has_table_sentence_rows(paragraph: Paragraph) -> bool:
+    rows = [sentence.text for sentence in paragraph.sentences if sentence.text.strip()]
+    return bool(rows) and all(
+        row.lstrip().startswith("|") and row.rstrip().endswith("|")
+        for row in rows
+    )
 
 
 def _adjudicate_page_boundary_noise(
@@ -412,7 +417,9 @@ def _adjudicate_page_boundary_noise(
     ]
     ordered: list[_PageBoundaryItem] = []
     for paragraph in ordered_paragraphs:
-        if _is_table(paragraph) and paragraph.sentences:
+        if paragraph.sentences and (
+            _is_table(paragraph) or _has_table_sentence_rows(paragraph)
+        ):
             ordered.extend(
                 _PageBoundaryItem(paragraph, sentence_index, sentence.text)
                 for sentence_index, sentence in enumerate(paragraph.sentences)
@@ -424,88 +431,191 @@ def _adjudicate_page_boundary_noise(
     for item in ordered:
         if item.paragraph.page_no is not None:
             by_page[item.paragraph.page_no].append(item)
-    ordered_index = {
-        item.key: index
-        for index, item in enumerate(ordered)
-    }
     removed_paragraph_ids: set[str] = set()
     removed_sentence_indexes: dict[str, set[int]] = defaultdict(set)
     row_removal_judgments: dict[str, list[tuple[float, str]]] = defaultdict(list)
-    outcomes: dict[tuple[str, int | None], str] = {}
 
-    def item_is_removed(item: _PageBoundaryItem) -> bool:
-        return (
-            item.paragraph.paragraph_id in removed_paragraph_ids
-            or (
-                item.sentence_index is not None
-                and item.sentence_index
-                in removed_sentence_indexes.get(
-                    item.paragraph.paragraph_id,
-                    set(),
+    def page_edges(
+        page_items: list[_PageBoundaryItem],
+    ) -> tuple[list[_PageBoundaryItem], list[_PageBoundaryItem]]:
+        start: list[_PageBoundaryItem] = []
+        end: list[_PageBoundaryItem] = []
+        item_count = len(page_items)
+        for index, item in enumerate(page_items):
+            start_distance = index
+            end_distance = item_count - index - 1
+            if start_distance <= end_distance and start_distance < 6:
+                start.append(item)
+            elif end_distance < 6:
+                end.append(item)
+        end.reverse()
+        return start, end
+
+    pages = sorted(by_page)
+    edges = {page_no: page_edges(by_page[page_no]) for page_no in pages}
+    batches: list[
+        tuple[str, list[tuple[str, _PageBoundaryItem]]]
+    ] = []
+    if pages:
+        first_page = pages[0]
+        batches.append(
+            (
+                f"document-start:{first_page}",
+                [("document_start", item) for item in edges[first_page][0]],
+            )
+        )
+        for previous_page, next_page in zip(pages, pages[1:], strict=False):
+            batches.append(
+                (
+                    f"pages:{previous_page}:{next_page}",
+                    [
+                        ("previous_page_end", item)
+                        for item in edges[previous_page][1]
+                    ]
+                    + [
+                        ("next_page_start", item)
+                        for item in edges[next_page][0]
+                    ],
                 )
+            )
+        last_page = pages[-1]
+        batches.append(
+            (
+                f"document-end:{last_page}",
+                [("document_end", item) for item in edges[last_page][1]],
             )
         )
 
-    def classify(item: _PageBoundaryItem, boundary_side: str) -> str:
-        existing = outcomes.get(item.key)
-        if existing is not None:
-            return existing
-        index = ordered_index[item.key]
-        context = [
-            {
-                "relative_position": context_index - index,
-                "text": context_item.text[:1200],
-            }
-            for context_index, context_item in enumerate(ordered)
-            if not item_is_removed(context_item)
-            and context_item.key != item.key
-            and 0 < abs(context_index - index) <= 6
-        ]
-        candidate_id = _stable_id(
-            "page-noise",
-            [
-                ALGORITHM_VERSION,
-                document.doc_id,
-                str(item.paragraph.page_no),
-                item.paragraph.paragraph_id,
-                (
-                    f"sentence:{item.sentence_index}"
-                    if item.sentence_index is not None
-                    else "paragraph"
-                ),
-            ],
+    for boundary_source, targets in batches:
+        if not targets:
+            continue
+        boundary_id = _stable_id(
+            "page-boundary",
+            [ALGORITHM_VERSION, document.doc_id, boundary_source],
         )
-        judgment, failure_code = adjudicate_page_noise(
-            candidate_id,
-            item.text,
-            item.paragraph.page_no or 0,
-            boundary_side,
-            context,
+        request_items = [
+            {
+                "id": f"L{index:02d}",
+                "position": position,
+                "text": item.text,
+            }
+            for index, (position, item) in enumerate(targets, start=1)
+        ]
+        initial, failure_code = adjudicate_page_noise_batch(
+            boundary_id,
+            request_items,
             provider,
             model,
         )
-        if judgment is None:
-            outcomes[item.key] = "keep"
+        if initial is None:
             rejected.append(
                 RejectedStructureCandidate(
-                    candidate_id=candidate_id,
-                    code=failure_code,
-                    reason="page-boundary LLM judgment was unavailable or invalid",
+                    candidate_id=boundary_id,
+                    code=f"initial_{failure_code}",
+                    reason="page-boundary batch initial judgment was invalid",
                 )
             )
-            return "keep"
-        decisions.append(
-            StructureRepairDecision(
-                candidate_id=candidate_id,
-                action=judgment.action,
-                source_ids=[item.paragraph.paragraph_id],
-                target_section_id="",
-                confidence=judgment.confidence,
-                reason=judgment.reason,
+            continue
+        for (_, item), label in zip(targets, initial, strict=True):
+            decisions.append(
+                StructureRepairDecision(
+                    candidate_id=f"{boundary_id}:initial:{label.item_id}",
+                    action=label.action,
+                    source_ids=[item.paragraph.paragraph_id],
+                    target_section_id="",
+                    confidence=label.confidence,
+                    reason=label.reason,
+                )
             )
+        if not any(
+            label.action == "remove_as_page_noise" for label in initial
+        ):
+            continue
+        review, failure_code = review_page_noise_batch(
+            boundary_id,
+            request_items,
+            initial,
+            provider,
+            model,
         )
-        outcomes[item.key] = judgment.action
-        if judgment.action == "remove_as_page_noise":
+        if review is None:
+            rejected.append(
+                RejectedStructureCandidate(
+                    candidate_id=boundary_id,
+                    code=f"review_{failure_code}",
+                    reason="page-boundary batch review was invalid",
+                )
+            )
+            continue
+        for (_, item), label in zip(targets, review, strict=True):
+            decisions.append(
+                StructureRepairDecision(
+                    candidate_id=f"{boundary_id}:review:{label.item_id}",
+                    action=label.action,
+                    source_ids=[item.paragraph.paragraph_id],
+                    target_section_id="",
+                    confidence=label.confidence,
+                    reason=label.reason,
+                )
+            )
+        for index, (initial_label, review_label) in enumerate(
+            zip(initial, review, strict=True)
+        ):
+            if initial_label.action == review_label.action:
+                continue
+            rejected.append(
+                RejectedStructureCandidate(
+                    candidate_id=(
+                        f"{boundary_id}:{request_items[index]['id']}"
+                    ),
+                    code="page_noise_review_disagreement",
+                    reason=(
+                        "initial and review labels disagree; the fixed item is kept"
+                    ),
+                )
+            )
+
+        removable: set[str] = set()
+        sides = dict.fromkeys(position for position, _ in targets)
+        for position in sides:
+            edge_is_open = True
+            for index, (target_position, _item) in enumerate(targets):
+                if target_position != position:
+                    continue
+                agreed = (
+                    initial[index].action == "remove_as_page_noise"
+                    and review[index].action == "remove_as_page_noise"
+                )
+                if edge_is_open and agreed:
+                    removable.add(request_items[index]["id"])
+                else:
+                    edge_is_open = False
+                    if agreed:
+                        rejected.append(
+                            RejectedStructureCandidate(
+                                candidate_id=(
+                                    f"{boundary_id}:{request_items[index]['id']}"
+                                ),
+                                code="non_contiguous_page_noise",
+                                reason=(
+                                    "a retained outer item prevents deleting this "
+                                    "more-internal candidate"
+                                ),
+                            )
+                        )
+
+        for index, (_position, item) in enumerate(targets):
+            item_id = request_items[index]["id"]
+            if item_id not in removable:
+                continue
+            confidence = min(
+                initial[index].confidence,
+                review[index].confidence,
+            )
+            reason = (
+                f"initial: {initial[index].reason}; "
+                f"review: {review[index].reason}"
+            )
             if item.sentence_index is None:
                 removed_paragraph_ids.add(item.paragraph.paragraph_id)
                 operations.append(
@@ -516,9 +626,9 @@ def _adjudicate_page_boundary_noise(
                         ),
                         type="remove_noise",
                         source_ids=[item.paragraph.paragraph_id],
-                        reason=judgment.reason,
+                        reason=reason,
                         actor="llm",
-                        confidence=judgment.confidence,
+                        confidence=confidence,
                     )
                 )
             else:
@@ -536,20 +646,8 @@ def _adjudicate_page_boundary_noise(
                         following_index
                     )
                 row_removal_judgments[item.paragraph.paragraph_id].append(
-                    (judgment.confidence, judgment.reason)
+                    (confidence, reason)
                 )
-        return judgment.action
-
-    for page_no in sorted(by_page):
-        page_items = by_page[page_no]
-        for boundary_side, candidates in (
-            ("page_start", page_items[:6]),
-            ("page_end", list(reversed(page_items[-6:]))),
-        ):
-            for item in candidates:
-                action = classify(item, boundary_side)
-                if action != "remove_as_page_noise":
-                    break
 
     for paragraph_id, sentence_indexes in removed_sentence_indexes.items():
         judgments = row_removal_judgments[paragraph_id]

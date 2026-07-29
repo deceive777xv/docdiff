@@ -28,7 +28,7 @@ from .models import (
 
 
 SCHEMA_VERSION = 1
-ALGORITHM_VERSION = "unified-document-normalization-v2"
+ALGORITHM_VERSION = "unified-document-normalization-v3"
 _HARD_TABLE_CONFLICTS = {
     "new_key_value",
     "header_or_separator",

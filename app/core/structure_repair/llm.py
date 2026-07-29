@@ -28,52 +28,69 @@ _TABLE_FRAGMENT_RESPONSE_FIELDS = {
     "confidence",
     "reason",
 }
-_PAGE_NOISE_RESPONSE_FIELDS = {
-    "candidate_id",
-    "action",
-    "confidence",
-    "reason",
-}
+_PAGE_NOISE_RESPONSE_FIELDS = {"boundary_id", "labels"}
+_PAGE_NOISE_LABEL_FIELDS = {"id", "action", "confidence", "reason"}
 _ALLOWED_ACTIONS = {"keep", "move_to_section"}
 _MIN_CONFIDENCE = 0.85
 _PAGE_NOISE_MIN_CONFIDENCE = 0.90
 _MAX_REASON_LENGTH = 200
-_PAGE_NOISE_SYSTEM_MESSAGE = """You are a printed page-header and page-footer classifier.
+_PAGE_NOISE_SYSTEM_MESSAGE = """You classify fixed text items near one physical page boundary.
 
-Task boundary:
-- Judge only whether candidate_text is printed page-boundary noise that should be
-  removed from a normalized document copy.
-- The supplied candidate_id and candidate_text are one fixed candidate. Never replace
-  it with, select, remove, merge, or cite text from nearby_context.
-- nearby_context is background evidence only. Its items are not action targets.
-- Printed metadata may combine a document name, document number, revision, secrecy
-  marking, or current page number. These are examples, not a fixed word list.
-- Return keep for real section headings, item headings, body text, notes, business
-  column-name headers, business table data, and cross-page continuations.
-- Markdown table syntax alone does not make a candidate page noise. Printed page
-  metadata laid out as a table may still be page noise.
+Task definition:
+- For every supplied item, decide whether it is printed page-header or page-footer
+  furniture that should be removed from a normalized document copy.
+- Page furniture is position-dependent printed material outside the document's logical
+  content. It commonly has a repeated role across pages. Boundary position alone is
+  not sufficient evidence.
+- Judge the complete boundary batch together. Each item is an action target and must
+  receive exactly one label. Never omit, add, reorder, replace, merge, or split items.
 - Do not rewrite, summarize, correct, generate, merge, or relocate document text.
 
-Return exactly one JSON object with exactly these four fields:
-candidate_id, action, confidence, reason.
+Content safety rules:
+- Digits, ordinals, standards, document identifiers, revision values, filenames,
+  extensions, or page-like strings are not by themselves page-noise evidence.
+- A row with an ordinal or key column plus requirement descriptions, performance
+  targets, standards, references, or attachment filenames is strong business content.
+  Keep it even when it contains numbers, .docx, Markdown pipes, empty cells, HTML
+  <br> tags, or manual line breaks.
+- Keep real section headings, item headings, body text, notes, business column-name
+  headers, business table data, and cross-page continuations.
+- Repeated printed metadata laid out as a table may still be page noise, but table
+  syntax, short length, or empty cells alone do not make it page noise.
+- When evidence is ambiguous, return keep. Retaining page furniture is safer than
+  deleting real document content.
 
-Field contract:
-- candidate_id: JSON string. Copy the supplied candidate_id exactly.
-- action: JSON string. It must be exactly remove_as_page_noise or keep.
-- confidence: JSON number from 0.0 through 1.0 inclusive. Do not return a quoted
-  number, boolean, null, NaN, or infinity.
-- reason: non-empty JSON string of at most 200 characters. Explain only why the fixed
-  candidate is printed page-boundary noise or real document content.
+Input contract:
+- boundary_id is an opaque fixed string. Copy it exactly.
+- items is the complete fixed list. Every item has exactly id, position, and text.
+- id is request-local and opaque. Copy every id exactly and in the same order.
+- position is only boundary evidence. It is one of previous_page_end,
+  next_page_start, document_start, or document_end.
 
-Strict JSON rules:
-- Output one bare JSON object and nothing before or after it.
-- Do not use Markdown fences or prose outside the object.
-- Do not omit, add, or duplicate fields.
-- Field names and enum values are case-sensitive.
-- Never invent or modify candidate_id.
+Output contract:
+- Return exactly one bare JSON object with exactly boundary_id and labels.
+- labels must contain exactly one object per input item in the same order.
+- Every label must contain exactly id, action, confidence, and reason.
+- action must be exactly remove_as_page_noise or keep.
+- confidence must be a JSON number from 0.0 through 1.0 inclusive. It cannot be a
+  quoted number, boolean, null, NaN, or infinity.
+- reason must be a non-empty JSON string of at most 200 characters and discuss only
+  the corresponding fixed item.
+- Do not use Markdown fences or prose outside the JSON object. Do not add fields.
 
-Valid output example:
-{"candidate_id":"copy-exactly","action":"remove_as_page_noise","confidence":0.96,"reason":"The fixed candidate is printed document metadata at the top of the page."}
+Valid output shape:
+{"boundary_id":"copy-exactly","labels":[{"id":"L01","action":"keep","confidence":0.99,"reason":"The numbered row contains a business requirement and target."}]}
+"""
+_PAGE_NOISE_REVIEW_SYSTEM_MESSAGE = _PAGE_NOISE_SYSTEM_MESSAGE + """
+
+Review task:
+- This is the final safety review of the supplied initial_labels for the same fixed
+  items. Re-evaluate every item against the original text and full boundary batch.
+- Pay special attention to false deletions of numbered business rows, requirements,
+  targets, standards, references, and attachment filenames.
+- Return a complete replacement label list. Do not merely approve the initial result.
+- A candidate is removed only when both rounds independently return a valid,
+  high-confidence remove_as_page_noise label. When uncertain, return keep.
 """
 _PARAGRAPH_SYSTEM_MESSAGE = """You are a document paragraph-continuation classifier.
 
@@ -163,7 +180,8 @@ class TableFragmentMergeJudgment:
 
 
 @dataclass(frozen=True)
-class PageNoiseJudgment:
+class PageNoiseLabel:
+    item_id: str
     action: str
     confidence: float
     reason: str
@@ -193,103 +211,153 @@ def _chat(provider: object, messages: list[dict[str, str]], model: str) -> str:
     return str(response.choices[0].message.content or "")
 
 
-def adjudicate_page_noise(
-    candidate_id: str,
-    candidate_text: str,
-    page_no: int,
-    boundary_side: str,
-    nearby_context: list[dict[str, object]],
-    provider: object,
-    model: str = "",
-) -> tuple[PageNoiseJudgment | None, str]:
-    """Return a strict judgment for one fixed page-boundary text candidate."""
-    payload: dict[str, object] = {
-        "candidate_id": candidate_id,
-        "candidate_text": candidate_text[:1200],
-        "page_no": page_no,
-        "boundary_side": boundary_side,
-    }
-    if nearby_context:
-        payload["nearby_context"] = nearby_context
-    user_message = {
-        "role": "user",
-        "content": json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-    }
-
-    def parse(raw: str) -> tuple[PageNoiseJudgment | None, str]:
-        try:
-            data: Any = json.loads(
-                raw,
-                object_pairs_hook=_reject_duplicate_members,
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None, "invalid_json"
-        if not isinstance(data, dict) or set(data) != _PAGE_NOISE_RESPONSE_FIELDS:
-            return None, "invalid_fields"
-        if data["candidate_id"] != candidate_id:
-            return None, "candidate_id_mismatch"
-        if data["action"] not in {"keep", "remove_as_page_noise"}:
+def _parse_page_noise_batch_response(
+    raw: str,
+    boundary_id: str,
+    items: list[dict[str, str]],
+) -> tuple[list[PageNoiseLabel] | None, str]:
+    try:
+        data: Any = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_members,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, "invalid_json"
+    if not isinstance(data, dict) or set(data) != _PAGE_NOISE_RESPONSE_FIELDS:
+        return None, "invalid_fields"
+    if data["boundary_id"] != boundary_id:
+        return None, "boundary_id_mismatch"
+    labels = data["labels"]
+    if not isinstance(labels, list) or len(labels) != len(items):
+        return None, "label_set_mismatch"
+    expected_ids = [item["id"] for item in items]
+    parsed: list[PageNoiseLabel] = []
+    for expected_id, label in zip(expected_ids, labels, strict=True):
+        if not isinstance(label, dict) or set(label) != _PAGE_NOISE_LABEL_FIELDS:
+            return None, "invalid_label_fields"
+        if label["id"] != expected_id:
+            return None, "label_set_mismatch"
+        if label["action"] not in {"keep", "remove_as_page_noise"}:
             return None, "invalid_action"
-        confidence = data["confidence"]
+        confidence = label["confidence"]
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             return None, "invalid_confidence"
         if not 0.0 <= float(confidence) <= 1.0:
             return None, "invalid_confidence"
-        reason = data["reason"]
+        reason = label["reason"]
         if (
             not isinstance(reason, str)
             or not reason.strip()
             or len(reason) > _MAX_REASON_LENGTH
         ):
             return None, "invalid_reason"
+        action = str(label["action"])
         if (
-            data["action"] == "remove_as_page_noise"
+            action == "remove_as_page_noise"
             and float(confidence) < _PAGE_NOISE_MIN_CONFIDENCE
         ):
-            return None, "low_confidence"
-        return (
-            PageNoiseJudgment(
-                action=str(data["action"]),
+            action = "keep"
+        parsed.append(
+            PageNoiseLabel(
+                item_id=expected_id,
+                action=action,
                 confidence=float(confidence),
                 reason=reason,
-            ),
-            "",
+            )
         )
+    return parsed, ""
+
+
+def adjudicate_page_noise_batch(
+    boundary_id: str,
+    items: list[dict[str, str]],
+    provider: object,
+    model: str = "",
+) -> tuple[list[PageNoiseLabel] | None, str]:
+    """Label one fixed page-boundary batch with strict, fail-closed validation."""
+    payload: dict[str, object] = {
+        "boundary_id": boundary_id,
+        "items": [
+            {
+                "id": item["id"],
+                "position": item["position"],
+                "text": item["text"][:1200],
+            }
+            for item in items
+        ],
+    }
 
     messages = [
         {"role": "system", "content": _PAGE_NOISE_SYSTEM_MESSAGE},
-        user_message,
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        },
     ]
     try:
         raw = _chat(provider, messages, model)
     except Exception:
         return None, "llm_error"
-    judgment, failure_code = parse(raw)
-    if judgment is not None or failure_code == "low_confidence":
-        return judgment, failure_code
-    retry_messages = [
+    return _parse_page_noise_batch_response(raw, boundary_id, items)
+
+
+def review_page_noise_batch(
+    boundary_id: str,
+    items: list[dict[str, str]],
+    initial_labels: list[PageNoiseLabel],
+    provider: object,
+    model: str = "",
+) -> tuple[list[PageNoiseLabel] | None, str]:
+    """Review one fixed batch once; malformed output is never retried."""
+    payload: dict[str, object] = {
+        "boundary_id": boundary_id,
+        "items": [
+            {
+                "id": item["id"],
+                "position": item["position"],
+                "text": item["text"][:1200],
+            }
+            for item in items
+        ],
+        "initial_labels": [
+            {
+                "id": label.item_id,
+                "action": label.action,
+                "confidence": label.confidence,
+                "reason": label.reason,
+            }
+            for label in initial_labels
+        ],
+    }
+    messages = [
         {
             "role": "system",
-            "content": (
-                _PAGE_NOISE_SYSTEM_MESSAGE
-                + "\nThe previous response failed strict validation with code: "
-                + failure_code
-                + ". Return a complete replacement JSON object for the same fixed "
-                "candidate with exactly candidate_id, action, confidence, and reason."
+            "content": _PAGE_NOISE_REVIEW_SYSTEM_MESSAGE,
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
             ),
         },
-        user_message,
     ]
     try:
-        raw = _chat(provider, retry_messages, model)
+        raw = _chat(provider, messages, model)
     except Exception:
         return None, "llm_error"
-    return parse(raw)
+    review_items = [
+        {"id": item["id"], "position": item["position"], "text": item["text"]}
+        for item in items
+    ]
+    return _parse_page_noise_batch_response(raw, boundary_id, review_items)
 
 
 def adjudicate_section_parent(
