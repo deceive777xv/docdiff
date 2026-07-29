@@ -146,8 +146,8 @@ def test_llm_can_merge_ambiguous_adjacent_page_fragments():
                 [
                     Paragraph(
                         "p1",
-                        "车窗开启过程",
-                        [Sentence("车窗开启过程")],
+                        "控制系统在车窗持续开启的整个运行过程中监测",
+                        [Sentence("控制系统在车窗持续开启的整个运行过程中监测")],
                         1,
                     ),
                     Paragraph(
@@ -159,7 +159,7 @@ def test_llm_can_merge_ambiguous_adjacent_page_fragments():
                 ],
             )
         ],
-        plain_text="车窗开启过程\n遇到障碍物时立即下降。",
+        plain_text="控制系统在车窗持续开启的整个运行过程中监测\n遇到障碍物时立即下降。",
     )
     provider = _FakeProvider(
         json.dumps(
@@ -177,11 +177,154 @@ def test_llm_can_merge_ambiguous_adjacent_page_fragments():
 
     paragraphs = result.document.sections[0].paragraphs
     assert [paragraph.text for paragraph in paragraphs] == [
-        "车窗开启过程遇到障碍物时立即下降。"
+        "控制系统在车窗持续开启的整个运行过程中监测遇到障碍物时立即下降。"
     ]
     assert result.trace.operations[-1].type == "merge_paragraphs"
     assert result.trace.operations[-1].actor == "llm"
     assert result.trace.operations[-1].source_ids == ["p1", "p2"]
+
+
+def test_small_heading_is_not_sent_to_paragraph_merge_llm():
+    from app.core.structure_repair import repair_document
+
+    class AlwaysMergeProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            self.calls += 1
+            payload = json.loads(messages[-1]["content"])
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "merge_paragraphs",
+                    "confidence": 0.99,
+                    "reason": "always merge for regression coverage",
+                }
+            )
+
+    document = DocumentIR(
+        "small-heading",
+        "Small heading",
+        "small-heading-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [
+                    Paragraph("heading", "C）功能约束", [Sentence("C）功能约束")], 1),
+                    Paragraph(
+                        "body",
+                        "执行机构在整个运行过程中应当满足规定的负载要求。",
+                        [Sentence("执行机构在整个运行过程中应当满足规定的负载要求。")],
+                        1,
+                    ),
+                ],
+            )
+        ],
+    )
+    provider = AlwaysMergeProvider()
+
+    result = repair_document(document, provider=provider)
+
+    assert [
+        paragraph.text for paragraph in result.document.sections[0].paragraphs
+    ] == [
+        "C）功能约束",
+        "执行机构在整个运行过程中应当满足规定的负载要求。",
+    ]
+    assert provider.calls == 0
+    assert all(
+        operation.type != "merge_paragraphs"
+        for operation in result.trace.operations
+    )
+
+
+def test_unmarked_small_heading_is_not_sent_to_paragraph_merge_llm():
+    from app.core.structure_repair import repair_document
+
+    class FailIfCalledProvider:
+        chat_model = "fake-model"
+
+        def chat(self, _messages: list[dict], **_kwargs) -> str:
+            raise AssertionError("heading boundary must be rejected before LLM")
+
+    document = DocumentIR(
+        "unmarked-small-heading",
+        "Unmarked small heading",
+        "unmarked-small-heading-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [
+                    Paragraph("heading", "环境要求", [Sentence("环境要求")], 1),
+                    Paragraph(
+                        "body",
+                        "设备在规定的温度和湿度范围内应保持连续稳定运行。",
+                        [Sentence("设备在规定的温度和湿度范围内应保持连续稳定运行。")],
+                        1,
+                    ),
+                ],
+            )
+        ],
+    )
+
+    result = repair_document(document, provider=FailIfCalledProvider())
+
+    assert [
+        paragraph.text for paragraph in result.document.sections[0].paragraphs
+    ] == ["环境要求", "设备在规定的温度和湿度范围内应保持连续稳定运行。"]
+    assert all(
+        operation.type != "merge_paragraphs"
+        for operation in result.trace.operations
+    )
+
+
+def test_small_heading_in_continuation_slot_is_not_sent_to_paragraph_merge_llm():
+    from app.core.structure_repair import repair_document
+
+    class FailIfCalledProvider:
+        chat_model = "fake-model"
+
+        def chat(self, _messages: list[dict], **_kwargs) -> str:
+            raise AssertionError("heading boundary must be rejected before LLM")
+
+    document = DocumentIR(
+        "continuation-small-heading",
+        "Continuation small heading",
+        "continuation-small-heading-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [
+                    Paragraph(
+                        "body",
+                        "控制系统在检测到运行环境发生异常变化时应当",
+                        [Sentence("控制系统在检测到运行环境发生异常变化时应当")],
+                        1,
+                    ),
+                    Paragraph("heading", "（D）处置要求", [Sentence("（D）处置要求")], 2),
+                ],
+            )
+        ],
+    )
+
+    result = repair_document(document, provider=FailIfCalledProvider())
+
+    assert [
+        paragraph.text for paragraph in result.document.sections[0].paragraphs
+    ] == ["控制系统在检测到运行环境发生异常变化时应当", "（D）处置要求"]
+    assert all(
+        operation.type != "merge_paragraphs"
+        for operation in result.trace.operations
+    )
 
 
 def test_import_normalization_adjudicates_every_eligible_paragraph_candidate():
@@ -273,13 +416,25 @@ def test_llm_paragraph_merge_rechecks_the_new_fragment_across_three_pages():
                 "1 Scope",
                 1,
                 [
-                    Paragraph("p1", "系统检测到", [Sentence("系统检测到")], 1),
-                    Paragraph("p2", "障碍物并", [Sentence("障碍物并")], 2),
+                    Paragraph(
+                        "p1",
+                        "当控制系统持续监测运行区域内的异常状态并检测到",
+                        [Sentence("当控制系统持续监测运行区域内的异常状态并检测到")],
+                        1,
+                    ),
+                    Paragraph(
+                        "p2",
+                        "可能影响设备安全运行的障碍物或其他风险因素并",
+                        [Sentence("可能影响设备安全运行的障碍物或其他风险因素并")],
+                        2,
+                    ),
                     Paragraph("p3", "立即执行回退。", [Sentence("立即执行回退。")], 3),
                 ],
             )
         ],
-        "系统检测到\n障碍物并\n立即执行回退。",
+        "当控制系统持续监测运行区域内的异常状态并检测到\n"
+        "可能影响设备安全运行的障碍物或其他风险因素并\n"
+        "立即执行回退。",
     )
     provider = MergeProvider()
 
@@ -287,7 +442,10 @@ def test_llm_paragraph_merge_rechecks_the_new_fragment_across_three_pages():
 
     assert [
         paragraph.text for paragraph in result.document.sections[0].paragraphs
-    ] == ["系统检测到障碍物并立即执行回退。"]
+    ] == [
+        "当控制系统持续监测运行区域内的异常状态并检测到"
+        "可能影响设备安全运行的障碍物或其他风险因素并立即执行回退。"
+    ]
     assert len(provider.payloads) == 2
     assert all(set(payload) <= {
         "candidate_id",
@@ -338,7 +496,12 @@ def test_paragraph_llm_retries_extra_fields_and_enforces_detailed_contract():
                 "1 Scope",
                 1,
                 [
-                    Paragraph("p1", "系统检测到", [Sentence("系统检测到")], 1),
+                    Paragraph(
+                        "p1",
+                        "控制系统在持续监测运行区域内的异常状态时检测到",
+                        [Sentence("控制系统在持续监测运行区域内的异常状态时检测到")],
+                        1,
+                    ),
                     Paragraph("p2", "障碍物后回退。", [Sentence("障碍物后回退。")], 2),
                 ],
             )
@@ -353,7 +516,9 @@ def test_paragraph_llm_retries_extra_fields_and_enforces_detailed_contract():
     assert "exactly these four fields" in retry_prompt
     assert "invalid_fields" in retry_prompt
     assert "fixed slots" in retry_prompt
-    assert result.document.sections[0].paragraphs[0].text == "系统检测到障碍物后回退。"
+    assert result.document.sections[0].paragraphs[0].text == (
+        "控制系统在持续监测运行区域内的异常状态时检测到障碍物后回退。"
+    )
 
 
 def test_llm_preserves_simple_repeated_header_table_merge_capability():

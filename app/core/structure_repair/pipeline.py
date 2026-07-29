@@ -397,10 +397,23 @@ def _is_heading_like(text: str) -> bool:
     )
 
 
+def _has_heading_like_boundary(
+    previous: Paragraph,
+    following: Paragraph,
+) -> bool:
+    return _is_heading_like(previous.text) or _is_heading_like(following.text)
+
+
 def _certain_continuation(previous: Paragraph, following: Paragraph) -> bool:
     left = previous.text.rstrip()
     right = following.text.lstrip()
-    if not left or not right or _is_table(previous) or _is_table(following):
+    if (
+        not left
+        or not right
+        or _is_table(previous)
+        or _is_table(following)
+        or _has_heading_like_boundary(previous, following)
+    ):
         return False
     if _IMAGE_PLACEHOLDER_RE.fullmatch(previous.text) or _IMAGE_PLACEHOLDER_RE.fullmatch(following.text):
         return False
@@ -415,10 +428,7 @@ def _certain_continuation(previous: Paragraph, following: Paragraph) -> bool:
     ) or right.startswith(_CONTINUATION_PREFIXES)
     if not has_explicit_continuity:
         return False
-    return not (
-        _NUMBERED_TITLE_RE.match(right)
-        or _GENERIC_STRUCTURE_RE.match(right)
-    )
+    return True
 
 
 def _table_rows(paragraph: Paragraph) -> list[str]:
@@ -630,7 +640,7 @@ def _is_ambiguous_fragment_candidate(
         or _is_table(previous)
         or _is_table(following)
         or _TERMINAL_RE.search(previous.text.rstrip())
-        or _is_heading_like(following.text)
+        or _has_heading_like_boundary(previous, following)
     ):
         return False
     return 0 < len(previous.text) + len(following.text) <= 1600
