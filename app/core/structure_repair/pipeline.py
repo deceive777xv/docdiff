@@ -45,7 +45,7 @@ _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
 _JOIN_LIST_MARKER_RE = re.compile(r"^(?P<marker>\s*[-*+•]\s+)(?P<body>.*)$", re.DOTALL)
 _IMAGE_PLACEHOLDER_RE = re.compile(
     r"^\s*(?:\*\*)?==>\s*picture\s*\[\s*\d+\s*x\s*\d+\s*]\s*"
-    r"intentionally omitted\s*<==\s*$",
+    r"intentionally omitted\s*<==(?:\*\*)?\s*$",
     re.IGNORECASE,
 )
 _DOCUMENT_CODE_RE = re.compile(
