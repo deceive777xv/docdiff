@@ -16,7 +16,7 @@ from statistics import median
 import re
 from typing import Literal, Mapping, Sequence
 
-from app.core.diff.reconstruction_trace import (
+from app.core.normalization.table_trace import (
     ALGORITHM_VERSION,
     ReconstructionOperation,
     SourceRowRef,
@@ -187,6 +187,18 @@ class CandidateAssessment:
     candidate: ContinuationCandidate
     rule_confidence: Literal["high", "medium", "low"]
     final_action: Literal["merge", "keep_separate", "needs_llm"]
+    merge_rows: bool = False
+    merge_fragments: bool = False
+
+    def __post_init__(self) -> None:
+        if self.final_action != "merge":
+            object.__setattr__(self, "merge_rows", False)
+            object.__setattr__(self, "merge_fragments", False)
+            return
+        if not (self.merge_rows or self.merge_fragments):
+            raise ValueError("merge assessment requires an explicit operation plan")
+        if self.merge_rows and not self.merge_fragments:
+            raise ValueError("row merge requires an accepted fragment link")
 
 
 def generate_continuation_candidates(
@@ -255,13 +267,6 @@ def generate_continuation_candidates(
         for row in right.rows[:first_full_position]
         if row.kind == "content" and row.source not in boundary_rows
         and _row_role(right, row.source) != "boundary"
-        and (
-            not key_logical_columns
-            or all(
-                not _mapped_logical_cells(row, mapping).get(column, "")
-                for column in key_logical_columns
-            )
-        )
     )
     continuation_choices: list[tuple[TableRowMatrix, bool]] = []
     if leading_content_rows:
@@ -362,7 +367,7 @@ def assess_candidate(candidate: ContinuationCandidate) -> CandidateAssessment:
         return CandidateAssessment(candidate, "low", "keep_separate")
     evidence_count = len(set(candidate.evidence))
     if evidence_count >= 4:
-        return CandidateAssessment(candidate, "high", "merge")
+        return CandidateAssessment(candidate, "high", "needs_llm")
     if evidence_count >= 2:
         return CandidateAssessment(candidate, "medium", "needs_llm")
     return CandidateAssessment(candidate, "low", "keep_separate")
@@ -503,6 +508,9 @@ def build_reconstruction_operations(
         tuple[Literal["baseline", "target"], SourceRowRef],
         dict[int, int],
     ] = {}
+    scheduled_fragment_pairs: set[
+        tuple[Literal["baseline", "target"], tuple[str, ...]]
+    ] = set()
 
     def record_projection(
         side: Literal["baseline", "target"],
@@ -538,6 +546,10 @@ def build_reconstruction_operations(
 
     for assessment in analyses:
         if assessment.final_action != "merge":
+            continue
+        merge_rows = assessment.merge_rows
+        merge_fragments = assessment.merge_fragments
+        if not merge_rows and not merge_fragments:
             continue
         candidate = assessment.candidate
         sources = [candidate.previous_row.source, candidate.continuation_row.source]
@@ -597,18 +609,23 @@ def build_reconstruction_operations(
                     previous_logical_width,
                 ),
             )
-        operations.extend(
-            (
+        if merge_rows:
+            operations.append(
                 ReconstructionOperation(
                     "",
                     candidate.side,
                     "merge_rows",
                     sources,
                     decision_id=candidate.candidate_id,
-                ),
+                )
             )
-        )
-        if len(source_paragraph_ids) > 1:
+        fragment_pair = (candidate.side, tuple(source_paragraph_ids))
+        if (
+            merge_fragments
+            and len(source_paragraph_ids) > 1
+            and fragment_pair not in scheduled_fragment_pairs
+        ):
+            scheduled_fragment_pairs.add(fragment_pair)
             operations.append(
                 ReconstructionOperation(
                     "",

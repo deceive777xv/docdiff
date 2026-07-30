@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.diff.reconstruction_trace import (
+from app.core.normalization.table_trace import (
     ALGORITHM_VERSION,
     SCHEMA_VERSION,
     DocumentTraceRef,
@@ -15,13 +15,12 @@ from app.core.diff.reconstruction_trace import (
     ReconstructionOperation,
     ReconstructionTrace,
     SourceRowRef,
-    load_reconstruction_trace,
-    persist_compare_artifacts,
     trace_from_dict,
     trace_to_dict,
     validate_trace_documents,
     write_json_atomic,
 )
+from app.core.diff.result_storage import persist_compare_result
 from app.core.types import DiffItem, DocumentIR
 
 
@@ -60,6 +59,14 @@ def make_trace_with_every_operation() -> ReconstructionTrace:
                 next_page_no=5,
                 context_refs=["item-1", "item-2"],
                 generated_row_id="row-1",
+                review=LLMJudgment(
+                    "review-model",
+                    "merge",
+                    0.88,
+                    "independent review confirmed the continuation",
+                    row_action="merge",
+                    table_action="merge_fragments",
+                ),
             )
         ],
         operations=[
@@ -97,14 +104,15 @@ def test_trace_round_trip_preserves_typed_mappings_and_llm_judgment(tmp_path):
 
     path = tmp_path / "task.reconstruction.json"
     write_json_atomic(path, trace_to_dict(trace))
-    restored = load_reconstruction_trace(path)
+    restored = trace_from_dict(json.loads(path.read_text(encoding="utf-8")))
 
     assert restored == trace
     assert restored.decisions[0].column_mapping == {1: 0, 3: 1}
-    assert restored.algorithm_version == "cross-page-table-v2"
+    assert restored.algorithm_version == "cross-page-table-v3"
     assert restored.decisions[0].previous_page_no == 4
     assert restored.decisions[0].llm.roles["continuation_row"] == "continuation_row"
     assert restored.decisions[0].llm.mapping_id == "candidate-1:mapping:0"
+    assert restored.decisions[0].review.model == "review-model"
 
 
 def test_trace_dict_round_trip_preserves_mapping_id():
@@ -138,6 +146,7 @@ def test_trace_loader_accepts_legacy_v1_payload():
         decision.pop("previous_page_no", None)
         decision.pop("next_page_no", None)
         decision.pop("context_refs", None)
+        decision.pop("review", None)
         if decision["llm"] is not None:
             decision["llm"].pop("mapping_id", None)
             decision["llm"].pop("roles", None)
@@ -162,40 +171,14 @@ def test_trace_rejects_document_identity_mismatch():
         validate_trace_documents(trace, baseline_ir, target_ir)
 
 
-def test_persist_compare_artifacts_writes_existing_result_shape_and_sidecar(tmp_path):
-    result_path, trace_path = persist_compare_artifacts(
-        tmp_path,
-        "task-1",
-        [make_diff_item()],
-        make_trace_with_every_operation(),
-    )
+def test_persist_compare_result_writes_existing_result_shape_without_sidecar(tmp_path):
+    result_path = persist_compare_result(tmp_path, "task-1", [make_diff_item()])
 
     assert json.loads(result_path.read_text(encoding="utf-8")) == [asdict(make_diff_item())]
-    assert trace_path.name == "task-1.reconstruction.json"
-    assert load_reconstruction_trace(trace_path) == make_trace_with_every_operation()
+    assert not list((tmp_path / "exports").glob("*.reconstruction.json"))
 
 
-def test_persist_compare_artifacts_stages_both_files_before_first_replace(tmp_path, monkeypatch):
-    observed_temp_files: list[tuple[bool, bool]] = []
-    original_replace = Path.replace
-
-    def recording_replace(path: Path, target: Path):
-        exports = tmp_path / "exports"
-        observed_temp_files.append(
-            (
-                any(exports.glob("task-1.json.*.tmp")),
-                any(exports.glob("task-1.reconstruction.json.*.tmp")),
-            )
-        )
-        return original_replace(path, target)
-
-    monkeypatch.setattr(Path, "replace", recording_replace)
-    persist_compare_artifacts(tmp_path, "task-1", [make_diff_item()], make_trace_with_every_operation())
-
-    assert observed_temp_files[0] == (True, True)
-
-
-def test_persist_compare_artifacts_raises_when_result_replace_fails(tmp_path, monkeypatch):
+def test_persist_compare_result_cleans_temp_file_when_replace_fails(tmp_path, monkeypatch):
     original_replace = Path.replace
 
     def failing_result_replace(path: Path, target: Path):
@@ -206,27 +189,7 @@ def test_persist_compare_artifacts_raises_when_result_replace_fails(tmp_path, mo
     monkeypatch.setattr(Path, "replace", failing_result_replace)
 
     with pytest.raises(OSError, match="result replacement failed"):
-        persist_compare_artifacts(tmp_path, "task-1", [make_diff_item()], make_trace_with_every_operation())
+        persist_compare_result(tmp_path, "task-1", [make_diff_item()])
 
     exports = tmp_path / "exports"
-    assert not any(exports.glob("*.tmp"))
-
-
-def test_persist_compare_artifacts_stops_before_result_replace_when_sidecar_replace_fails(tmp_path, monkeypatch):
-    original_replace = Path.replace
-    replace_targets: list[str] = []
-
-    def failing_sidecar_replace(path: Path, target: Path):
-        replace_targets.append(target.name)
-        if target.name == "task-1.reconstruction.json":
-            raise OSError("sidecar replacement failed")
-        return original_replace(path, target)
-
-    monkeypatch.setattr(Path, "replace", failing_sidecar_replace)
-
-    with pytest.raises(OSError, match="sidecar replacement failed"):
-        persist_compare_artifacts(tmp_path, "task-1", [make_diff_item()], make_trace_with_every_operation())
-
-    exports = tmp_path / "exports"
-    assert replace_targets == ["task-1.reconstruction.json"]
     assert not any(exports.glob("*.tmp"))

@@ -49,10 +49,11 @@ class _FakeQThread:
 class _FakeIngestWorker:
     instances = []
 
-    def __init__(self, ctx, file_path, document_id=None):
+    def __init__(self, ctx, file_path, document_id=None, normalization_depth="standard"):
         self.ctx = ctx
         self.file_path = file_path
         self.document_id = document_id
+        self.normalization_depth = normalization_depth
         self.finished = _FakeSignal()
         self.error = _FakeSignal()
         self.refresh_needed = _FakeSignal()
@@ -146,6 +147,26 @@ def test_run_ingest_connects_ui_updates_to_page_slots(library_page):
     assert worker.progress.connections
 
 
+def test_import_thinking_depth_defaults_to_low_and_reaches_workers(library_page):
+    _FakeQThread.instances.clear()
+    _FakeIngestWorker.instances.clear()
+
+    assert library_page._normalization_depth.currentData() == "off"
+    assert [
+        library_page._normalization_depth.itemData(index)
+        for index in range(library_page._normalization_depth.count())
+    ] == ["off", "standard", "review"]
+    library_page._normalization_depth.setCurrentIndex(2)
+
+    with (
+        patch("app.ui.pages.library_page.QThread", _FakeQThread),
+        patch("app.ui.pages.library_page._IngestWorker", _FakeIngestWorker),
+    ):
+        library_page._start_ingest_batch(["C:/docs/example.docx"])
+
+    assert _FakeIngestWorker.instances[-1].normalization_depth == "review"
+
+
 def test_run_ingest_finished_discards_the_finished_thread(library_page):
     """Finishing an earlier import must not remove a newer active thread."""
     _FakeQThread.instances.clear()
@@ -229,7 +250,11 @@ def test_ingest_worker_streams_graph_stage_progress(ctx):
         ]
     )
     conn = MagicMock()
-    worker = _IngestWorker(ctx, "C:/docs/example.pdf")
+    worker = _IngestWorker(
+        ctx,
+        "C:/docs/example.pdf",
+        normalization_depth="review",
+    )
     progress = []
     completed = []
     worker.progress.connect(
@@ -247,6 +272,7 @@ def test_ingest_worker_streams_graph_stage_progress(ctx):
     assert completed == ["C:/docs/example.pdf"]
     graph.stream.assert_called_once()
     assert graph.stream.call_args.kwargs == {"stream_mode": "updates"}
+    assert graph.stream.call_args.args[0]["normalization_depth"] == "review"
     conn.close.assert_called_once_with()
 
 

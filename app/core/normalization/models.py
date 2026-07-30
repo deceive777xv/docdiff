@@ -3,26 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Literal
 
-from app.core.diff.reconstruction_trace import (
-    DocumentTraceRef,
-    ReconstructionTrace,
-    SourceRowRef,
-)
+from app.core.normalization.table_trace import DocumentTraceRef, ReconstructionTrace
 from app.core.structure_repair.models import StructureRepairTrace
 from app.core.types import DocumentIR
 
 
-NormalizationStatus = Literal["repaired", "unchanged", "fallback"]
+class NormalizationDepth(str, Enum):
+    OFF = "off"
+    STANDARD = "standard"
+    REVIEW = "review"
 
 
-@dataclass(frozen=True)
-class DeferredTableCandidate:
-    candidate_id: str
-    source_rows: list[SourceRowRef]
-    column_mapping: dict[int, int]
-    failure_code: str
+NormalizationStatus = Literal["skipped", "repaired", "unchanged", "fallback"]
 
 
 @dataclass(frozen=True)
@@ -34,10 +29,8 @@ class DocumentNormalizationTrace:
     status: NormalizationStatus
     structure_trace: StructureRepairTrace
     table_trace: ReconstructionTrace
-    deferred_table_candidates: list[DeferredTableCandidate] = field(
-        default_factory=list
-    )
     warnings: list[str] = field(default_factory=list)
+    normalization_depth: str = NormalizationDepth.OFF.value
 
 
 @dataclass(frozen=True)
@@ -47,9 +40,6 @@ class DocumentBoundaryProfile:
     doc_id: str
     file_hash: str
     table_candidate_count: int
-    deferred_table_candidates: list[DeferredTableCandidate] = field(
-        default_factory=list
-    )
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from app.core.diff.reconstruction_trace import (
+from app.core.normalization.table_trace import (
     ALGORITHM_VERSION as TABLE_ALGORITHM_VERSION,
     SCHEMA_VERSION as TABLE_SCHEMA_VERSION,
     DocumentTraceRef,
@@ -21,6 +21,7 @@ from app.core.normalization import (
     DocumentBoundaryProfile,
     DocumentNormalizationResult,
     DocumentNormalizationTrace,
+    NormalizationDepth,
     normalize_document,
 )
 from app.core.types import DocumentIR
@@ -58,6 +59,7 @@ def prepare_import_ir(
     *,
     provider: object | None = None,
     model: str = "",
+    depth: NormalizationDepth = NormalizationDepth.OFF,
 ) -> ImportStructureArtifacts:
     """Persist immutable raw IR, repair a copy, and atomically publish artifacts."""
     parsed_dir = Path(data_dir) / "parsed"
@@ -77,6 +79,7 @@ def prepare_import_ir(
             raw_document,
             provider=provider,
             model=model,
+            depth=depth,
         )
     except Exception as exc:
         fallback = deepcopy(raw_document)
@@ -121,8 +124,8 @@ def prepare_import_ir(
             status="fallback",
             structure_trace=trace,
             table_trace=table_trace,
-            deferred_table_candidates=[],
             warnings=[warning],
+            normalization_depth=NormalizationDepth(depth).value,
         )
         boundary_profile = DocumentBoundaryProfile(
             schema_version=NORMALIZATION_SCHEMA_VERSION,
@@ -130,7 +133,6 @@ def prepare_import_ir(
             doc_id=raw_document.doc_id,
             file_hash=raw_document.file_hash,
             table_candidate_count=0,
-            deferred_table_candidates=[],
         )
         result = DocumentNormalizationResult(
             document=structure_result.document,

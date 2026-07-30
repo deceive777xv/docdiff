@@ -38,6 +38,8 @@ class _ParagraphUnit:
     table_header: bool = False
     section_path: str = ""
     section_level: int = 0
+    document_title: str = ""
+    source_paragraph_id: str = ""
 
 
 @dataclass
@@ -74,7 +76,6 @@ _LLM_RERANK_MIN_SCORE = 0.45
 _LLM_RERANK_MIN_CONFIDENCE = 0.6
 _LLM_CONFLICT_MAX_BASELINES = 6
 _LLM_CONFLICT_MAX_TARGETS = 8
-_EXACT_WINDOW_MAX_UNITS = 3
 _EXACT_WINDOW_MIN_CHARS = 24
 _EXACT_WINDOW_MAX_CHARS = 2000
 
@@ -87,6 +88,7 @@ _MATCH_RERANK_PROMPT = """你是文档表格行匹配助手。请判断“基准
 - 如果没有合适候选，返回 null。
 
 基准行：
+文档/章节：{baseline_context}
 原文：{baseline_text}
 匹配文本：{baseline_match}
 
@@ -554,12 +556,16 @@ def _llm_rerank_candidate(
         candidate_lines.append(
             (
                 f"{index}. 相似度：{score:.3f}\n"
+                f"   文档/章节：{target_unit.document_title} / {target_unit.section_path}\n"
                 f"   原文：{target_unit.para.text[:300]}\n"
                 f"   匹配文本：{_unit_match_text(target_unit)[:300]}"
             )
         )
 
     prompt = _MATCH_RERANK_PROMPT.format(
+        baseline_context=(
+            f"{baseline_unit.document_title} / {baseline_unit.section_path}"
+        ),
         baseline_text=baseline_unit.para.text[:500],
         baseline_match=_unit_match_text(baseline_unit)[:500],
         candidates="\n".join(candidate_lines),
@@ -660,7 +666,8 @@ def _format_conflict_rows(
         unit = units[unit_index]
         lines.append(
             (
-                f"{local_index}. 原文：{unit.para.text[:300]}\n"
+                f"{local_index}. 文档/章节：{unit.document_title} / {unit.section_path}\n"
+                f"   原文：{unit.para.text[:300]}\n"
                 f"   匹配文本：{_unit_match_text(unit)[:300]}"
             )
         )
@@ -775,6 +782,7 @@ def _expand_paragraphs(
     paras: list[Paragraph],
     section_path: str = "",
     section_level: int = 0,
+    document_title: str = "",
 ) -> list[_ParagraphUnit]:
     units: list[_ParagraphUnit] = []
     for para in paras:
@@ -800,6 +808,8 @@ def _expand_paragraphs(
                     ),
                     section_path=section_path,
                     section_level=section_level,
+                    document_title=document_title,
+                    source_paragraph_id=para.paragraph_id,
                 )
             )
             continue
@@ -829,6 +839,8 @@ def _expand_paragraphs(
                     table_header=_looks_like_structural_table_header(text, following) if is_table else False,
                     section_path=section_path,
                     section_level=section_level,
+                    document_title=document_title,
+                    source_paragraph_id=para.paragraph_id,
                 )
             )
     return units
@@ -1083,6 +1095,34 @@ def _section_match_scopes(pairs: list[SectionPair]) -> list[_SectionMatchScope]:
     return scopes
 
 
+def _full_section_paths(
+    pairs: list[SectionPair],
+    side: str,
+) -> dict[int, str]:
+    paths: dict[int, str] = {}
+    stack: list[tuple[int, str]] = []
+    attribute = "baseline_section" if side == "baseline" else "target_section"
+    index_attribute = "baseline_index" if side == "baseline" else "target_index"
+    ordered_pairs = sorted(
+        (
+            pair
+            for pair in pairs
+            if getattr(pair, attribute) is not None
+            and getattr(pair, index_attribute) is not None
+        ),
+        key=lambda pair: getattr(pair, index_attribute),
+    )
+    for pair in ordered_pairs:
+        section = getattr(pair, attribute)
+        if section is None or id(section) in paths:
+            continue
+        while stack and stack[-1][0] >= section.level:
+            stack.pop()
+        stack.append((section.level, section.title))
+        paths[id(section)] = " / ".join(title for _level, title in stack)
+    return paths
+
+
 def _window_normalized_text(units: list[_ParagraphUnit]) -> str:
     return "".join(_normalize_match_text(_unit_match_text(unit)) for unit in units)
 
@@ -1108,6 +1148,12 @@ def _merge_window_units(units: list[_ParagraphUnit]) -> _ParagraphUnit:
         match_text=match_text,
         section_path=most_specific.section_path,
         section_level=most_specific.section_level,
+        document_title=most_specific.document_title,
+        source_paragraph_id=(
+            units[0].source_paragraph_id
+            if len({unit.source_paragraph_id for unit in units}) == 1
+            else ""
+        ),
     )
 
 
@@ -1169,12 +1215,14 @@ def _exact_adjacent_window_matches(
             str,
             list[tuple[tuple[int, ...], _ParagraphUnit]],
         ] = {}
-        for size in range(1, _EXACT_WINDOW_MAX_UNITS + 1):
+        for size in range(1, len(units) + 1):
             for start in range(len(units) - size + 1):
                 indexes = tuple(range(start, start + size))
                 if anchored.intersection(indexes):
                     continue
                 window = units[start : start + size]
+                if len({unit.source_paragraph_id for unit in window}) != 1:
+                    continue
                 if not all(_is_ordinary_unit(unit) for unit in window):
                     continue
                 normalized = _window_normalized_text(window)
@@ -1281,12 +1329,16 @@ def match_paragraphs(
     rerank_provider: BaseProvider | None = None,
     use_llm_rerank: bool = True,
     suppress_unmatched_table_headers: bool = True,
+    baseline_document_title: str = "",
+    target_document_title: str = "",
 ) -> list[ParagraphPair]:
     """
     For each SectionPair, match paragraphs by embedding similarity.
     Returns flat list of ParagraphPairs across all section pairs.
     """
     results: list[ParagraphPair] = []
+    baseline_paths = _full_section_paths(pairs, "baseline")
+    target_paths = _full_section_paths(pairs, "target")
 
     for scope in _section_match_scopes(pairs):
         b_units = [
@@ -1294,8 +1346,9 @@ def match_paragraphs(
             for section in scope.baseline_sections
             for unit in _expand_paragraphs(
                 section.paragraphs,
-                section.title,
+                baseline_paths.get(id(section), section.title),
                 section.level,
+                baseline_document_title,
             )
         ]
         t_units = [
@@ -1303,8 +1356,9 @@ def match_paragraphs(
             for section in scope.target_sections
             for unit in _expand_paragraphs(
                 section.paragraphs,
-                section.title,
+                target_paths.get(id(section), section.title),
                 section.level,
+                target_document_title,
             )
         ]
         b_ordinary_units = [unit for unit in b_units if _is_ordinary_unit(unit)]

@@ -7,7 +7,7 @@ from decimal import Decimal
 import re
 from typing import Literal, Mapping, Sequence, cast
 
-from app.core.diff.reconstruction_trace import (
+from app.core.normalization.table_trace import (
     ALGORITHM_VERSION,
     SCHEMA_VERSION,
     DocumentTraceRef,
@@ -18,7 +18,7 @@ from app.core.diff.reconstruction_trace import (
     validate_trace_documents,
 )
 from app.core.diff.structure_aligner import SectionPair, align_sections
-from app.core.diff.table_reconstruction import (
+from app.core.normalization.tables import (
     CandidateAssessment,
     ColumnMapping,
     ContinuationCandidate,
@@ -35,8 +35,11 @@ from app.core.diff.table_reconstruction import (
     infer_monotonic_column_mapping,
     infer_regions,
 )
-from app.core.diff.table_reconstruction_llm import adjudicate_continuation
-from app.core.diff.table_boundary_context import (
+from app.core.normalization.table_resolver import (
+    adjudicate_continuation,
+    review_continuation,
+)
+from app.core.normalization.table_boundary_context import (
     TableBoundaryContext,
     locate_table_boundary_context,
 )
@@ -391,14 +394,8 @@ def _side_candidates(
         cross_version_fragments,
         boundary_rows,
     )
-    ordinary_boundary_paragraphs = _classify_repeated_boundary_paragraphs(
-        section,
-        fragments,
-        compatible_pairs,
-    )
-    confirmed_boundary_paragraphs = (
-        set(boundary_paragraph_ids) | ordinary_boundary_paragraphs
-    )
+    ordinary_boundary_paragraphs: set[str] = set()
+    confirmed_boundary_paragraphs = set(boundary_paragraph_ids)
     for left, right, mapping in compatible_pairs:
         intervening_paragraph_ids = (
             [
@@ -436,22 +433,20 @@ def _collect_pair_analysis(
 ]:
     baseline_initial = _section_fragments(section_pair.baseline_section)
     target_initial = _section_fragments(section_pair.target_section)
-    baseline_fragments = _jointly_infer_fragments(baseline_initial, target_initial)
-    target_fragments = _jointly_infer_fragments(target_initial, baseline_fragments)
-    baseline_rows = classify_repeated_boundary_regions(baseline_fragments)
-    target_rows = classify_repeated_boundary_regions(target_fragments)
-    baseline_table_paragraphs = _paragraph_boundaries(
-        baseline_fragments,
-        baseline_rows,
-    )
-    target_table_paragraphs = _paragraph_boundaries(
-        target_fragments,
-        target_rows,
-    )
+    # Import normalization is deliberately single-document. Cross-version
+    # fragments must never influence candidates, and deterministic repetition
+    # rules must never authorize content deletion. Page-boundary noise is
+    # handled earlier by the LLM-gated structure repair stage.
+    baseline_fragments = _jointly_infer_fragments(baseline_initial, ())
+    target_fragments = _jointly_infer_fragments(target_initial, ())
+    baseline_rows: set[SourceRowRef] = set()
+    target_rows: set[SourceRowRef] = set()
+    baseline_table_paragraphs: set[str] = set()
+    target_table_paragraphs: set[str] = set()
     baseline_candidates, baseline_ordinary_paragraphs = _side_candidates(
         section_pair.baseline_section,
         baseline_fragments,
-        target_fragments,
+        (),
         baseline_rows,
         baseline_table_paragraphs,
         "baseline",
@@ -459,7 +454,7 @@ def _collect_pair_analysis(
     target_candidates, target_ordinary_paragraphs = _side_candidates(
         section_pair.target_section,
         target_fragments,
-        baseline_fragments,
+        (),
         target_rows,
         target_table_paragraphs,
         "target",
@@ -472,8 +467,8 @@ def _collect_pair_analysis(
         candidates,
         {"baseline": baseline_rows, "target": target_rows},
         {
-            "baseline": baseline_table_paragraphs | baseline_ordinary_paragraphs,
-            "target": target_table_paragraphs | target_ordinary_paragraphs,
+            "baseline": set(),
+            "target": set(),
         },
     )
 
@@ -482,20 +477,99 @@ def _resolve_assessment(
     assessment: CandidateAssessment,
     provider: BaseProvider | None,
     context: TableBoundaryContext | None = None,
-) -> tuple[CandidateAssessment, LLMJudgment | None]:
+    *,
+    review_changes: bool = False,
+) -> tuple[
+    CandidateAssessment,
+    LLMJudgment | None,
+    LLMJudgment | None,
+    LLMJudgment | None,
+]:
     candidate = assessment.candidate
-    requires_semantic_decision = not candidate.vetoes
-    if not requires_semantic_decision or provider is None:
-        return replace(assessment, final_action="keep_separate"), None
-    judgment = adjudicate_continuation(candidate, provider, context)
-    final_action = (
-        "merge"
-        if judgment is not None
-        and judgment.decision == "merge"
-        and judgment.confidence >= _LLM_MERGE_THRESHOLD
-        else "keep_separate"
+    structural_vetoes = {"incompatible_schema", "new_section_or_table"}
+    requires_semantic_decision = not structural_vetoes.intersection(
+        candidate.vetoes
     )
-    return replace(assessment, final_action=final_action), judgment
+    if not requires_semantic_decision or provider is None:
+        return replace(
+            assessment,
+            final_action="keep_separate",
+            merge_rows=False,
+            merge_fragments=False,
+        ), None, None, None
+    judgment = adjudicate_continuation(candidate, provider, context)
+    initial_judgment = judgment
+    review_judgment: LLMJudgment | None = None
+    if (
+        review_changes
+        and judgment is not None
+        and (
+            judgment.row_action == "merge"
+            or judgment.table_action == "merge_fragments"
+        )
+    ):
+        review = review_continuation(candidate, judgment, provider, context)
+        review_judgment = review
+        if review is None:
+            judgment = replace(
+                judgment,
+                decision="keep_separate",
+                confidence=0.0,
+                reason=f"initial: {judgment.reason}; review unavailable",
+                row_action="keep",
+                table_action="keep",
+            )
+        else:
+            row_action = (
+                "merge"
+                if judgment.row_action == review.row_action == "merge"
+                else "keep"
+            )
+            table_action = (
+                "merge_fragments"
+                if judgment.table_action
+                == review.table_action
+                == "merge_fragments"
+                else "keep"
+            )
+            judgment = replace(
+                judgment,
+                decision=(
+                    "merge"
+                    if row_action == "merge" or table_action == "merge_fragments"
+                    else "keep_separate"
+                ),
+                confidence=min(judgment.confidence, review.confidence),
+                reason=f"initial: {judgment.reason}; review: {review.reason}",
+                row_action=row_action,
+                table_action=table_action,
+            )
+    accepted = judgment is not None and judgment.confidence >= _LLM_MERGE_THRESHOLD
+    row_vetoes = {
+        "new_key_value",
+        "conflicting_key_cells",
+        "header_or_separator",
+        "crosses_real_body_row",
+    }
+    merge_fragments = bool(
+        accepted and judgment.table_action == "merge_fragments"
+    )
+    merge_rows = bool(
+        merge_fragments
+        and judgment.row_action == "merge"
+        and not row_vetoes.intersection(candidate.vetoes)
+    )
+    if judgment is not None and judgment.row_action == "merge" and not merge_rows:
+        judgment = replace(judgment, row_action="keep")
+    final_action = (
+        "merge" if merge_rows or merge_fragments else "keep_separate"
+    )
+    return replace(
+        assessment,
+        final_action=final_action,
+        merge_rows=merge_rows,
+        merge_fragments=merge_fragments,
+    ), judgment, initial_judgment, review_judgment
 
 
 def _downgrade_with_conflict(
@@ -512,6 +586,8 @@ def _downgrade_with_conflict(
         assessment,
         candidate=candidate,
         final_action="keep_separate",
+        merge_rows=False,
+        merge_fragments=False,
     )
 
 
@@ -533,7 +609,7 @@ def _validate_resolved_assessments(
         list[CandidateAssessment],
     ] = {}
     for assessment in assessments:
-        if assessment.final_action == "merge":
+        if assessment.final_action == "merge" and assessment.merge_rows:
             key = (
                 assessment.candidate.side,
                 assessment.candidate.previous_row.source,
@@ -663,6 +739,7 @@ def _trace_decisions(
     judgments: Mapping[tuple[str, str], LLMJudgment | None],
     generated_row_ids: Mapping[str, str],
     contexts: Mapping[tuple[str, str], TableBoundaryContext | None],
+    reviews: Mapping[tuple[str, str], LLMJudgment | None],
 ) -> list[ReconstructionDecision]:
     decisions = []
     for assessment in assessments:
@@ -697,6 +774,7 @@ def _trace_decisions(
                     else []
                 ),
                 generated_row_id=generated_row_ids.get(candidate.candidate_id, ""),
+                review=reviews.get((candidate.side, candidate.candidate_id)),
             )
         )
     return sorted(decisions, key=_decision_sort_key)
@@ -723,6 +801,7 @@ def reconstruct_table_pairs(
         set[tuple[SourceRowRef, SourceRowRef]] | None,
     ]
     | None = None,
+    review_changes: bool = False,
 ) -> ReconstructionResult:
     """Analyze aligned versions jointly and emit normalized IR plus replay trace."""
     candidates: dict[tuple[str, str], ContinuationCandidate] = {}
@@ -750,6 +829,8 @@ def reconstruct_table_pairs(
 
     resolved: list[CandidateAssessment] = []
     judgments: dict[tuple[str, str], LLMJudgment | None] = {}
+    initial_judgments: dict[tuple[str, str], LLMJudgment | None] = {}
+    reviews: dict[tuple[str, str], LLMJudgment | None] = {}
     contexts: dict[tuple[str, str], TableBoundaryContext | None] = {}
     for key, candidate in sorted(candidates.items()):
         document = baseline_ir if candidate.side == "baseline" else target_ir
@@ -760,7 +841,7 @@ def reconstruct_table_pairs(
             candidate.continuation_row.source,
         )
         contexts[key] = context
-        assessment, judgment = _resolve_assessment(
+        assessment, judgment, initial_judgment, review = _resolve_assessment(
             assess_candidate(candidate),
             (
                 None
@@ -768,9 +849,13 @@ def reconstruct_table_pairs(
                 else provider
             ),
             context,
+            review_changes=review_changes,
         )
         resolved.append(assessment)
         judgments[key] = judgment
+
+        initial_judgments[key] = initial_judgment
+        reviews[key] = review
 
     resolved = _validate_resolved_assessments(
         resolved,
@@ -795,9 +880,10 @@ def reconstruct_table_pairs(
         target=DocumentTraceRef(target_ir.doc_id, target_ir.file_hash),
         decisions=_trace_decisions(
             resolved,
-            judgments,
+            initial_judgments,
             generated_row_ids,
             contexts,
+            reviews,
         ),
         operations=operations,
     )
@@ -818,22 +904,99 @@ def reconstruct_table_pairs(
 def reconstruct_document_tables(
     document: DocumentIR,
     provider: BaseProvider | None,
+    *,
+    review_changes: bool = False,
 ) -> DocumentReconstructionResult:
     """Reconstruct one document without requiring cross-version evidence."""
-    empty_peer = DocumentIR(
-        doc_id=f"{document.doc_id}:normalization-empty-peer",
-        title="",
-        file_hash="0" * 64,
-        sections=[],
-        plain_text="",
+    candidates: dict[tuple[str, str], ContinuationCandidate] = {}
+    boundary_rows: dict[str, set[SourceRowRef]] = {
+        "baseline": set(),
+        "target": set(),
+    }
+    boundary_paragraphs: dict[str, set[str]] = {
+        "baseline": set(),
+        "target": set(),
+    }
+    for section_index, section in enumerate(document.sections):
+        section_candidates, _, _ = _collect_pair_analysis(
+            SectionPair(
+                baseline_section=section,
+                target_section=None,
+                title_similarity=0.0,
+                baseline_index=section_index,
+                target_index=None,
+            )
+        )
+        for candidate in section_candidates:
+            candidates.setdefault(
+                (candidate.side, candidate.candidate_id),
+                candidate,
+            )
+
+    resolved: list[CandidateAssessment] = []
+    judgments: dict[tuple[str, str], LLMJudgment | None] = {}
+    initial_judgments: dict[tuple[str, str], LLMJudgment | None] = {}
+    reviews: dict[tuple[str, str], LLMJudgment | None] = {}
+    contexts: dict[tuple[str, str], TableBoundaryContext | None] = {}
+    for key, candidate in sorted(candidates.items()):
+        context = locate_table_boundary_context(
+            document,
+            "baseline",
+            candidate.previous_row.source,
+            candidate.continuation_row.source,
+        )
+        contexts[key] = context
+        assessment, judgment, initial_judgment, review = _resolve_assessment(
+            assess_candidate(candidate),
+            (
+                None
+                if _has_invalid_known_page_boundary(document, candidate)
+                else provider
+            ),
+            context,
+            review_changes=review_changes,
+        )
+        resolved.append(assessment)
+        judgments[key] = judgment
+        initial_judgments[key] = initial_judgment
+        reviews[key] = review
+
+    resolved = _validate_resolved_assessments(
+        resolved,
+        judgments,
+        boundary_rows,
+        boundary_paragraphs,
     )
-    result = reconstruct_table_pairs(
-        align_sections(document, empty_peer),
+    operations = build_reconstruction_operations(
+        resolved,
+        boundary_rows,
+        boundary_paragraphs,
+    )
+    generated_row_ids = {
+        operation.decision_id: operation.generated_row_id
+        for operation in operations
+        if operation.type == "merge_rows" and operation.decision_id
+    }
+    trace = ReconstructionTrace(
+        schema_version=SCHEMA_VERSION,
+        algorithm_version=ALGORITHM_VERSION,
+        baseline=DocumentTraceRef(document.doc_id, document.file_hash),
+        target=DocumentTraceRef(document.doc_id, document.file_hash),
+        decisions=_trace_decisions(
+            resolved,
+            initial_judgments,
+            generated_row_ids,
+            contexts,
+            reviews,
+        ),
+        operations=operations,
+    )
+    normalized, _ = apply_reconstruction_operations(
         document,
-        empty_peer,
-        provider,
+        document,
+        operations,
     )
     return DocumentReconstructionResult(
-        document=result.baseline_ir,
-        trace=result.trace,
+        document=normalized,
+        trace=trace,
     )

@@ -3,8 +3,13 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 
+import pytest
+
 from app.core.model.base_provider import BaseProvider
-from app.core.normalization import normalize_document, normalize_pair
+from app.core.normalization import (
+    NormalizationDepth,
+    normalize_document,
+)
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 
@@ -13,11 +18,16 @@ class _EchoTableMergeProvider(BaseProvider):
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         payload = json.loads(messages[-1]["content"])
+        continuation = payload["candidate"]["continuation"]
+        is_row_continuation = not continuation[0]
         return json.dumps(
             {
                 "candidate_id": payload["candidate_id"],
-                "continuation_role": "continuation_row",
-                "action": "merge",
+                "continuation_role": (
+                    "continuation_row" if is_row_continuation else "table_header"
+                ),
+                "row_action": "merge" if is_row_continuation else "keep",
+                "table_action": "merge_fragments",
                 "confidence": 0.92,
                 "reason": "the bounded row continues the preceding business cell",
             }
@@ -81,7 +91,11 @@ def test_normalize_document_reconstructs_cross_page_tables_without_a_peer_docume
     raw = _document_with_sparse_cross_page_table()
     original = deepcopy(raw)
 
-    result = normalize_document(raw, provider=_EchoTableMergeProvider())
+    result = normalize_document(
+        raw,
+        provider=_EchoTableMergeProvider(),
+        depth=NormalizationDepth.STANDARD,
+    )
 
     merged_row = next(
         sentence.text
@@ -102,10 +116,104 @@ def test_normalize_document_reconstructs_cross_page_tables_without_a_peer_docume
     )
 
 
+def test_low_depth_skips_all_normalization_and_provider_calls():
+    class FailIfCalledProvider:
+        def chat(self, *_args, **_kwargs):
+            raise AssertionError("low depth must not call the normalization provider")
+
+    raw = _document_with_sparse_cross_page_table()
+
+    result = normalize_document(
+        raw,
+        provider=FailIfCalledProvider(),
+        depth=NormalizationDepth.OFF,
+    )
+
+    assert result.document == raw
+    assert result.document is not raw
+    assert result.status == "skipped"
+    assert result.trace.normalization_depth == "off"
+    assert result.trace.structure_trace.operations == []
+    assert result.trace.table_trace.operations == []
+
+
+@pytest.mark.parametrize(
+    ("depth", "expects_review"),
+    [
+        (NormalizationDepth.STANDARD, False),
+        (NormalizationDepth.REVIEW, True),
+    ],
+)
+def test_depth_controls_page_noise_review(depth, expects_review):
+    class RecordingProvider:
+        chat_model = "fake-model"
+
+        def __init__(self):
+            self.system_prompts: list[str] = []
+
+        def chat(self, messages, **_kwargs):
+            self.system_prompts.append(messages[0]["content"])
+            payload = json.loads(messages[-1]["content"])
+            if "items" not in payload:
+                raise AssertionError("fixture must only produce page-noise candidates")
+            return json.dumps(
+                {
+                    "boundary_id": payload["boundary_id"],
+                    "labels": [
+                        {
+                            "id": item["id"],
+                            "action": (
+                                "remove_as_page_noise"
+                                if item["text"] == "重复页眉"
+                                else "keep"
+                            ),
+                            "confidence": 0.99,
+                            "reason": "fixed test judgment",
+                        }
+                        for item in payload["items"]
+                    ],
+                },
+                ensure_ascii=False,
+            )
+
+    raw = DocumentIR(
+        "depth-doc",
+        "Depth",
+        "depth-hash",
+        [
+            Section(
+                "s1",
+                "1 范围",
+                1,
+                [
+                    Paragraph("noise", "重复页眉", [Sentence("重复页眉")], 1),
+                    Paragraph("body-1", "第一页正文。", [Sentence("第一页正文。")], 1),
+                    Paragraph("body-2", "第二页正文。", [Sentence("第二页正文。")], 2),
+                ],
+            )
+        ],
+        "重复页眉\n第一页正文。\n第二页正文。",
+    )
+    provider = RecordingProvider()
+
+    result = normalize_document(raw, provider=provider, depth=depth)
+
+    assert "重复页眉" not in result.document.plain_text
+    review_prompts = [
+        prompt for prompt in provider.system_prompts if "final safety review" in prompt
+    ]
+    assert bool(review_prompts) is expects_review
+    assert result.trace.normalization_depth == depth.value
+
+
 def test_normalize_document_preserves_page_number_when_merging_table_fragments():
     raw = _document_with_sparse_cross_page_table()
 
-    result = normalize_document(raw, provider=_EchoTableMergeProvider())
+    result = normalize_document(
+        raw,
+        provider=_EchoTableMergeProvider(),
+        depth=NormalizationDepth.STANDARD,
+    )
 
     paragraphs = [
         paragraph
@@ -114,48 +222,6 @@ def test_normalize_document_preserves_page_number_when_merging_table_fragments()
     ]
     assert len(paragraphs) == 1
     assert paragraphs[0].page_no == 7
-
-
-def test_normalize_pair_rechecks_only_document_candidates_deferred_at_import():
-    raw = _document_with_sparse_cross_page_table()
-    imported = normalize_document(raw, provider=None)
-    target = DocumentIR("target-empty", "", "target-empty-hash", [])
-
-    assert imported.trace.deferred_table_candidates
-
-    result = normalize_pair(
-        imported.document,
-        target,
-        provider=_EchoTableMergeProvider(),
-        baseline_deferred=imported.trace.deferred_table_candidates,
-        target_deferred=[],
-    )
-
-    assert any(
-        decision.final_action == "merge" for decision in result.trace.decisions
-    )
-    assert any(
-        operation.type == "merge_rows" for operation in result.trace.operations
-    )
-
-
-def test_normalize_pair_skips_reconstruction_when_import_has_no_deferred_candidates():
-    baseline = _document_with_sparse_cross_page_table()
-    target = DocumentIR("target-empty", "", "target-empty-hash", [])
-    provider = _EchoTableMergeProvider()
-
-    result = normalize_pair(
-        baseline,
-        target,
-        provider=provider,
-        baseline_deferred=[],
-        target_deferred=[],
-    )
-
-    assert result.trace.decisions == []
-    assert result.trace.operations == []
-    assert result.baseline_ir == baseline
-    assert result.baseline_ir is not baseline
 
 
 def test_normalize_document_does_not_apply_table_changes_after_structure_fallback(
@@ -195,25 +261,13 @@ def test_normalize_document_does_not_apply_table_changes_after_structure_fallbac
         ),
     )
 
-    result = pipeline.normalize_document(raw, provider=_EchoTableMergeProvider())
+    result = pipeline.normalize_document(
+        raw,
+        provider=_EchoTableMergeProvider(),
+        depth=NormalizationDepth.STANDARD,
+    )
 
     assert result.status == "fallback"
     assert result.document == raw
     assert result.table_trace.decisions == []
     assert result.table_trace.operations == []
-
-
-def test_import_artifact_round_trips_deferred_table_candidates(tmp_path):
-    from app.core.normalization import load_deferred_table_candidates
-    from app.core.structure_repair.storage import prepare_import_ir
-
-    artifacts = prepare_import_ir(
-        tmp_path,
-        _document_with_sparse_cross_page_table(),
-        provider=None,
-    )
-
-    loaded = load_deferred_table_candidates(tmp_path, artifacts.document)
-
-    assert loaded == artifacts.normalization_trace.deferred_table_candidates
-    assert loaded

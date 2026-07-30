@@ -19,6 +19,7 @@ class IngestState(TypedDict, total=False):
     llm_client: Any            # openai.OpenAI, for markitdown-ocr; None → OCR skipped
     llm_model: str
     provider: Any              # BaseProvider used for semantic normalization
+    normalization_depth: str  # "off" | "standard" | "review"
 
     # ── Node-internal intermediate values ───────────────────────────────────
     _file_hash: str
@@ -48,7 +49,6 @@ class CompareState(TypedDict, total=False):
     _baseline_ir: Any          # DocumentIR
     _target_ir: Any            # DocumentIR
     _section_pairs: list
-    _reconstruction_trace: Any
     _para_pairs: list
 
     # ── Node outputs ────────────────────────────────────────────────────────

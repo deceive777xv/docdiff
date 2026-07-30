@@ -428,6 +428,8 @@ def test_llm_rerank_selects_better_candidate_when_numbers_are_ambiguous():
         PositionNumberBiasedEmbedder(),
         similarity_threshold=0.75,
         rerank_provider=reranker,
+        baseline_document_title="旧版车门需求",
+        target_document_title="新版车门需求",
     )
 
     matched = [
@@ -443,6 +445,8 @@ def test_llm_rerank_selects_better_candidate_when_numbers_are_ambiguous():
     assert matched[0].target_para.text == "| 2 | 位置45 | 51本日本漫画绘画教程电子书 |"
     assert any("| 3 | 位置46 | 52本日本漫画绘画教程电子书 |" == pair.target_para.text for pair in added)
     assert len(reranker.prompts) == 1
+    assert "旧版车门需求 / 正文" in reranker.prompts[0]
+    assert "新版车门需求 / 正文" in reranker.prompts[0]
 
 
 def test_llm_conflict_cluster_rerank_resolves_shifted_table_rows():
@@ -844,7 +848,7 @@ def test_unique_same_section_short_text_ignores_markdown_list_marker():
     assert headings[0].target_para.text == "- A）工作条件"
 
 
-def test_parent_section_scope_matches_one_child_paragraph_to_two_parent_paragraphs():
+def test_sentence_windows_do_not_cross_paragraphs_or_section_paths():
     from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
@@ -891,22 +895,12 @@ def test_parent_section_scope_matches_one_child_paragraph_to_two_parent_paragrap
         for pair in pairs
         if pair.baseline_para is not None and pair.target_para is not None
     ]
-    assert len(matched) == 1
-    assert matched[0].baseline_para.text == (
-        "当检测到系统存在故障时，域控记录故障码并通过CAN向诊断仪输出。"
-    )
-    assert matched[0].target_para.text == (
-        "当检测到系统存在故障时，域控记录故障码\n并通过CAN向诊断仪输出。"
-    )
-    assert matched[0].section_path == "失效保护"
-    assert matched[0].split_unit is True
-    assert not any(
-        pair.baseline_para is None or pair.target_para is None
-        for pair in pairs
-    )
+    assert matched == []
+    assert any(pair.baseline_para is not None and pair.target_para is None for pair in pairs)
+    assert any(pair.baseline_para is None and pair.target_para is not None for pair in pairs)
 
 
-def test_exact_window_matches_one_paragraph_to_three_adjacent_paragraphs():
+def test_exact_window_does_not_join_three_distinct_paragraphs():
     from app.core.diff.semantic_matcher import match_paragraphs
 
     baseline = make_section(
@@ -938,8 +932,41 @@ def test_exact_window_matches_one_paragraph_to_three_adjacent_paragraphs():
         for pair in pairs
         if pair.baseline_para is not None and pair.target_para is not None
     ]
+    assert matched == []
+    assert len([pair for pair in pairs if pair.target_para is not None]) == 3
+
+
+def test_exact_window_matches_different_sentence_boundaries_inside_one_paragraph():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    parts = [
+        "开启过程中按下外把手电容开关；",
+        "域控检测到外把手电容开关信号（什么变化？",
+        "电流？",
+        "）开启过程中刷下NFC；域控检测到NFC信号。",
+    ]
+    baseline_text = "".join(parts)
+    baseline = make_section("开启控制", [make_para(baseline_text)])
+    target_para = Paragraph(
+        paragraph_id=str(uuid.uuid4()),
+        text=baseline_text,
+        sentences=[Sentence(part) for part in parts],
+        page_no=9,
+    )
+    target = make_section("开启控制", [target_para])
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        MockEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    matched = [
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    ]
     assert len(matched) == 1
-    assert matched[0].target_para.text.count("\n") == 2
     assert matched[0].similarity == 1.0
     assert not any(
         pair.baseline_para is None or pair.target_para is None
@@ -947,7 +974,35 @@ def test_exact_window_matches_one_paragraph_to_three_adjacent_paragraphs():
     )
 
 
-def test_exact_window_anchor_prevents_crossing_ordinary_match():
+def test_exact_window_allows_minor_title_changes_in_an_aligned_section():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    parts = ["系统检测到异常后记录故障码，", "并立即通知诊断模块。"]
+    baseline = make_section("3.1 故障处理", [make_para("".join(parts))])
+    target_para = Paragraph(
+        paragraph_id=str(uuid.uuid4()),
+        text="".join(parts),
+        sentences=[Sentence(part) for part in parts],
+        page_no=3,
+    )
+    target = make_section("3.1 故障处置", [target_para])
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 0.9)],
+        MockEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    matched = [
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    ]
+    assert len(matched) == 1
+    assert matched[0].similarity == 1.0
+
+
+def test_exact_window_never_synthesizes_a_cross_paragraph_match():
     from app.core.diff.semantic_matcher import match_paragraphs
 
     ordinary = "稍后出现的唯一普通段落，用于验证匹配顺序不能跨过窗口锚点。"
@@ -971,17 +1026,8 @@ def test_exact_window_anchor_prevents_crossing_ordinary_match():
         similarity_threshold=0.99,
     )
 
-    assert any(
-        pair.baseline_para is not None
-        and pair.baseline_para.text == combined
-        and pair.target_para is not None
-        and pair.target_para.text.count("\n") == 1
-        for pair in pairs
-    )
     assert not any(
-        pair.baseline_para is not None
-        and pair.baseline_para.text == ordinary
-        and pair.target_para is not None
+        pair.target_para is not None and "\n" in pair.target_para.text
         for pair in pairs
     )
 
@@ -1017,4 +1063,47 @@ def test_target_only_child_uses_the_more_specific_section_path():
         if pair.baseline_para is not None and pair.target_para is not None
     ]
     assert len(matched) == 1
-    assert matched[0].section_path == "失效保护"
+    assert matched[0].section_path == "1.1.28 附件功能 / 失效保护"
+
+
+def test_inserted_child_path_is_not_attached_to_a_later_parent():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    text = "插入子章节中的正文应归属于前面的父章节。"
+    baseline_parent = make_section("1 功能", [make_para(text)])
+    baseline_parent.level = 1
+    baseline_later = make_section("2 限制", [])
+    baseline_later.level = 1
+    target_parent = make_section("1 功能", [])
+    target_parent.level = 1
+    target_child = make_section("1.1 失效保护", [make_para(text)])
+    target_child.level = 2
+    target_later = make_section("2 限制", [])
+    target_later.level = 1
+
+    pairs = match_paragraphs(
+        align_sections(
+            DocumentIR(
+                "baseline",
+                "Baseline",
+                "hash-a",
+                [baseline_parent, baseline_later],
+            ),
+            DocumentIR(
+                "target",
+                "Target",
+                "hash-b",
+                [target_parent, target_child, target_later],
+            ),
+        ),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    matched = next(
+        pair
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is not None
+    )
+    assert matched.section_path == "1 功能 / 1.1 失效保护"

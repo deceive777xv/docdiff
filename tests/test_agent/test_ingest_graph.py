@@ -137,6 +137,7 @@ def test_save_document_uses_normalized_ir_for_chunks(tmp_path):
                 "source_type": "standard",
                 "conn": MagicMock(),
                 "provider": provider,
+                "normalization_depth": "review",
                 "_file_hash": "file-hash",
                 "_ir": raw,
             }
@@ -146,4 +147,5 @@ def test_save_document_uses_normalized_ir_for_chunks(tmp_path):
     assert result["_ir"].sections[0].title == "1.1 图流程"
     assert result["_chunks"][0].section_path == "1.1 图流程"
     assert prepare_import_ir.call_args.kwargs["provider"] is provider
+    assert prepare_import_ir.call_args.kwargs["depth"] == "review"
     insert_chunks.assert_called_once()

@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from app.core.diff.reconstruction_trace import SourceRowRef
+from app.core.normalization.table_trace import SourceRowRef
 from app.core.types import DocumentIR
 
 

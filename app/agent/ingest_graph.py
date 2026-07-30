@@ -83,6 +83,7 @@ def save_document(state: IngestState) -> dict:
             ir,
             provider=state.get("provider") or state.get("llm_client"),
             model=state.get("llm_model", ""),
+            depth=state.get("normalization_depth", "off"),
         )
         ir = artifacts.document
         ir_path = artifacts.normalized_path

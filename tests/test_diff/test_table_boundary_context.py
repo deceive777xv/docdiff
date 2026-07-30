@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.core.diff.reconstruction_trace import SourceRowRef
+from app.core.normalization.table_trace import SourceRowRef
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 
@@ -30,7 +30,7 @@ def _document(page_numbers: list[int | None]) -> DocumentIR:
 
 
 def test_boundary_context_uses_adjacent_physical_pages_and_keeps_page_header():
-    from app.core.diff.table_boundary_context import locate_table_boundary_context
+    from app.core.normalization.table_boundary_context import locate_table_boundary_context
 
     context = locate_table_boundary_context(
         _document([1, 1, 2, 2, 2]),
@@ -48,7 +48,7 @@ def test_boundary_context_uses_adjacent_physical_pages_and_keeps_page_header():
 
 
 def test_boundary_context_rejects_non_adjacent_known_pages():
-    from app.core.diff.table_boundary_context import locate_table_boundary_context
+    from app.core.normalization.table_boundary_context import locate_table_boundary_context
 
     context = locate_table_boundary_context(
         _document([1, 1, 3, 3, 3]),
@@ -61,7 +61,7 @@ def test_boundary_context_rejects_non_adjacent_known_pages():
 
 
 def test_boundary_context_falls_back_to_inferred_window_for_legacy_ir():
-    from app.core.diff.table_boundary_context import locate_table_boundary_context
+    from app.core.normalization.table_boundary_context import locate_table_boundary_context
 
     context = locate_table_boundary_context(
         _document([None] * 5),

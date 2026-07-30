@@ -16,7 +16,6 @@ from .llm import (
     adjudicate_page_noise_batch,
     adjudicate_paragraph_merge,
     adjudicate_section_parent,
-    adjudicate_table_fragment_merge,
     review_page_noise_batch,
 )
 from .models import (
@@ -29,7 +28,7 @@ from .models import (
 
 
 SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "post-parse-structure-v3"
+ALGORITHM_VERSION = "post-parse-structure-v4"
 
 _NUMBERED_TITLE_RE = re.compile(
     r"^\s*(?P<number>\d+(?:\.\d+)+)\s+(?P<title>\S.{0,100})\s*$"
@@ -43,6 +42,7 @@ _PURE_NUMBER_RE = re.compile(r"^\s*\d+\s*$")
 _TERMINAL_RE = re.compile(r"[。！？!?；;：:]\s*$")
 _HEADING_END_RE = re.compile(r"[。！？!?；;]\s*$")
 _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_JOIN_LIST_MARKER_RE = re.compile(r"^(?P<marker>\s*[-*+•]\s+)(?P<body>.*)$", re.DOTALL)
 _IMAGE_PLACEHOLDER_RE = re.compile(
     r"^\s*(?:\*\*)?==>\s*picture\s*\[\s*\d+\s*x\s*\d+\s*]\s*"
     r"intentionally omitted\s*<==\s*$",
@@ -407,6 +407,8 @@ def _adjudicate_page_boundary_noise(
     operations: list[StructureRepairOperation],
     decisions: list[StructureRepairDecision],
     rejected: list[RejectedStructureCandidate],
+    *,
+    review_changes: bool,
 ) -> None:
     if provider is None:
         return
@@ -531,49 +533,52 @@ def _adjudicate_page_boundary_noise(
             label.action == "remove_as_page_noise" for label in initial
         ):
             continue
-        review, failure_code = review_page_noise_batch(
-            boundary_id,
-            request_items,
-            initial,
-            provider,
-            model,
-        )
-        if review is None:
-            rejected.append(
-                RejectedStructureCandidate(
-                    candidate_id=boundary_id,
-                    code=f"review_{failure_code}",
-                    reason="page-boundary batch review was invalid",
-                )
+        if review_changes:
+            review, failure_code = review_page_noise_batch(
+                boundary_id,
+                request_items,
+                initial,
+                provider,
+                model,
             )
-            continue
-        for (_, item), label in zip(targets, review, strict=True):
-            decisions.append(
-                StructureRepairDecision(
-                    candidate_id=f"{boundary_id}:review:{label.item_id}",
-                    action=label.action,
-                    source_ids=[item.paragraph.paragraph_id],
-                    target_section_id="",
-                    confidence=label.confidence,
-                    reason=label.reason,
+            if review is None:
+                rejected.append(
+                    RejectedStructureCandidate(
+                        candidate_id=boundary_id,
+                        code=f"review_{failure_code}",
+                        reason="page-boundary batch review was invalid",
+                    )
                 )
-            )
-        for index, (initial_label, review_label) in enumerate(
-            zip(initial, review, strict=True)
-        ):
-            if initial_label.action == review_label.action:
                 continue
-            rejected.append(
-                RejectedStructureCandidate(
-                    candidate_id=(
-                        f"{boundary_id}:{request_items[index]['id']}"
-                    ),
-                    code="page_noise_review_disagreement",
-                    reason=(
-                        "initial and review labels disagree; the fixed item is kept"
-                    ),
+            for (_, item), label in zip(targets, review, strict=True):
+                decisions.append(
+                    StructureRepairDecision(
+                        candidate_id=f"{boundary_id}:review:{label.item_id}",
+                        action=label.action,
+                        source_ids=[item.paragraph.paragraph_id],
+                        target_section_id="",
+                        confidence=label.confidence,
+                        reason=label.reason,
+                    )
                 )
-            )
+            for index, (initial_label, review_label) in enumerate(
+                zip(initial, review, strict=True)
+            ):
+                if initial_label.action == review_label.action:
+                    continue
+                rejected.append(
+                    RejectedStructureCandidate(
+                        candidate_id=(
+                            f"{boundary_id}:{request_items[index]['id']}"
+                        ),
+                        code="page_noise_review_disagreement",
+                        reason=(
+                            "initial and review labels disagree; the fixed item is kept"
+                        ),
+                    )
+                )
+        else:
+            review = initial
 
         removable: set[str] = set()
         sides = dict.fromkeys(position for position, _ in targets)
@@ -612,10 +617,9 @@ def _adjudicate_page_boundary_noise(
                 initial[index].confidence,
                 review[index].confidence,
             )
-            reason = (
-                f"initial: {initial[index].reason}; "
-                f"review: {review[index].reason}"
-            )
+            reason = initial[index].reason
+            if review_changes:
+                reason = f"initial: {reason}; review: {review[index].reason}"
             if item.sentence_index is None:
                 removed_paragraph_ids.add(item.paragraph.paragraph_id)
                 operations.append(
@@ -713,7 +717,36 @@ def _has_heading_like_boundary(
     previous: Paragraph,
     following: Paragraph,
 ) -> bool:
-    return _is_heading_like(previous.text) or _is_heading_like(following.text)
+    following_value = following.text.strip()
+    following_is_explicit_heading = bool(
+        _NUMBERED_TITLE_RE.match(following_value)
+        or _GENERIC_STRUCTURE_RE.match(following_value)
+    )
+    return _is_heading_like(previous.text) or following_is_explicit_heading
+
+
+def _split_join_list_marker(text: str) -> tuple[str, str]:
+    match = _JOIN_LIST_MARKER_RE.match(text)
+    if match is None:
+        return "", text
+    return match.group("marker"), match.group("body")
+
+
+def _join_boundary_text(previous: str, following: str) -> tuple[str, str]:
+    removed_marker, following_body = _split_join_list_marker(following.lstrip())
+    left = previous.rstrip()
+    right = following_body.lstrip()
+    separator = ""
+    if (
+        left
+        and right
+        and left[-1].isascii()
+        and right[0].isascii()
+        and left[-1].isalnum()
+        and right[0].isalnum()
+    ):
+        separator = " "
+    return left + separator + right, removed_marker
 
 
 def _certain_continuation(previous: Paragraph, following: Paragraph) -> bool:
@@ -743,10 +776,6 @@ def _certain_continuation(previous: Paragraph, following: Paragraph) -> bool:
     return True
 
 
-def _table_rows(paragraph: Paragraph) -> list[str]:
-    return [line.strip() for line in paragraph.text.splitlines() if line.strip()]
-
-
 def _table_cells(row: str) -> list[str]:
     return [cell.strip() for cell in row.strip().strip("|").split("|")]
 
@@ -756,125 +785,6 @@ def _is_separator(row: str) -> bool:
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
 
 
-def _can_merge_table_fragments(
-    previous: Paragraph,
-    following: Paragraph,
-) -> bool:
-    if not _is_table(previous) or not _is_table(following):
-        return False
-    if previous.page_no is None or following.page_no is None:
-        return False
-    if following.page_no - previous.page_no not in {0, 1}:
-        return False
-    left_rows = _table_rows(previous)
-    right_rows = _table_rows(following)
-    if len(left_rows) < 2 or len(right_rows) < 3:
-        return False
-    left_widths = {len(_table_cells(row)) for row in left_rows}
-    right_widths = {len(_table_cells(row)) for row in right_rows}
-    return (
-        len(left_widths) == 1
-        and left_widths == right_widths
-        and _table_cells(left_rows[0]) == _table_cells(right_rows[0])
-        and _is_separator(left_rows[1])
-        and _is_separator(right_rows[1])
-    )
-
-
-def _adjudicate_simple_table_fragments(
-    document: DocumentIR,
-    provider: object | None,
-    model: str,
-    operations: list[StructureRepairOperation],
-    decisions: list[StructureRepairDecision],
-    rejected: list[RejectedStructureCandidate],
-) -> None:
-    if provider is None:
-        return
-    for section in document.sections:
-        repaired = list(section.paragraphs)
-        end_pages = {
-            paragraph.paragraph_id: paragraph.page_no
-            for paragraph in repaired
-        }
-        index = 0
-        while index + 1 < len(repaired):
-            current = repaired[index]
-            following = repaired[index + 1]
-            boundary_view = replace(
-                current,
-                page_no=end_pages.get(current.paragraph_id, current.page_no),
-            )
-            if not _can_merge_table_fragments(boundary_view, following):
-                index += 1
-                continue
-            judgment, rejection_code = adjudicate_table_fragment_merge(
-                boundary_view,
-                following,
-                provider,
-                model,
-            )
-            candidate_id = (
-                f"tables:{current.paragraph_id}:{following.paragraph_id}"
-            )
-            if judgment is None:
-                rejected.append(
-                    RejectedStructureCandidate(
-                        candidate_id=candidate_id,
-                        code=rejection_code,
-                        reason="LLM judgment was unavailable or failed validation",
-                    )
-                )
-                index += 1
-                continue
-            decisions.append(
-                StructureRepairDecision(
-                    candidate_id=candidate_id,
-                    action=judgment.action,
-                    source_ids=[current.paragraph_id, following.paragraph_id],
-                    target_section_id=section.section_id,
-                    confidence=judgment.confidence,
-                    reason=judgment.reason,
-                )
-            )
-            if judgment.action == "keep":
-                index += 1
-                continue
-            rows = _table_rows(current) + _table_rows(following)[2:]
-            output_id = _stable_id(
-                "table",
-                [current.paragraph_id, following.paragraph_id],
-            )
-            merged = Paragraph(
-                paragraph_id=output_id,
-                text="\n".join(rows),
-                sentences=[Sentence(text=row) for row in rows],
-                page_no=current.page_no,
-            )
-            end_pages[output_id] = end_pages.get(
-                following.paragraph_id,
-                following.page_no,
-            )
-            repaired[index : index + 2] = [merged]
-            operations.append(
-                StructureRepairOperation(
-                    operation_id=_operation_id(
-                        "merge_table_fragments",
-                        [current.paragraph_id, following.paragraph_id],
-                    ),
-                    type="merge_table_fragments",
-                    source_ids=[current.paragraph_id, following.paragraph_id],
-                    output_id=output_id,
-                    target_section_id=section.section_id,
-                    reason=judgment.reason,
-                    actor="llm",
-                    confidence=judgment.confidence,
-                )
-            )
-            index = max(0, index - 1)
-        section.paragraphs = repaired
-
-
 def _adjudicate_unnumbered_sections(
     document: DocumentIR,
     provider: object | None,
@@ -882,6 +792,8 @@ def _adjudicate_unnumbered_sections(
     operations: list[StructureRepairOperation],
     decisions: list[StructureRepairDecision],
     rejected: list[RejectedStructureCandidate],
+    *,
+    review_changes: bool,
 ) -> None:
     if provider is None:
         return
@@ -911,6 +823,31 @@ def _adjudicate_unnumbered_sections(
                 )
             )
             continue
+        if review_changes and judgment.action == "move_to_section":
+            review, review_code = adjudicate_section_parent(
+                section,
+                previous,
+                provider,
+                model,
+            )
+            if review is None or review.action != judgment.action:
+                rejected.append(
+                    RejectedStructureCandidate(
+                        candidate_id=candidate_id,
+                        code=(
+                            f"review_{review_code}"
+                            if review is None
+                            else "section_parent_review_disagreement"
+                        ),
+                        reason="section move was not confirmed by review",
+                    )
+                )
+                continue
+            judgment = replace(
+                judgment,
+                confidence=min(judgment.confidence, review.confidence),
+                reason=f"initial: {judgment.reason}; review: {review.reason}",
+            )
         decisions.append(
             StructureRepairDecision(
                 candidate_id=candidate_id,
@@ -965,9 +902,20 @@ def _adjudicate_paragraph_fragments(
     operations: list[StructureRepairOperation],
     decisions: list[StructureRepairDecision],
     rejected: list[RejectedStructureCandidate],
+    *,
+    review_changes: bool,
 ) -> None:
     if provider is None:
         return
+    section_paths: dict[str, tuple[str, ...]] = {}
+    stack: list[tuple[int, str]] = []
+    for current_section in document.sections:
+        while stack and stack[-1][0] >= current_section.level:
+            stack.pop()
+        stack.append((current_section.level, current_section.title))
+        section_paths[current_section.section_id] = tuple(
+            title for _level, title in stack
+        )
     for section in document.sections:
         repaired = list(section.paragraphs)
         end_pages = {
@@ -1006,6 +954,8 @@ def _adjudicate_paragraph_fragments(
                     if _certain_continuation(previous_boundary_view, following)
                     else ()
                 ),
+                document_title=document.title,
+                section_path=section_paths.get(section.section_id, (section.title,)),
             )
             candidate_id = (
                 f"paragraphs:{previous.paragraph_id}:{following.paragraph_id}"
@@ -1020,6 +970,41 @@ def _adjudicate_paragraph_fragments(
                 )
                 index += 1
                 continue
+            if review_changes and judgment.action == "merge_paragraphs":
+                review, review_code = adjudicate_paragraph_merge(
+                    section,
+                    previous_boundary_view,
+                    following,
+                    context,
+                    provider,
+                    model,
+                    rule_evidence=(
+                        ("explicit_syntactic_continuity",)
+                        if _certain_continuation(previous_boundary_view, following)
+                        else ()
+                    ),
+                    document_title=document.title,
+                    section_path=section_paths.get(section.section_id, (section.title,)),
+                )
+                if review is None or review.action != judgment.action:
+                    rejected.append(
+                        RejectedStructureCandidate(
+                            candidate_id=candidate_id,
+                            code=(
+                                f"review_{review_code}"
+                                if review is None
+                                else "paragraph_merge_review_disagreement"
+                            ),
+                            reason="paragraph merge was not confirmed by review",
+                        )
+                    )
+                    index += 1
+                    continue
+                judgment = replace(
+                    judgment,
+                    confidence=min(judgment.confidence, review.confidence),
+                    reason=f"initial: {judgment.reason}; review: {review.reason}",
+                )
             decisions.append(
                 StructureRepairDecision(
                     candidate_id=candidate_id,
@@ -1040,11 +1025,27 @@ def _adjudicate_paragraph_fragments(
                 "paragraph",
                 [previous.paragraph_id, following.paragraph_id],
             )
-            merged_text = previous.text.rstrip() + following.text.lstrip()
+            merged_text, removed_marker = _join_boundary_text(
+                previous.text,
+                following.text,
+            )
+            previous_sentences = list(previous.sentences) or [Sentence(previous.text)]
+            following_sentences = list(following.sentences) or [Sentence(following.text)]
+            merged_boundary, sentence_removed_marker = _join_boundary_text(
+                previous_sentences[-1].text,
+                following_sentences[0].text,
+            )
+            if sentence_removed_marker != removed_marker:
+                raise ValueError("paragraph and sentence join markers disagree")
+            merged_sentences = [
+                *previous_sentences[:-1],
+                Sentence(merged_boundary),
+                *following_sentences[1:],
+            ]
             merged = Paragraph(
                 paragraph_id=output_id,
                 text=merged_text,
-                sentences=[Sentence(text=merged_text)],
+                sentences=merged_sentences,
                 page_no=previous.page_no,
             )
             end_pages[output_id] = end_pages.get(
@@ -1065,6 +1066,7 @@ def _adjudicate_paragraph_fragments(
                     reason=judgment.reason,
                     actor="llm",
                     confidence=judgment.confidence,
+                    removed_text=removed_marker,
                 )
             )
             index = max(0, index - 1)
@@ -1127,14 +1129,16 @@ def _allowed_removed_content(
                 if not 0 <= sentence_index < len(paragraph.sentences):
                     raise ValueError("row noise operation references an unknown sentence")
                 removed.update(_characters(paragraph.sentences[sentence_index].text))
-        elif operation.type == "merge_table_fragments":
+        elif operation.type == "merge_paragraphs" and operation.removed_text:
             if len(operation.source_ids) != 2:
-                raise ValueError("table merge must reference exactly two paragraphs")
+                raise ValueError("paragraph merge must reference exactly two paragraphs")
             following = paragraphs.get(operation.source_ids[1])
             if following is None:
-                raise ValueError("table merge references an unknown paragraph")
-            duplicate_rows = _table_rows(following)[:2]
-            removed.update(_characters("\n".join(duplicate_rows)))
+                raise ValueError("paragraph merge references an unknown paragraph")
+            marker, _ = _split_join_list_marker(following.text.lstrip())
+            if marker != operation.removed_text:
+                raise ValueError("paragraph merge removed marker does not match source")
+            removed.update(_characters(marker))
     return removed
 
 
@@ -1174,6 +1178,7 @@ def repair_document(
     *,
     provider: object | None = None,
     model: str = "",
+    review_changes: bool = False,
 ) -> StructureRepairResult:
     """Return a conservative normalized copy and a replayable audit trace."""
     raw_hash = _document_hash(document)
@@ -1194,14 +1199,7 @@ def repair_document(
         operations,
         decisions,
         rejected,
-    )
-    _adjudicate_simple_table_fragments(
-        repaired,
-        provider,
-        model,
-        operations,
-        decisions,
-        rejected,
+        review_changes=review_changes,
     )
     _adjudicate_paragraph_fragments(
         repaired,
@@ -1210,6 +1208,7 @@ def repair_document(
         operations,
         decisions,
         rejected,
+        review_changes=review_changes,
     )
     _adjudicate_unnumbered_sections(
         repaired,
@@ -1218,6 +1217,7 @@ def repair_document(
         operations,
         decisions,
         rejected,
+        review_changes=review_changes,
     )
     _rebuild_plain_text(repaired)
 

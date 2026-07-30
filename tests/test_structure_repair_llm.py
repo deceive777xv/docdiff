@@ -247,7 +247,7 @@ def test_small_heading_is_not_sent_to_paragraph_merge_llm():
     )
     provider = AlwaysMergeProvider()
 
-    result = repair_document(document, provider=provider)
+    result = repair_document(document, provider=provider, review_changes=True)
 
     assert [
         paragraph.text for paragraph in result.document.sections[0].paragraphs
@@ -410,7 +410,7 @@ def test_complex_page_header_is_removed_before_paragraph_merge_adjudication():
     )
     provider = BoundaryAwareProvider()
 
-    result = repair_document(document, provider=provider)
+    result = repair_document(document, provider=provider, review_changes=True)
 
     assert [
         paragraph.text for paragraph in result.document.sections[0].paragraphs
@@ -604,7 +604,7 @@ def test_page_boundary_batch_review_keeps_business_rows_and_caps_each_boundary_a
     )
     provider = ReviewProvider()
 
-    result = repair_document(document, provider=provider)
+    result = repair_document(document, provider=provider, review_changes=True)
 
     repaired_rows = [
         sentence.text
@@ -798,7 +798,7 @@ def test_page_boundary_batch_keeps_everything_when_review_ids_are_incomplete():
     )
     provider = IncompleteReviewProvider()
 
-    result = repair_document(document, provider=provider)
+    result = repair_document(document, provider=provider, review_changes=True)
 
     assert provider.calls == 2
     assert result.document.sections[0].paragraphs[0].text == body
@@ -1051,7 +1051,18 @@ def test_llm_paragraph_merge_rechecks_the_new_fragment_across_three_pages():
         "pages",
         "nearby_context",
         "rule_evidence",
+        "paragraph_context",
     } for payload in provider.payloads)
+    assert all(
+        payload["paragraph_context"]
+        == {
+                "document_title": "Three pages",
+            "section_path": ["1 Scope"],
+            "current_section_title": "1 Scope",
+            "section_level": 1,
+        }
+        for payload in provider.payloads
+    )
     assert all("kind" not in payload for payload in provider.payloads)
     assert len(
         [
@@ -1062,7 +1073,193 @@ def test_llm_paragraph_merge_rechecks_the_new_fragment_across_three_pages():
     ) == 2
 
 
-def test_paragraph_llm_retries_extra_fields_and_enforces_detailed_contract():
+def test_paragraph_merge_preserves_non_boundary_sentences_and_drops_join_marker():
+    from app.core.structure_repair import repair_document
+
+    class MergeProvider:
+        chat_model = "fake-model"
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "items" in payload:
+                return _page_noise_response(payload, lambda _text: "keep")
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "merge_paragraphs",
+                    "confidence": 0.98,
+                    "reason": "the second fixed slot continues the first",
+                }
+            )
+
+    previous_text = (
+        "- 当检测到系统存在故障时，域控应记录故障码，通过 CAN 向诊断仪输出，"
+        "以方便维修人"
+    )
+    following_sentences = ["- 士查询故障。", "具体故障信息详见 CAN 协议规定。"]
+    following_text = "".join(following_sentences)
+    document = DocumentIR(
+        "sentence-preservation",
+        "Sentence preservation",
+        "sentence-preservation-hash",
+        [
+            Section(
+                "s1",
+                "1 诊断",
+                1,
+                [
+                    Paragraph("p1", previous_text, [Sentence(previous_text)], 16),
+                    Paragraph(
+                        "p2",
+                        following_text,
+                        [Sentence(text) for text in following_sentences],
+                        16,
+                    ),
+                ],
+            )
+        ],
+        previous_text + "\n" + following_text,
+    )
+
+    result = repair_document(
+        document,
+        provider=MergeProvider(),
+        review_changes=False,
+    )
+
+    merged = result.document.sections[0].paragraphs[0]
+    assert [sentence.text for sentence in merged.sentences] == [
+        previous_text + "士查询故障。",
+        "具体故障信息详见 CAN 协议规定。",
+    ]
+    assert merged.text == previous_text + "士查询故障。具体故障信息详见 CAN 协议规定。"
+
+
+def test_short_closing_fragment_is_sent_to_paragraph_merge_llm():
+    from app.core.structure_repair import repair_document
+
+    class MergeProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.paragraph_candidates: list[str] = []
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "items" in payload:
+                return _page_noise_response(payload, lambda _text: "keep")
+            self.paragraph_candidates.append(payload["candidate_id"])
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "merge_paragraphs",
+                    "confidence": 0.98,
+                    "reason": "the short fixed slot closes the open parenthesis",
+                }
+            )
+
+    previous = (
+        "- 开启过程中有外力阻止开门；域控检测到有外力阻止开门"
+        "（检测到驱动机构电流的变化，电流≥7A；短"
+    )
+    following = "- 时间内的霍尔变化）"
+    document = DocumentIR(
+        "short-fragment",
+        "Short fragment",
+        "short-fragment-hash",
+        [
+            Section(
+                "s1",
+                "1 开启控制",
+                1,
+                [
+                    Paragraph("p1", previous, [Sentence(previous)], 9),
+                    Paragraph("p2", following, [Sentence(following)], 9),
+                ],
+            )
+        ],
+        previous + "\n" + following,
+    )
+    provider = MergeProvider()
+
+    result = repair_document(
+        document,
+        provider=provider,
+        review_changes=False,
+    )
+
+    assert provider.paragraph_candidates == ["paragraphs:p1:p2"]
+    assert [paragraph.text for paragraph in result.document.sections[0].paragraphs] == [
+        previous + "时间内的霍尔变化）"
+    ]
+
+
+def test_review_mode_keeps_paragraphs_when_second_judgment_disagrees():
+    from app.core.structure_repair import repair_document
+
+    class ReviewProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.paragraph_calls = 0
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "items" in payload:
+                return _page_noise_response(payload, lambda _text: "keep")
+            self.paragraph_calls += 1
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": (
+                        "merge_paragraphs" if self.paragraph_calls == 1 else "keep"
+                    ),
+                    "confidence": 0.97,
+                    "reason": "fixed review fixture",
+                }
+            )
+
+    previous = (
+        "- 开启过程中有外力阻止开门；域控检测到有外力阻止开门"
+        "（检测到驱动机构电流的变化，电流≥7A；短"
+    )
+    following = "- 时间内的霍尔变化）"
+    document = DocumentIR(
+        "review-paragraph",
+        "Review",
+        "review-hash",
+        [
+            Section(
+                "s1",
+                "1 开启控制",
+                1,
+                [
+                    Paragraph("p1", previous, [Sentence(previous)], 9),
+                    Paragraph("p2", following, [Sentence(following)], 9),
+                ],
+            )
+        ],
+    )
+    provider = ReviewProvider()
+
+    result = repair_document(
+        document,
+        provider=provider,
+        review_changes=True,
+    )
+
+    assert provider.paragraph_calls == 2
+    assert [paragraph.paragraph_id for paragraph in result.document.sections[0].paragraphs] == [
+        "p1",
+        "p2",
+    ]
+    assert any(
+        rejected.code == "paragraph_merge_review_disagreement"
+        for rejected in result.trace.rejected
+    )
+
+
+def test_paragraph_llm_fails_closed_without_retrying_extra_fields():
     from app.core.structure_repair import repair_document
 
     class RetryProvider:
@@ -1111,17 +1308,14 @@ def test_paragraph_llm_retries_extra_fields_and_enforces_detailed_contract():
 
     result = repair_document(document, provider=provider)
 
-    assert len(provider.messages) == 2
-    retry_prompt = provider.messages[1][0]["content"]
-    assert "exactly these four fields" in retry_prompt
-    assert "invalid_fields" in retry_prompt
-    assert "fixed slots" in retry_prompt
-    assert result.document.sections[0].paragraphs[0].text == (
-        "控制系统在持续监测运行区域内的异常状态时检测到障碍物后回退。"
+    assert len(provider.messages) == 1
+    assert result.document.sections[0].paragraphs[0].paragraph_id == "p1"
+    assert any(
+        rejected.code == "invalid_fields" for rejected in result.trace.rejected
     )
 
 
-def test_llm_preserves_simple_repeated_header_table_merge_capability():
+def test_structure_repair_leaves_repeated_header_tables_for_import_normalization():
     from app.core.structure_repair import repair_document
 
     first = "\n".join(
@@ -1159,12 +1353,10 @@ def test_llm_preserves_simple_repeated_header_table_merge_capability():
 
     result = repair_document(document, provider=provider)
 
-    assert len(result.document.sections[0].paragraphs) == 1
-    assert result.document.sections[0].paragraphs[0].text.endswith("| 2 | B |")
-    operation = result.trace.operations[-1]
-    assert operation.type == "merge_table_fragments"
-    assert operation.actor == "llm"
-    assert provider.messages is not None
-    payload = json.loads(provider.messages[-1]["content"])
-    assert set(payload) == {"candidate_id", "candidate", "pages"}
-    assert "kind" not in payload
+    assert [
+        paragraph.text for paragraph in result.document.sections[0].paragraphs
+    ] == [first, second]
+    assert not any(
+        operation.type == "merge_table_fragments"
+        for operation in result.trace.operations
+    )

@@ -2,70 +2,35 @@
 
 from __future__ import annotations
 
-from app.core.diff.reconstruction_trace import (
+from copy import deepcopy
+import hashlib
+import json
+
+from app.core.document_ir_codec import document_ir_to_dict
+from app.core.normalization.table_trace import (
     ALGORITHM_VERSION as TABLE_ALGORITHM_VERSION,
     SCHEMA_VERSION as TABLE_SCHEMA_VERSION,
     DocumentTraceRef,
     ReconstructionTrace,
-    SourceRowRef,
 )
-from app.core.diff.structure_aligner import align_sections
-from app.core.diff.table_reconstruction_pipeline import (
-    ReconstructionResult,
+from app.core.normalization.table_pipeline import (
     reconstruct_document_tables,
-    reconstruct_table_pairs,
 )
 from app.core.model.base_provider import BaseProvider
 from app.core.structure_repair.pipeline import repair_document
+from app.core.structure_repair.models import StructureRepairTrace
 from app.core.types import DocumentIR
 
 from .models import (
-    DeferredTableCandidate,
     DocumentBoundaryProfile,
     DocumentNormalizationResult,
     DocumentNormalizationTrace,
+    NormalizationDepth,
 )
 
 
-SCHEMA_VERSION = 1
-ALGORITHM_VERSION = "unified-document-normalization-v3"
-_HARD_TABLE_CONFLICTS = {
-    "new_key_value",
-    "header_or_separator",
-    "incompatible_schema",
-    "new_section_or_table",
-    "crosses_real_body_row",
-    "conflicting_key_cells",
-    "unsafe_fragment_projection",
-}
-
-
-def _deferred_table_candidates(table_trace) -> list[DeferredTableCandidate]:
-    deferred: list[DeferredTableCandidate] = []
-    for decision in table_trace.decisions:
-        if decision.final_action != "keep_separate":
-            continue
-        if _HARD_TABLE_CONFLICTS.intersection(decision.rule_conflicts):
-            continue
-        judgment = decision.llm
-        if judgment is not None and judgment.decision == "keep_separate":
-            continue
-        failure_code = (
-            "llm_unavailable"
-            if judgment is None
-            else "llm_below_merge_threshold"
-        )
-        deferred.append(
-            DeferredTableCandidate(
-                candidate_id=decision.candidate_id,
-                source_rows=list(decision.source_rows),
-                column_mapping=dict(decision.column_mapping),
-                failure_code=failure_code,
-            )
-        )
-    return deferred
-
-
+SCHEMA_VERSION = 2
+ALGORITHM_VERSION = "unified-document-normalization-v4"
 def _empty_document_table_trace(document: DocumentIR) -> ReconstructionTrace:
     return ReconstructionTrace(
         schema_version=TABLE_SCHEMA_VERSION,
@@ -78,6 +43,54 @@ def _empty_document_table_trace(document: DocumentIR) -> ReconstructionTrace:
         decisions=[],
         operations=[],
     )
+def _document_hash(document: DocumentIR) -> str:
+    payload = json.dumps(
+        document_ir_to_dict(document),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _skipped_result(document: DocumentIR) -> DocumentNormalizationResult:
+    skipped = deepcopy(document)
+    content_hash = _document_hash(skipped)
+    structure_trace = StructureRepairTrace(
+        schema_version=0,
+        algorithm_version="normalization-skipped",
+        doc_id=document.doc_id,
+        raw_hash=content_hash,
+        normalized_hash=content_hash,
+        status="unchanged",
+    )
+    table_trace = _empty_document_table_trace(skipped)
+    document_ref = DocumentTraceRef(document.doc_id, document.file_hash)
+    trace = DocumentNormalizationTrace(
+        scope="document",
+        schema_version=SCHEMA_VERSION,
+        algorithm_version=ALGORITHM_VERSION,
+        source_document_refs=[document_ref],
+        status="skipped",
+        structure_trace=structure_trace,
+        table_trace=table_trace,
+        normalization_depth=NormalizationDepth.OFF.value,
+    )
+    boundary_profile = DocumentBoundaryProfile(
+        schema_version=SCHEMA_VERSION,
+        algorithm_version=ALGORITHM_VERSION,
+        doc_id=document.doc_id,
+        file_hash=document.file_hash,
+        table_candidate_count=0,
+    )
+    return DocumentNormalizationResult(
+        document=skipped,
+        structure_trace=structure_trace,
+        table_trace=table_trace,
+        trace=trace,
+        boundary_profile=boundary_profile,
+        status="skipped",
+    )
 
 
 def normalize_document(
@@ -85,12 +98,17 @@ def normalize_document(
     *,
     provider: BaseProvider | None = None,
     model: str = "",
+    depth: NormalizationDepth = NormalizationDepth.OFF,
 ) -> DocumentNormalizationResult:
     """Normalize paragraphs and cross-page tables on copies of one document."""
+    depth = NormalizationDepth(depth)
+    if depth is NormalizationDepth.OFF:
+        return _skipped_result(document)
     structure_result = repair_document(
         document,
         provider=provider,
         model=model,
+        review_changes=depth is NormalizationDepth.REVIEW,
     )
     if structure_result.status == "fallback":
         normalized_document = structure_result.document
@@ -100,6 +118,7 @@ def normalize_document(
         table_result = reconstruct_document_tables(
             structure_result.document,
             provider,
+            review_changes=depth is NormalizationDepth.REVIEW,
         )
         normalized_document = table_result.document
         table_trace = table_result.trace
@@ -108,7 +127,6 @@ def normalize_document(
             if structure_result.status == "repaired" or table_trace.operations
             else "unchanged"
         )
-    deferred = _deferred_table_candidates(table_trace)
     warnings = list(structure_result.warnings)
     document_ref = DocumentTraceRef(document.doc_id, document.file_hash)
     trace = DocumentNormalizationTrace(
@@ -119,8 +137,8 @@ def normalize_document(
         status=status,
         structure_trace=structure_result.trace,
         table_trace=table_trace,
-        deferred_table_candidates=deferred,
         warnings=warnings,
+        normalization_depth=depth.value,
     )
     boundary_profile = DocumentBoundaryProfile(
         schema_version=SCHEMA_VERSION,
@@ -128,7 +146,6 @@ def normalize_document(
         doc_id=document.doc_id,
         file_hash=document.file_hash,
         table_candidate_count=len(table_trace.decisions),
-        deferred_table_candidates=deferred,
     )
     return DocumentNormalizationResult(
         document=normalized_document,
@@ -138,43 +155,4 @@ def normalize_document(
         boundary_profile=boundary_profile,
         status=status,
         warnings=warnings,
-    )
-
-
-def _deferred_source_pairs(
-    candidates: list[DeferredTableCandidate] | None,
-) -> set[tuple[SourceRowRef, SourceRowRef]] | None:
-    if candidates is None:
-        return None
-    return {
-        (candidate.source_rows[0], candidate.source_rows[1])
-        for candidate in candidates
-        if len(candidate.source_rows) == 2
-    }
-
-
-def normalize_pair(
-    baseline: DocumentIR,
-    target: DocumentIR,
-    *,
-    provider: BaseProvider | None = None,
-    baseline_deferred: list[DeferredTableCandidate] | None = None,
-    target_deferred: list[DeferredTableCandidate] | None = None,
-    section_pairs=None,
-) -> ReconstructionResult:
-    """Recheck only import-deferred table boundaries with pair evidence.
-
-    ``None`` denotes a legacy document without a normalization artifact and keeps
-    the former full-analysis behavior.  An empty list is an explicit statement
-    that import normalization resolved every table candidate.
-    """
-    return reconstruct_table_pairs(
-        section_pairs if section_pairs is not None else align_sections(baseline, target),
-        baseline,
-        target,
-        provider,
-        candidate_source_filter={
-            "baseline": _deferred_source_pairs(baseline_deferred),
-            "target": _deferred_source_pairs(target_deferred),
-        },
     )

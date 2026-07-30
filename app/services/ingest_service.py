@@ -6,6 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from app.core.model.base_provider import BaseProvider
+from app.core.normalization import NormalizationDepth
 from app.core.parser.ir_builder import build_chunks
 from app.core.parser.router import parse_document
 from app.core.structure_repair.storage import prepare_import_ir
@@ -26,6 +27,7 @@ def ingest_document(
     llm_client=None,
     llm_model: str = "",
     provider: BaseProvider | None = None,
+    normalization_depth: NormalizationDepth | str = NormalizationDepth.OFF,
 ) -> tuple[str, str]:
     """
     Import a document file.
@@ -68,6 +70,7 @@ def ingest_document(
         ir,
         provider=provider or llm_client,
         model=llm_model,
+        depth=normalization_depth,
     )
     ir = artifacts.document
     ir_path = artifacts.normalized_path
@@ -113,6 +116,7 @@ def ingest_new_version(
     llm_client=None,
     llm_model: str = "",
     provider: BaseProvider | None = None,
+    normalization_depth: NormalizationDepth | str = NormalizationDepth.OFF,
 ) -> str:
     """Add a new version to an existing document. Returns version_id."""
     path = Path(file_path)
@@ -130,6 +134,7 @@ def ingest_new_version(
         ir,
         provider=provider or llm_client,
         model=llm_model,
+        depth=normalization_depth,
     )
     ir = artifacts.document
     ir_path = artifacts.normalized_path

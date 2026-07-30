@@ -6,11 +6,10 @@ from pathlib import Path
 
 from app.core.document_ir_codec import load_document_ir
 from app.core.diff.diff_classifier import classify
-from app.core.diff.reconstruction_trace import persist_compare_artifacts
+from app.core.diff.result_storage import persist_compare_result
 from app.core.diff.semantic_matcher import match_paragraphs
 from app.core.diff.structure_aligner import align_sections
 from app.core.model.base_provider import BaseProvider
-from app.core.normalization import load_deferred_table_candidates, normalize_pair
 from app.core.types import ComparePolicy, DiffResult, DocumentIR
 from app.db import compare_repo, document_repo
 
@@ -42,10 +41,9 @@ def run_compare(
     Full compare pipeline:
     1. Load DocumentIRs
     2. Align sections
-    3. Reconstruct cross-page table rows
-    4. Match paragraphs by embedding
-    5. Classify diffs with LLM
-    6. Persist results and reconstruction trace
+    3. Match paragraphs by embedding
+    4. Classify diffs with LLM
+    5. Persist results
     Returns DiffResult.
     """
     if policy is None:
@@ -66,17 +64,6 @@ def run_compare(
         target_ir = _load_ir(target_version_id, conn)
 
         section_pairs = align_sections(baseline_ir, target_ir)
-        reconstructed = normalize_pair(
-            baseline_ir,
-            target_ir,
-            provider=provider,
-            baseline_deferred=load_deferred_table_candidates(data_dir, baseline_ir),
-            target_deferred=load_deferred_table_candidates(data_dir, target_ir),
-            section_pairs=section_pairs,
-        )
-        baseline_ir = reconstructed.baseline_ir
-        target_ir = reconstructed.target_ir
-        section_pairs = reconstructed.section_pairs
         para_pairs = match_paragraphs(
             section_pairs,
             embedder,
@@ -86,6 +73,8 @@ def run_compare(
             suppress_unmatched_table_headers=not (
                 policy.use_llm_classify and provider is not None
             ),
+            baseline_document_title=baseline_ir.title,
+            target_document_title=target_ir.title,
         )
         result = classify(
             para_pairs,
@@ -99,19 +88,17 @@ def run_compare(
         # Persist diff items
         compare_repo.insert_diff_items(conn, task_id, result.items)
 
-        result_path, trace_path = persist_compare_artifacts(
+        result_path = persist_compare_result(
             data_dir,
             task_id,
             result.items,
-            reconstructed.trace,
         )
 
         compare_repo.update_task_status(conn, task_id, "completed", str(result_path))
         logger.debug(
-            "Compare task %s artifacts published: result=%s trace=%s",
+            "Compare task %s result published: %s",
             task_id,
             result_path,
-            trace_path,
         )
         logger.info("Compare task %s completed: %d diff items", task_id, len(result.items))
         return result

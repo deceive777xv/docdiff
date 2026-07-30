@@ -22,12 +22,6 @@ _PARAGRAPH_RESPONSE_FIELDS = {
     "confidence",
     "reason",
 }
-_TABLE_FRAGMENT_RESPONSE_FIELDS = {
-    "candidate_id",
-    "action",
-    "confidence",
-    "reason",
-}
 _PAGE_NOISE_RESPONSE_FIELDS = {"boundary_id", "labels"}
 _PAGE_NOISE_LABEL_FIELDS = {"id", "action", "confidence", "reason"}
 _ALLOWED_ACTIONS = {"keep", "move_to_section"}
@@ -123,41 +117,6 @@ Strict JSON rules:
 Valid output example:
 {"candidate_id":"copy-exactly","action":"merge_paragraphs","confidence":0.92,"reason":"The continuation completes the unfinished sentence."}
 """
-_TABLE_FRAGMENT_SYSTEM_MESSAGE = """You are a cross-page table-fragment classifier.
-
-Task boundary:
-- Judge only the two fixed table fragments in candidate.previous and
-  candidate.continuation.
-- merge_fragments means the continuation fragment starts with one or more new logical
-  data rows of the same table after a repeated header.
-- Return keep when they are separate tables, or when the first business row of the
-  continuation fragment may continue the last business row of the previous fragment;
-  row continuation is handled by a separate row-level classifier.
-- Never replace either slot, rewrite cells, invent rows, or choose a column mapping.
-
-Return exactly one JSON object with exactly these four fields:
-candidate_id, action, confidence, reason.
-
-Field contract:
-- candidate_id: JSON string. Copy the supplied candidate_id exactly.
-- action: JSON string. It must be exactly merge_fragments or keep.
-- confidence: JSON number from 0.0 through 1.0 inclusive. Do not return a quoted
-  number, boolean, null, NaN, or infinity.
-- reason: non-empty JSON string of at most 200 characters. Explain only the
-  relationship between the two fixed fragments.
-
-Strict JSON rules:
-- Output one bare JSON object and nothing before or after it.
-- Do not use Markdown fences or prose outside the object.
-- Do not omit, add, or duplicate fields.
-- Field names and enum values are case-sensitive.
-- Never invent or modify candidate_id.
-
-Valid output example:
-{"candidate_id":"copy-exactly","action":"merge_fragments","confidence":0.94,"reason":"The repeated header is followed by new rows of the same table."}
-"""
-
-
 @dataclass(frozen=True)
 class SectionMoveJudgment:
     action: str
@@ -167,13 +126,6 @@ class SectionMoveJudgment:
 
 @dataclass(frozen=True)
 class ParagraphMergeJudgment:
-    action: str
-    confidence: float
-    reason: str
-
-
-@dataclass(frozen=True)
-class TableFragmentMergeJudgment:
     action: str
     confidence: float
     reason: str
@@ -450,6 +402,8 @@ def adjudicate_paragraph_merge(
     provider: object,
     model: str = "",
     rule_evidence: tuple[str, ...] = (),
+    document_title: str = "",
+    section_path: tuple[str, ...] = (),
 ) -> tuple[ParagraphMergeJudgment | None, str]:
     """Return a validated merge judgment for two existing paragraph IDs."""
     candidate_id = f"paragraphs:{previous.paragraph_id}:{following.paragraph_id}"
@@ -458,6 +412,12 @@ def adjudicate_paragraph_merge(
         "candidate": {
             "previous": previous.text[:800],
             "continuation": following.text[:800],
+        },
+        "paragraph_context": {
+            "document_title": document_title,
+            "section_path": list(section_path) or [section.title],
+            "current_section_title": section.title,
+            "section_level": section.level,
         },
     }
     if previous.page_no is not None or following.page_no is not None:
@@ -542,122 +502,6 @@ def adjudicate_paragraph_merge(
 
     try:
         raw = _chat(provider, messages, model)
-    except Exception:
-        return None, "llm_error"
-    judgment, failure_code = parse(raw)
-    if judgment is not None or failure_code == "low_confidence":
-        return judgment, failure_code
-
-    retry_messages = [
-        {
-            "role": "system",
-            "content": (
-                _PARAGRAPH_SYSTEM_MESSAGE
-                + "\nThe previous response failed strict validation with code: "
-                + failure_code
-                + ". Return a complete replacement JSON object for the same fixed slots."
-            ),
-        },
-        messages[1],
-    ]
-    try:
-        raw = _chat(provider, retry_messages, model)
-    except Exception:
-        return None, "llm_error"
-    return parse(raw)
-
-
-def adjudicate_table_fragment_merge(
-    previous: Paragraph,
-    following: Paragraph,
-    provider: object,
-    model: str = "",
-) -> tuple[TableFragmentMergeJudgment | None, str]:
-    """Return a strict judgment for one fixed same-schema fragment pair."""
-    candidate_id = f"tables:{previous.paragraph_id}:{following.paragraph_id}"
-    previous_rows = [line.strip() for line in previous.text.splitlines() if line.strip()]
-    following_rows = [line.strip() for line in following.text.splitlines() if line.strip()]
-    payload = {
-        "candidate_id": candidate_id,
-        "candidate": {
-            "previous": previous_rows[-3:],
-            "continuation": following_rows[:4],
-        },
-    }
-    if previous.page_no is not None or following.page_no is not None:
-        payload["pages"] = [previous.page_no, following.page_no]
-    user_message = {
-        "role": "user",
-        "content": json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-    }
-
-    def parse(raw: str) -> tuple[TableFragmentMergeJudgment | None, str]:
-        try:
-            data: Any = json.loads(
-                raw,
-                object_pairs_hook=_reject_duplicate_members,
-            )
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None, "invalid_json"
-        if not isinstance(data, dict) or set(data) != _TABLE_FRAGMENT_RESPONSE_FIELDS:
-            return None, "invalid_fields"
-        if data["candidate_id"] != candidate_id:
-            return None, "candidate_id_mismatch"
-        if data["action"] not in {"keep", "merge_fragments"}:
-            return None, "invalid_action"
-        confidence = data["confidence"]
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-            return None, "invalid_confidence"
-        if not 0.0 <= float(confidence) <= 1.0:
-            return None, "invalid_confidence"
-        reason = data["reason"]
-        if (
-            not isinstance(reason, str)
-            or not reason.strip()
-            or len(reason) > _MAX_REASON_LENGTH
-        ):
-            return None, "invalid_reason"
-        if float(confidence) < _MIN_CONFIDENCE:
-            return None, "low_confidence"
-        return (
-            TableFragmentMergeJudgment(
-                action=str(data["action"]),
-                confidence=float(confidence),
-                reason=reason,
-            ),
-            "",
-        )
-
-    messages = [
-        {"role": "system", "content": _TABLE_FRAGMENT_SYSTEM_MESSAGE},
-        user_message,
-    ]
-    try:
-        raw = _chat(provider, messages, model)
-    except Exception:
-        return None, "llm_error"
-    judgment, failure_code = parse(raw)
-    if judgment is not None or failure_code == "low_confidence":
-        return judgment, failure_code
-    retry_messages = [
-        {
-            "role": "system",
-            "content": (
-                _TABLE_FRAGMENT_SYSTEM_MESSAGE
-                + "\nThe previous response failed strict validation with code: "
-                + failure_code
-                + ". Return a complete replacement JSON object for the same fixed slots."
-            ),
-        },
-        user_message,
-    ]
-    try:
-        raw = _chat(provider, retry_messages, model)
     except Exception:
         return None, "llm_error"
     return parse(raw)

@@ -24,7 +24,7 @@ def _ui_boundary_fixture_token() -> str:
 
 def _make_ui_replay_fixture():
     """Return a raw pair plus a trace that removes a repeated boundary row."""
-    from app.core.diff.reconstruction_trace import (
+    from app.core.normalization.table_trace import (
         ALGORITHM_VERSION,
         SCHEMA_VERSION,
         DocumentTraceRef,
@@ -766,20 +766,16 @@ def test_render_diff_uses_full_document_with_row_and_token_marks(
     assert "60天" in js
 
 
-def test_render_diff_replay_task_trace_before_rendering(compare_page, tmp_path):
-    """A valid task trace normalizes both full-document panes before marking rows."""
-    from app.core.diff.reconstruction_trace import (
-        reconstruction_trace_path,
-        trace_to_dict,
-        write_json_atomic,
-    )
+def test_render_diff_ignores_legacy_task_trace_and_uses_imported_irs(compare_page, tmp_path):
+    """Rendering consumes import-normalized IRs and never replays task traces."""
+    from app.core.normalization.table_trace import trace_to_dict, write_json_atomic
 
     baseline_ir, target_ir, trace = _make_ui_replay_fixture()
     baseline_version_id, target_version_id = _write_source_irs(
         compare_page, tmp_path, baseline_ir, target_ir
     )
     write_json_atomic(
-        reconstruction_trace_path(tmp_path, "task-replay"),
+        tmp_path / "exports" / "task-replay.reconstruction.json",
         trace_to_dict(trace),
     )
 
@@ -791,7 +787,7 @@ def test_render_diff_replay_task_trace_before_rendering(compare_page, tmp_path):
     rendered_html = _decode_injected_html(script)
     assert "cedar" in rendered_html
     assert "pre lude-complete" in rendered_html
-    assert _ui_boundary_fixture_token() not in rendered_html
+    assert rendered_html.count(_ui_boundary_fixture_token()) == 4
     assert 'data-diff-id="replayed-row"' in rendered_html
 
 
@@ -805,25 +801,21 @@ def test_render_diff_replay_task_trace_before_rendering(compare_page, tmp_path):
         ("invalid", "wrong_file_hash"),
     ],
 )
-def test_render_diff_falls_back_to_raw_pair_for_invalid_reconstruction_sidecar(
+def test_render_diff_ignores_any_legacy_reconstruction_sidecar(
     compare_page,
     tmp_path,
     caplog,
     failure_category,
     trace_mutation,
 ):
-    """Bad sidecars never partially normalize a document or invoke runtime services."""
-    from app.core.diff.reconstruction_trace import (
-        reconstruction_trace_path,
-        trace_to_dict,
-        write_json_atomic,
-    )
+    """Legacy sidecars are irrelevant and never invoke runtime services."""
+    from app.core.normalization.table_trace import trace_to_dict, write_json_atomic
 
     baseline_ir, target_ir, trace = _make_ui_replay_fixture()
     baseline_version_id, target_version_id = _write_source_irs(
         compare_page, tmp_path, baseline_ir, target_ir
     )
-    trace_path = reconstruction_trace_path(tmp_path, "task-replay")
+    trace_path = tmp_path / "exports" / "task-replay.reconstruction.json"
     if trace_mutation == "invalid_json":
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         trace_path.write_text("{ not valid JSON", encoding="utf-8")
@@ -857,9 +849,7 @@ def test_render_diff_falls_back_to_raw_pair_for_invalid_reconstruction_sidecar(
         for record in caplog.records
         if record.name == "app.ui.pages.compare_page" and record.levelno == logging.WARNING
     ]
-    assert len(warnings) == 1
-    assert "task-replay" in warnings[0].getMessage()
-    assert failure_category in warnings[0].getMessage()
+    assert warnings == []
 
 
 def test_diff_template_exposes_focus_diff_function():

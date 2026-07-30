@@ -5,13 +5,13 @@ from dataclasses import replace
 import inspect
 import json
 
-from app.core.diff.reconstruction_trace import (
+from app.core.normalization.table_trace import (
     ALGORITHM_VERSION,
     SCHEMA_VERSION,
     SourceRowRef,
 )
 from app.core.diff.structure_aligner import SectionPair
-from app.core.diff.table_reconstruction import (
+from app.core.normalization.tables import (
     CandidateAssessment,
     ColumnMapping,
     ContinuationCandidate,
@@ -20,7 +20,7 @@ from app.core.diff.table_reconstruction import (
     build_reconstruction_operations,
     split_markdown_table_row,
 )
-from app.core.diff import table_reconstruction_pipeline as pipeline
+from app.core.normalization import table_pipeline as pipeline
 from app.core.model.base_provider import BaseProvider
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
@@ -51,7 +51,16 @@ class EchoMergeProvider(BaseProvider):
 
     def chat(self, messages: list[dict], **kwargs) -> str:
         payload = json.loads(messages[-1]["content"])
-        return _response(payload["candidate_id"])
+        continuation = payload["candidate"]["continuation"]
+        is_row_continuation = not continuation[0]
+        return _response(
+            payload["candidate_id"],
+            decision="merge" if is_row_continuation else "keep",
+            continuation_role=(
+                "continuation_row" if is_row_continuation else "table_header"
+            ),
+            table_action="merge_fragments",
+        )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         raise AssertionError("retrieval is outside reconstruction")
@@ -190,12 +199,16 @@ def _response(
     confidence: float = 0.9,
     *,
     continuation_role: str = "continuation_row",
+    table_action: str | None = None,
 ) -> str:
     return json.dumps(
         {
             "candidate_id": candidate_id,
             "continuation_role": continuation_role,
-            "action": "merge" if decision == "merge" else "keep",
+            "row_action": "merge" if decision == "merge" else "keep",
+            "table_action": table_action or (
+                "merge_fragments" if decision == "merge" else "keep"
+            ),
             "confidence": confidence,
             "reason": "bounded structural evidence",
         }
@@ -218,23 +231,30 @@ def test_pipeline_calls_llm_once_per_nontrivial_candidate(monkeypatch):
             _response("low"),
             _response("medium-1"),
             _response("medium-2"),
+            _response(
+                "vetoed",
+                decision="keep",
+                table_action="merge_fragments",
+            ),
         ]
     )
 
     result = pipeline.reconstruct_table_pairs(pairs, baseline, target, provider)
 
-    assert len(provider.chat_calls) == 4
+    assert len(provider.chat_calls) == 5
     assert [(decision.candidate_id, decision.final_action) for decision in result.trace.decisions] == [
         ("high", "merge"),
         ("low", "merge"),
         ("medium-1", "merge"),
         ("medium-2", "merge"),
-        ("vetoed", "keep_separate"),
+        ("vetoed", "merge"),
     ]
     decisions = {decision.candidate_id: decision for decision in result.trace.decisions}
     assert decisions["high"].llm is not None
     assert decisions["low"].llm is not None
-    assert decisions["vetoed"].llm is None
+    assert decisions["vetoed"].llm is not None
+    assert decisions["vetoed"].llm.row_action == "keep"
+    assert decisions["vetoed"].llm.table_action == "merge_fragments"
     assert decisions["medium-1"].llm is not None
     assert decisions["medium-2"].llm is not None
 
@@ -432,7 +452,6 @@ def test_pipeline_excludes_role_invalid_high_confidence_choice(monkeypatch):
     provider = QueueProvider(
         [
             invalid_response,
-            invalid_response,
             _response("choice-b", confidence=0.80),
         ]
     )
@@ -518,12 +537,40 @@ def test_pipeline_records_sub_threshold_llm_merge_but_keeps_separate(monkeypatch
     assert decision.final_action == "keep_separate"
 
 
+def test_review_mode_requires_a_second_agreeing_table_judgment(monkeypatch):
+    _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
+    baseline, target, pairs = _documents()
+    provider = QueueProvider(
+        [
+            _response("medium"),
+            _response("medium", decision="keep"),
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(
+        pairs,
+        baseline,
+        target,
+        provider,
+        review_changes=True,
+    )
+
+    assert len(provider.chat_calls) == 2
+    assert "initial_judgment" in provider.chat_calls[1][-1]["content"]
+    assert result.trace.decisions[0].final_action == "keep_separate"
+    assert result.trace.decisions[0].llm.row_action == "merge"
+    assert result.trace.decisions[0].llm.table_action == "merge_fragments"
+    assert result.trace.decisions[0].review.row_action == "keep"
+    assert result.trace.decisions[0].review.table_action == "keep"
+
+
 def test_pipeline_keeps_medium_separate_for_duplicate_response_member(monkeypatch):
     _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
     baseline, target, pairs = _documents()
     duplicate_response = (
         '{"candidate_id":"other","candidate_id":"medium",'
-        '"continuation_role":"continuation_row","action":"merge",'
+        '"continuation_role":"continuation_row","row_action":"merge",'
+        '"table_action":"merge_fragments",'
         '"confidence":0.99,"reason":"duplicate"}'
     )
 
@@ -539,19 +586,16 @@ def test_pipeline_keeps_medium_separate_for_duplicate_response_member(monkeypatc
     assert decision.final_action == "keep_separate"
 
 
-def test_pipeline_supplies_opposite_version_fragments_as_joint_context(monkeypatch):
+def test_pipeline_never_supplies_opposite_version_fragments_as_context(monkeypatch):
     seen = _stub_candidates(monkeypatch, [])
     baseline, target, pairs = _documents()
 
     pipeline.reconstruct_table_pairs(pairs, baseline, target, None)
 
-    assert seen == [
-        ("baseline", ("target-section", "target-section")),
-        ("target", ("baseline-section", "baseline-section")),
-    ]
+    assert seen == [("baseline", ()), ("target", ())]
 
 
-def test_pipeline_skips_fully_dropped_boundary_fragment_when_pairing_neighbors(monkeypatch):
+def test_pipeline_does_not_drop_rule_classified_boundary_fragments(monkeypatch):
     fragments = (
         _fragment("table-a", 0, "baseline-section"),
         _fragment("repeated-boundary", 1, "baseline-section"),
@@ -591,7 +635,10 @@ def test_pipeline_skips_fully_dropped_boundary_fragment_when_pairing_neighbors(m
 
     pipeline.reconstruct_table_pairs(pairs, baseline, target, None)
 
-    assert paired == [("table-a", "table-b")]
+    assert paired == [
+        ("table-a", "repeated-boundary"),
+        ("repeated-boundary", "table-b"),
+    ]
 
 
 def test_pipeline_replays_on_copies_then_aligns_normalized_documents_once(monkeypatch):
@@ -680,7 +727,7 @@ def _supporting_table_lines(start: int) -> list[str]:
     ]
 
 
-def test_pipeline_recovers_sparse_continuation_columns_from_complete_peer_version():
+def test_pipeline_does_not_use_complete_peer_version_to_merge_sparse_continuation():
     baseline_section = Section(
         "baseline-regulation",
         "2.3 法规要求",
@@ -763,7 +810,8 @@ def test_pipeline_recovers_sparse_continuation_columns_from_complete_peer_versio
     )
 
     compact = result.baseline_ir.plain_text.replace(" ", "").replace("|", "")
-    assert "与车辆数相等。<br>在一种车型" in compact
+    assert "与车辆数相等。<br>在一种车型" not in compact
+    assert "在一种车型的所有汽车中" in compact
 
 
 def test_pipeline_recovers_sparse_continuation_columns_from_next_complete_row():
@@ -944,7 +992,7 @@ def _run_single_side_section(section: Section):
     )
 
 
-def test_pipeline_allows_repeated_stable_boundary_paragraphs_and_replays_their_removal():
+def test_pipeline_preserves_repeated_boundary_paragraphs_without_llm_noise_acceptance():
     left_lines, right_lines = _continuation_gap_fragments()
     section = Section(
         "section-neutral",
@@ -961,27 +1009,16 @@ def test_pipeline_allows_repeated_stable_boundary_paragraphs_and_replays_their_r
     )
     baseline, result = _run_single_side_section(section)
 
-    assert "cedar pre<br>lude-complete" in result.baseline_ir.plain_text
+    assert "cedar pre<br>lude-complete" not in result.baseline_ir.plain_text
+    assert "Repeated boundary note." in result.baseline_ir.plain_text
+    assert "repeated   BOUNDARY note." in result.baseline_ir.plain_text
     dropped_paragraph_ids = {
         paragraph_id
         for operation in result.trace.operations
         if operation.type == "drop_boundary_paragraphs"
         for paragraph_id in operation.source_paragraph_ids
     }
-    assert dropped_paragraph_ids == {"boundary-note-a", "boundary-note-b"}
-    assert all(
-        paragraph_id not in {
-            paragraph.paragraph_id
-            for paragraph in result.baseline_ir.sections[0].paragraphs
-        }
-        for paragraph_id in dropped_paragraph_ids
-    )
-    assert dropped_paragraph_ids.issubset(
-        {
-            paragraph.paragraph_id
-            for paragraph in baseline.sections[0].paragraphs
-        }
-    )
+    assert dropped_paragraph_ids == set()
     replayed = pipeline.replay_reconstruction(
         baseline,
         DocumentIR("target-neutral", "Target neutral", "target-neutral-hash", []),

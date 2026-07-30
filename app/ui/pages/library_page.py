@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QThread, Signal, QObject, Slot
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.ui.app_context import AppContext
+from app.core.normalization import NormalizationDepth
 from app.ui.theme import Theme
 from app.db import document_repo
 
@@ -159,11 +161,18 @@ class _IngestWorker(QObject):
     refresh_needed = Signal(str)
     progress = Signal(str, int, str)
 
-    def __init__(self, ctx: AppContext, file_path: str, document_id: str | None = None):
+    def __init__(
+        self,
+        ctx: AppContext,
+        file_path: str,
+        document_id: str | None = None,
+        normalization_depth: str = NormalizationDepth.OFF.value,
+    ):
         super().__init__()
         self.ctx = ctx
         self.file_path = file_path
         self.document_id = document_id
+        self.normalization_depth = NormalizationDepth(normalization_depth).value
 
     def run(self) -> None:
         try:
@@ -179,6 +188,7 @@ class _IngestWorker(QObject):
                     "document_id": self.document_id,
                     "embedder": self.ctx.embedder,
                     "provider": self.ctx.provider,
+                    "normalization_depth": self.normalization_depth,
                     "conn": conn,
                     "llm_client": self.ctx.openai_client,
                     "llm_model": self.ctx.openai_model,
@@ -238,6 +248,21 @@ class LibraryPage(QWidget):
         header.addWidget(title)
         header.addStretch()
 
+        depth_label = QLabel("思考深度")
+        depth_label.setStyleSheet(Theme.label_secondary())
+        self._normalization_depth_label = depth_label
+        header.addWidget(depth_label)
+        depth_combo = QComboBox()
+        depth_combo.addItem("低（跳过规范化）", NormalizationDepth.OFF.value)
+        depth_combo.addItem("中（判断一次）", NormalizationDepth.STANDARD.value)
+        depth_combo.addItem("高（复核变更）", NormalizationDepth.REVIEW.value)
+        depth_combo.setCurrentIndex(0)
+        depth_combo.setToolTip(
+            "低：不执行规范化，速度最快；中：每个候选判断一次；高：对变更再复核一次。"
+        )
+        self._normalization_depth = depth_combo
+        header.addWidget(depth_combo)
+
         import_btn = QPushButton("导入文档")
         import_btn.setStyleSheet(Theme.btn_primary())
         import_btn.clicked.connect(self._import_document)
@@ -291,6 +316,8 @@ class LibraryPage(QWidget):
         
         if hasattr(self, '_status'):
             self._status.setStyleSheet(Theme.label_secondary())
+        if hasattr(self, '_normalization_depth_label'):
+            self._normalization_depth_label.setStyleSheet(Theme.label_secondary())
 
     def refresh(self) -> None:
         """Reload documents from DB."""
@@ -354,11 +381,13 @@ class LibraryPage(QWidget):
             "pending": set(unique_paths),
             "successes": set(),
             "failures": {},
+            "normalization_depth": self._normalization_depth.currentData(),
         }
         self._progress_dialog = _ImportProgressDialog(unique_paths, self)
         self._import_btn.setEnabled(False)
         self._add_version_btn.setEnabled(False)
         self._delete_btn.setEnabled(False)
+        self._normalization_depth.setEnabled(False)
         self._progress_dialog.show()
         for path in unique_paths:
             self._run_ingest(path, document_id=document_id)
@@ -368,7 +397,17 @@ class LibraryPage(QWidget):
             self._start_ingest_batch([file_path], document_id=document_id)
             return
         thread = QThread()
-        worker = _IngestWorker(self.ctx, file_path, document_id=document_id)
+        depth = (
+            self._import_batch.get("normalization_depth", NormalizationDepth.OFF.value)
+            if self._import_batch is not None
+            else NormalizationDepth.OFF.value
+        )
+        worker = _IngestWorker(
+            self.ctx,
+            file_path,
+            document_id=document_id,
+            normalization_depth=str(depth),
+        )
         self._thread = thread
         self.worker = worker
         worker.moveToThread(thread)
@@ -461,6 +500,7 @@ class LibraryPage(QWidget):
         self._import_batch = None
         self._progress_dialog = None
         self._import_btn.setEnabled(True)
+        self._normalization_depth.setEnabled(True)
         self._on_selection_changed()
         self.refresh()
         if failure_count:

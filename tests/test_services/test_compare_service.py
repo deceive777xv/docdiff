@@ -182,28 +182,12 @@ def test_compare_detects_change(tmp_path, two_docx_versions, db_conn):
     assert len(result.items) >= 1
 
 
-def test_run_compare_marks_failed_and_reraises_when_sidecar_publish_fails(tmp_path, monkeypatch):
+def test_run_compare_marks_failed_and_reraises_when_result_publish_fails(tmp_path, monkeypatch):
     """Publishing must succeed before the synchronous service marks completion."""
-    from app.core.diff.reconstruction_trace import (
-        ALGORITHM_VERSION,
-        SCHEMA_VERSION,
-        DocumentTraceRef,
-        ReconstructionTrace,
-    )
-    from app.core.diff.table_reconstruction_pipeline import ReconstructionResult
     from app.core.types import DiffResult, DocumentIR
     from app.services import compare_service
 
     mock_ir = DocumentIR("doc", "Title", "hash")
-    trace = ReconstructionTrace(
-        SCHEMA_VERSION,
-        ALGORITHM_VERSION,
-        DocumentTraceRef("doc", "hash"),
-        DocumentTraceRef("doc", "hash"),
-        [],
-        [],
-    )
-    reconstruction = ReconstructionResult(mock_ir, mock_ir, [], trace)
     statuses: list[str] = []
 
     monkeypatch.setattr(
@@ -219,11 +203,6 @@ def test_run_compare_marks_failed_and_reraises_when_sidecar_publish_fails(tmp_pa
     monkeypatch.setattr(compare_service.compare_repo, "insert_diff_items", lambda *args: None)
     monkeypatch.setattr(compare_service, "_load_ir", lambda *args: mock_ir)
     monkeypatch.setattr(compare_service, "align_sections", lambda *args: [])
-    monkeypatch.setattr(
-        compare_service,
-        "normalize_pair",
-        lambda *args, **kwargs: reconstruction,
-    )
     monkeypatch.setattr(compare_service, "match_paragraphs", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         compare_service,
@@ -232,11 +211,11 @@ def test_run_compare_marks_failed_and_reraises_when_sidecar_publish_fails(tmp_pa
     )
     monkeypatch.setattr(
         compare_service,
-        "persist_compare_artifacts",
-        lambda *args: (_ for _ in ()).throw(OSError("sidecar write failed")),
+        "persist_compare_result",
+        lambda *args: (_ for _ in ()).throw(OSError("result write failed")),
     )
 
-    with pytest.raises(OSError, match="sidecar write failed"):
+    with pytest.raises(OSError, match="result write failed"):
         compare_service.run_compare(
             MagicMock(), str(tmp_path), "ver-1", "ver-2", MagicMock(), MagicMock()
         )
@@ -245,10 +224,10 @@ def test_run_compare_marks_failed_and_reraises_when_sidecar_publish_fails(tmp_pa
     assert "completed" not in statuses
 
 
-def test_graph_and_service_reconstruct_equivalently_without_mutating_fixture(tmp_path, monkeypatch):
-    """Both compare entry points normalize the same aligned pairs before matching."""
+def test_graph_and_service_consume_imported_irs_without_mutating_fixture(tmp_path, monkeypatch):
+    """Both compare entry points pass imported IRs directly to matching."""
     from app.agent import compare_graph as graph_module
-    from app.core.diff.reconstruction_trace import persist_compare_artifacts, trace_to_dict
+    from app.core.diff.result_storage import persist_compare_result
     from app.core.types import DiffResult
     from app.services import compare_service
 
@@ -256,43 +235,20 @@ def test_graph_and_service_reconstruct_equivalently_without_mutating_fixture(tmp
     fixture_before = fixture_path.read_bytes()
     graph_texts = []
     service_texts = []
-    graph_traces = []
-    service_traces = []
-
     provider = MagicMock()
-    provider.chat_model = "deterministic-fake"
-
-    def deterministic_response(messages, **kwargs):
-        payload = json.loads(messages[-1]["content"])
-        return json.dumps(
-            {
-                "candidate_id": payload["candidate_id"],
-                "decision": "keep_separate",
-                "confidence": 0.9,
-                "reason": "deterministic integration response",
-            }
-        )
-
-    provider.chat.side_effect = deterministic_response
 
     def load_ir(version_id, conn):
         return deepcopy(baseline if version_id == "ver-1" else target)
 
     def capture_graph_match(pairs, *args, **kwargs):
         graph_texts.append(_normalized_pair_texts(pairs))
+        assert kwargs["baseline_document_title"] == baseline.title
+        assert kwargs["target_document_title"] == target.title
         return []
 
     def capture_service_match(pairs, *args, **kwargs):
         service_texts.append(_normalized_pair_texts(pairs))
         return []
-
-    def persist_graph(data_dir, task_id, items, trace):
-        graph_traces.append(trace_to_dict(trace))
-        return persist_compare_artifacts(data_dir, task_id, items, trace)
-
-    def persist_service(data_dir, task_id, items, trace):
-        service_traces.append(trace_to_dict(trace))
-        return persist_compare_artifacts(data_dir, task_id, items, trace)
 
     monkeypatch.setattr(
         graph_module.compare_repo,
@@ -316,7 +272,7 @@ def test_graph_and_service_reconstruct_equivalently_without_mutating_fixture(tmp
         "classify",
         lambda *args, **kwargs: DiffResult("task-eq", "ver-1", "ver-2", []),
     )
-    monkeypatch.setattr(graph_module, "persist_compare_artifacts", persist_graph)
+    monkeypatch.setattr(graph_module, "persist_compare_result", persist_compare_result)
 
     graph_state = graph_module.compare_graph.invoke(
         {
@@ -351,7 +307,7 @@ def test_graph_and_service_reconstruct_equivalently_without_mutating_fixture(tmp
         "classify",
         lambda *args, **kwargs: DiffResult("task-eq", "ver-1", "ver-2", []),
     )
-    monkeypatch.setattr(compare_service, "persist_compare_artifacts", persist_service)
+    monkeypatch.setattr(compare_service, "persist_compare_result", persist_compare_result)
 
     compare_service.run_compare(
         MagicMock(),
@@ -363,56 +319,19 @@ def test_graph_and_service_reconstruct_equivalently_without_mutating_fixture(tmp
     )
 
     assert graph_state["status"] == "completed"
-    assert graph_traces == service_traces
     assert graph_texts == service_texts
     assert fixture_path.read_bytes() == fixture_before
+    assert not list(tmp_path.rglob("*.reconstruction.json"))
 
 
-def test_service_completes_when_medium_reconstruction_provider_fails(tmp_path, monkeypatch):
-    """A failed bounded adjudication remains nonfatal and is traced as keep-separate."""
-    from app.core.diff import table_reconstruction_pipeline as pipeline
-    from app.core.diff.reconstruction_trace import (
-        SourceRowRef,
-        load_reconstruction_trace,
-        reconstruction_trace_path,
-    )
-    from app.core.diff.table_reconstruction import (
-        ColumnMapping,
-        ContinuationCandidate,
-        split_markdown_table_row,
-    )
+def test_service_does_not_call_table_reconstruction_during_compare(tmp_path, monkeypatch):
+    """Table reconstruction belongs exclusively to import normalization."""
     from app.core.types import DiffResult
     from app.services import compare_service
 
     _, baseline, target = _sanitized_fixture()
     statuses: list[str] = []
     provider = MagicMock()
-    provider.chat_model = "failing-fake"
-    provider.chat.side_effect = TimeoutError("model timeout")
-    previous = split_markdown_table_row(
-        "| 12 | drive | prefix |",
-        SourceRowRef("baseline-section", "baseline-fragment-a", 1),
-    )
-    continuation = split_markdown_table_row(
-        "| | | suffix |",
-        SourceRowRef("baseline-section", "baseline-fragment-b", 0),
-    )
-    assert previous is not None and continuation is not None
-    medium_candidate = ContinuationCandidate(
-        candidate_id="service-medium",
-        side="baseline",
-        previous_row=previous,
-        continuation_row=continuation,
-        next_full_row=None,
-        mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
-        previous_mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
-        previous_fragment_rows=(previous,),
-        continuation_fragment_rows=(continuation,),
-        evidence=("blank_key_cells", "textual_continuity"),
-        conflicts=(),
-        vetoes=(),
-        cross_version_rows=(),
-    )
 
     def load_ir(version_id, conn):
         return deepcopy(baseline if version_id == "ver-1" else target)
@@ -431,15 +350,6 @@ def test_service_completes_when_medium_reconstruction_provider_fails(tmp_path, m
     monkeypatch.setattr(compare_service, "_load_ir", load_ir)
     monkeypatch.setattr(compare_service, "match_paragraphs", lambda *args, **kwargs: [])
     monkeypatch.setattr(
-        pipeline,
-        "_collect_pair_analysis",
-        lambda pair: (
-            [medium_candidate],
-            {"baseline": set(), "target": set()},
-            {"baseline": set(), "target": set()},
-        ),
-    )
-    monkeypatch.setattr(
         compare_service,
         "classify",
         lambda *args, **kwargs: DiffResult(
@@ -456,14 +366,6 @@ def test_service_completes_when_medium_reconstruction_provider_fails(tmp_path, m
         provider,
     )
 
-    trace = load_reconstruction_trace(
-        reconstruction_trace_path(tmp_path, "task-provider-failure")
-    )
-    medium_decisions = [
-        decision for decision in trace.decisions if decision.rule_confidence == "medium"
-    ]
-    assert medium_decisions
-    assert all(decision.final_action == "keep_separate" for decision in medium_decisions)
-    assert all(decision.llm is None for decision in medium_decisions)
-    assert provider.chat.call_count == len(medium_decisions)
+    assert provider.chat.call_count == 0
+    assert not list(tmp_path.rglob("*.reconstruction.json"))
     assert statuses[-1] == "completed"

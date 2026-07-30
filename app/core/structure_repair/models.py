@@ -21,6 +21,7 @@ class StructureRepairOperation:
     actor: Literal["rule", "llm"] = "rule"
     confidence: float | None = None
     source_sentence_indexes: list[int] = field(default_factory=list)
+    removed_text: str = ""
 
 
 @dataclass(frozen=True)

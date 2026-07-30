@@ -5,17 +5,17 @@ import json
 
 import pytest
 
-from app.core.diff.reconstruction_trace import SourceRowRef
-from app.core.diff.table_boundary_context import (
+from app.core.normalization.table_trace import SourceRowRef
+from app.core.normalization.table_boundary_context import (
     BoundaryContextItem,
     TableBoundaryContext,
 )
-from app.core.diff.table_reconstruction import (
+from app.core.normalization.tables import (
     ColumnMapping,
     ContinuationCandidate,
     split_markdown_table_row,
 )
-from app.core.diff.table_reconstruction_llm import adjudicate_continuation
+from app.core.normalization.table_resolver import adjudicate_continuation
 from app.core.model.base_provider import BaseProvider
 
 
@@ -44,7 +44,8 @@ def _response(
     candidate_id: str = "candidate-1",
     *,
     continuation_role: str = "continuation_row",
-    action: str = "merge",
+    row_action: str = "merge",
+    table_action: str = "merge_fragments",
     confidence: float = 0.75,
     reason: str = "bounded structural evidence",
 ) -> str:
@@ -52,7 +53,8 @@ def _response(
         {
             "candidate_id": candidate_id,
             "continuation_role": continuation_role,
-            "action": action,
+            "row_action": row_action,
+            "table_action": table_action,
             "confidence": confidence,
             "reason": reason,
         }
@@ -135,20 +137,26 @@ def _context(candidate: ContinuationCandidate) -> TableBoundaryContext:
 
 
 @pytest.mark.parametrize(
-    ("action", "continuation_role", "decision"),
+    ("row_action", "table_action", "continuation_role", "decision"),
     [
-        ("merge", "continuation_row", "merge"),
-        ("keep", "new_table", "keep_separate"),
-        ("keep", "continuation_row", "keep_separate"),
+        ("merge", "merge_fragments", "continuation_row", "merge"),
+        ("keep", "merge_fragments", "new_business_row", "merge"),
+        ("keep", "keep", "new_table", "keep_separate"),
+        ("keep", "keep", "continuation_row", "keep_separate"),
     ],
 )
 def test_adjudicator_parses_candidate_bound_response(
-    action,
+    row_action,
+    table_action,
     continuation_role,
     decision,
 ):
     provider = RecordingProvider(
-        _response(action=action, continuation_role=continuation_role)
+        _response(
+            row_action=row_action,
+            table_action=table_action,
+            continuation_role=continuation_role,
+        )
     )
 
     judgment = adjudicate_continuation(make_medium_candidate(), provider)
@@ -157,10 +165,8 @@ def test_adjudicator_parses_candidate_bound_response(
     assert judgment.model == "recording-model"
     assert judgment.decision == decision
     assert judgment.roles == {"continuation": continuation_role}
-    assert judgment.row_action == ("merge" if action == "merge" else "keep")
-    assert judgment.table_action == (
-        "merge_fragments" if action == "merge" else "keep"
-    )
+    assert judgment.row_action == row_action
+    assert judgment.table_action == table_action
     assert len(provider.chat_calls) == 1
 
 
@@ -169,19 +175,22 @@ def test_adjudicator_parses_candidate_bound_response(
     [
         _response("other"),
         _response(continuation_role="body_row"),
-        _response(action="rewrite"),
-        _response(continuation_role="page_header", action="merge"),
+        _response(row_action="rewrite"),
+        _response(table_action="rewrite"),
+        _response(continuation_role="page_header", row_action="merge"),
+        _response(continuation_role="new_table", table_action="merge_fragments"),
         _response(confidence=1.2),
         '{"candidate_id":"candidate-1","continuation_role":"continuation_row",'
-        '"action":"merge","confidence":true,"reason":"invalid"}',
+        '"row_action":"merge","table_action":"merge_fragments","confidence":true,"reason":"invalid"}',
         '{"candidate_id":"candidate-1","continuation_role":"continuation_row",'
-        '"action":"merge","confidence":"0.9","reason":"invalid"}',
+        '"row_action":"merge","table_action":"merge_fragments","confidence":"0.9","reason":"invalid"}',
         '{"candidate_id":"candidate-1","continuation_role":"continuation_row",'
-        '"action":"merge","confidence":0.9}',
+        '"row_action":"merge","table_action":"merge_fragments","confidence":0.9}',
         '{"candidate_id":"candidate-1","continuation_role":"continuation_row",'
-        '"action":"merge","confidence":0.9,"reason":"ok","extra":true}',
+        '"row_action":"merge","table_action":"merge_fragments","confidence":0.9,"reason":"ok","extra":true}',
         '{"candidate_id":"other","candidate_id":"candidate-1",'
-        '"continuation_role":"continuation_row","action":"merge",'
+        '"continuation_role":"continuation_row","row_action":"merge",'
+        '"table_action":"merge_fragments",'
         '"confidence":0.9,"reason":"duplicate"}',
         _response(reason=""),
         _response(reason="x" * 201),
@@ -194,7 +203,7 @@ def test_adjudicator_rejects_non_strict_or_unbound_responses(response):
     provider = RecordingProvider([response, response])
 
     assert adjudicate_continuation(make_medium_candidate(), provider) is None
-    assert len(provider.chat_calls) == 2
+    assert len(provider.chat_calls) == 1
 
 
 @pytest.mark.parametrize("error", [RuntimeError("offline"), TimeoutError("model timeout")])
@@ -320,33 +329,31 @@ def test_adjudicator_sends_detailed_strict_system_contract():
     prompt = provider.chat_calls[0][0]["content"]
     for required_instruction in (
         "fixed candidate slots",
-        "exactly these five fields",
+        "exactly these six fields",
         "candidate_id",
         "continuation_role",
-        "action",
+        "row_action",
+        "table_action",
         "confidence",
         "reason",
         "duplicate",
         "Markdown",
         "200 characters",
         "JSON number",
-        "merge is valid only",
+        "row_action=merge is valid only",
     ):
         assert required_instruction in prompt
 
 
-def test_adjudicator_retries_once_with_same_payload_after_invalid_response():
+def test_adjudicator_does_not_retry_invalid_response():
     provider = RecordingProvider(
         [
-            '{"action":"merge"}',
+            '{"row_action":"merge"}',
             _response(confidence=0.91, reason="corrected strict response"),
         ]
     )
 
     judgment = adjudicate_continuation(make_medium_candidate(), provider)
 
-    assert judgment is not None
-    assert judgment.decision == "merge"
-    assert len(provider.chat_calls) == 2
-    assert "strict validation" in provider.chat_calls[1][0]["content"]
-    assert provider.chat_calls[1][1] == provider.chat_calls[0][1]
+    assert judgment is None
+    assert len(provider.chat_calls) == 1

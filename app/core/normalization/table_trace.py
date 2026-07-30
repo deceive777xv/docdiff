@@ -1,4 +1,4 @@
-"""Versioned, replayable trace data for cross-page table reconstruction."""
+"""Versioned import-normalization trace data for cross-page tables."""
 
 from __future__ import annotations
 
@@ -9,11 +9,11 @@ from pathlib import Path
 import tempfile
 from typing import Literal, cast
 
-from app.core.types import DiffItem, DocumentIR
+from app.core.types import DocumentIR
 
 
 SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "cross-page-table-v2"
+ALGORITHM_VERSION = "cross-page-table-v3"
 _LEGACY_ALGORITHM_VERSION = "cross-page-table-v1"
 
 _SIDES = {"baseline", "target"}
@@ -69,6 +69,7 @@ class ReconstructionDecision:
     next_page_no: int | None = None
     context_refs: list[str] = field(default_factory=list)
     generated_row_id: str = ""
+    review: LLMJudgment | None = None
 
 
 @dataclass(frozen=True)
@@ -98,10 +99,6 @@ class ReconstructionTrace:
     target: DocumentTraceRef
     decisions: list[ReconstructionDecision]
     operations: list[ReconstructionOperation]
-
-
-def reconstruction_trace_path(data_dir: str | Path, task_id: str) -> Path:
-    return Path(data_dir) / "exports" / f"{task_id}.reconstruction.json"
 
 
 def trace_to_dict(trace: ReconstructionTrace) -> dict[str, object]:
@@ -253,6 +250,7 @@ def _parse_decision(value: object, label: str) -> ReconstructionDecision:
             f"{label}.context_refs",
         ),
         generated_row_id=_require_string(data.get("generated_row_id", ""), f"{label}.generated_row_id", allow_empty=True),
+        review=_parse_llm(data.get("review"), f"{label}.review"),
     )
 
 
@@ -318,12 +316,6 @@ def validate_trace_documents(trace: ReconstructionTrace, baseline_ir: DocumentIR
             raise ValueError(f"{side} file hash does not match reconstruction trace")
 
 
-def load_reconstruction_trace(path: Path) -> ReconstructionTrace:
-    with path.open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    return trace_from_dict(_require_object(payload, "Reconstruction trace"))
-
-
 def _json_bytes(payload: object) -> bytes:
     return json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
@@ -353,31 +345,3 @@ def write_json_atomic(path: Path, payload: object) -> None:
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
-
-
-def persist_compare_artifacts(
-    data_dir: str | Path,
-    task_id: str,
-    items: list[DiffItem],
-    trace: ReconstructionTrace,
-) -> tuple[Path, Path]:
-    """Stage the result list and replay trace, then publish both in order."""
-    result_path = Path(data_dir) / "exports" / f"{task_id}.json"
-    trace_path = reconstruction_trace_path(data_dir, task_id)
-    result_payload = _json_bytes([asdict(item) for item in items])
-    trace_payload = _json_bytes(trace_to_dict(trace))
-    trace_temp: Path | None = None
-    result_temp: Path | None = None
-    try:
-        trace_temp = _write_temp_bytes(trace_path, trace_payload)
-        result_temp = _write_temp_bytes(result_path, result_payload)
-        trace_temp.replace(trace_path)
-        trace_temp = None
-        result_temp.replace(result_path)
-        result_temp = None
-    finally:
-        if trace_temp is not None:
-            trace_temp.unlink(missing_ok=True)
-        if result_temp is not None:
-            result_temp.unlink(missing_ok=True)
-    return result_path, trace_path

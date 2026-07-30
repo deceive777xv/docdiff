@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 from app.core.diff import semantic_matcher
-from app.core.diff import table_reconstruction as reconstruction
-from app.core.diff.reconstruction_trace import ReconstructionOperation, SourceRowRef
-from app.core.diff.table_reconstruction import (
+from app.core.normalization import tables as reconstruction
+from app.core.normalization.table_trace import ReconstructionOperation, SourceRowRef
+from app.core.normalization.tables import (
     CandidateAssessment,
     ColumnMapping,
     ContinuationCandidate,
@@ -648,7 +648,7 @@ def test_candidate_projection_rows_exclude_boundary_noise_headers_and_separators
         "baseline",
     )[0]
     operations = reconstruction.build_reconstruction_operations(
-        [CandidateAssessment(candidate, "high", "merge")],
+        [CandidateAssessment(candidate, "high", "merge", True, True)],
         {"baseline": boundary_rows, "target": set()},
         {"baseline": set(), "target": set()},
     )
@@ -687,6 +687,57 @@ def test_candidate_boundary_rows_are_excluded_before_selecting_adjacent_rows():
     assert candidate.continuation_row.source == right.rows[1].source
 
 
+def test_candidate_includes_first_retained_right_row_even_when_inferred_as_header():
+    left, right, mapping = make_candidate_fragments(
+        left_values=(("100", "group-a", "complete"), ("101", "group-b", "prefix")),
+        right_values=(("101", "group-b", "suffix"), ("102", "group-c", "complete")),
+    )
+    right = replace(
+        right,
+        regions=(
+            TableRegion((right.rows[0],), 0, 1, "header"),
+            TableRegion((right.rows[1],), 1, 2, "body"),
+        ),
+        body_region_indexes=(1,),
+    )
+
+    candidates = generate_continuation_candidates(
+        left, right, mapping, set(), (), "baseline"
+    )
+
+    assert candidates
+    assert candidates[0].continuation_row.source == right.rows[0].source
+    assert "new_key_value" in candidates[0].vetoes
+    assert candidates[0].next_full_row == right.rows[1]
+
+
+def test_fragment_merge_does_not_force_boundary_rows_to_merge():
+    left, right, mapping = make_candidate_fragments(
+        left_values=(("100", "group-a", "complete"), ("101", "group-b", "prefix")),
+        right_values=(("101", "group-b", "suffix"), ("102", "group-c", "complete")),
+    )
+    candidate = generate_continuation_candidates(
+        left, right, mapping, set(), (), "baseline"
+    )[0]
+
+    operations = reconstruction.build_reconstruction_operations(
+        [
+            CandidateAssessment(
+                candidate,
+                "low",
+                "merge",
+                merge_rows=False,
+                merge_fragments=True,
+            )
+        ],
+        {"baseline": set(), "target": set()},
+        {"baseline": set(), "target": set()},
+    )
+
+    assert any(operation.type == "merge_fragments" for operation in operations)
+    assert not any(operation.type == "merge_rows" for operation in operations)
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -709,9 +760,9 @@ def test_hard_veto_never_requests_llm(case):
 @pytest.mark.parametrize(
     ("evidence_count", "expected_confidence", "expected_action"),
     [
-        (4, "high", "merge"),
-        (5, "high", "merge"),
-        (6, "high", "merge"),
+        (4, "high", "needs_llm"),
+        (5, "high", "needs_llm"),
+        (6, "high", "needs_llm"),
         (2, "medium", "needs_llm"),
         (3, "medium", "needs_llm"),
         (0, "low", "keep_separate"),
@@ -852,7 +903,7 @@ def test_repeated_structural_header_can_precede_a_continuation():
     assert candidate.continuation_row.source == right.rows[1].source
     assert candidate.vetoes == ()
     assert "boundary_artifacts_only" in candidate.evidence
-    assert assessment.final_action == "merge"
+    assert assessment.final_action == "needs_llm"
 
 
 def test_sparse_header_role_row_remains_a_continuation_after_repeated_page_metadata():
@@ -1028,7 +1079,7 @@ def test_candidate_keeps_legitimate_unnumbered_continuation_with_blank_textual_k
     assert candidate.vetoes == ()
     assert "blank_key_cells" in candidate.evidence
     assert assessment.rule_confidence == "high"
-    assert assessment.final_action == "merge"
+    assert assessment.final_action == "needs_llm"
 
 
 def make_small_left_text_key_candidate_fragments(
@@ -1090,7 +1141,7 @@ def test_candidate_keeps_blank_textual_key_eligible_with_small_left_fragment(lef
     assert candidate.conflicts == ()
     assert "blank_key_cells" in candidate.evidence
     assert assessment.rule_confidence == "high"
-    assert assessment.final_action == "merge"
+    assert assessment.final_action == "needs_llm"
 
 
 def test_candidate_fails_closed_when_pooled_textual_key_profile_is_insufficient():
@@ -1143,7 +1194,7 @@ def test_pre_body_continuation_keeps_first_textual_body_row_in_key_profile():
     assert candidate.conflicts == ()
     assert candidate.vetoes == ()
     assert "blank_key_cells" in candidate.evidence
-    assert assessment.final_action == "merge"
+    assert assessment.final_action == "needs_llm"
 
 
 def make_split_rows(
@@ -1386,8 +1437,13 @@ def _accepted_fixture_assessment(
         cross_version_rows=(),
     )
     assessment = assess_candidate(candidate)
-    assert assessment.final_action == "merge"
-    return assessment
+    assert assessment.final_action == "needs_llm"
+    return replace(
+        assessment,
+        final_action="merge",
+        merge_rows=True,
+        merge_fragments=True,
+    )
 
 
 def make_fixture_assessments(
@@ -1522,7 +1578,13 @@ def test_assessment_builder_and_replay_project_every_retained_body_row_exactly()
         "baseline",
     )[0]
     assessment = assess_candidate(candidate)
-    assert assessment.final_action == "merge"
+    assert assessment.final_action == "needs_llm"
+    assessment = replace(
+        assessment,
+        final_action="merge",
+        merge_rows=True,
+        merge_fragments=True,
+    )
     paragraphs = [
         Paragraph(
             fragment.paragraph_id,
@@ -1596,7 +1658,7 @@ def test_operation_builder_rejects_conflicting_retained_row_projections():
         (),
         "baseline",
     )[0]
-    first = CandidateAssessment(candidate, "high", "merge")
+    first = CandidateAssessment(candidate, "high", "merge", True, True)
     conflicting = CandidateAssessment(
         replace(
             candidate,
@@ -1605,6 +1667,8 @@ def test_operation_builder_rejects_conflicting_retained_row_projections():
         ),
         "high",
         "merge",
+        True,
+        True,
     )
 
     with pytest.raises(ValueError, match="conflicting projections"):
@@ -1632,6 +1696,8 @@ def test_operation_builder_rejects_narrow_mapping_that_drops_retained_content():
         ),
         "high",
         "merge",
+        True,
+        True,
     )
 
     with pytest.raises(ValueError, match="unmapped retained cells"):
@@ -1674,7 +1740,7 @@ def test_operation_builder_accepts_sparse_continuation_with_fewer_physical_colum
     )
 
     operations = reconstruction.build_reconstruction_operations(
-        [CandidateAssessment(candidate, "high", "merge")],
+        [CandidateAssessment(candidate, "high", "merge", True, True)],
         {"baseline": set(), "target": set()},
         {"baseline": set(), "target": set()},
     )
@@ -1717,7 +1783,7 @@ def test_operation_builder_rejects_partial_mapping_that_would_drop_retained_cell
 
     with pytest.raises(ValueError, match="unmapped retained cells"):
         reconstruction.build_reconstruction_operations(
-            [CandidateAssessment(candidate, "high", "merge")],
+            [CandidateAssessment(candidate, "high", "merge", True, True)],
             {"baseline": set(), "target": set()},
             {"baseline": set(), "target": set()},
         )
@@ -1759,7 +1825,7 @@ def test_operation_builder_projects_fully_populated_row_from_shifted_physical_sl
     )
 
     operations = reconstruction.build_reconstruction_operations(
-        [CandidateAssessment(candidate, "high", "merge")],
+        [CandidateAssessment(candidate, "high", "merge", True, True)],
         {"baseline": set(), "target": set()},
         {"baseline": set(), "target": set()},
     )
@@ -2001,6 +2067,8 @@ def test_operation_builder_is_stable_and_uses_transformation_precedence():
         generate_continuation_candidates(left, right, mapping, set(), (), "baseline")[0],
         "high",
         "merge",
+        True,
+        True,
     )
     keep = replace(merge, final_action="keep_separate")
     boundaries = {

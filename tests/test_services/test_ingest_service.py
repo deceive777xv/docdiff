@@ -73,6 +73,7 @@ def test_ingest_inserts_chunks(tmp_path, docx_file, db_conn):
 
 
 def test_ingest_persists_raw_and_indexes_normalized_ir(tmp_path, docx_file, db_conn):
+    from app.core.normalization import NormalizationDepth
     from app.core.types import DocumentIR, Paragraph, ParseQualityReport, Section, Sentence
     from app.db import chunk_repo, document_repo
     from app.services.ingest_service import ingest_document
@@ -102,6 +103,7 @@ def test_ingest_persists_raw_and_indexes_normalized_ir(tmp_path, docx_file, db_c
             str(tmp_path),
             str(docx_file),
             embedder=None,
+            normalization_depth=NormalizationDepth.STANDARD,
         )
 
     version = document_repo.get_version_by_id(db_conn, version_id)

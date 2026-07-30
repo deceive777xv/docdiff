@@ -66,56 +66,30 @@ def test_graph_sets_error_on_missing_version(base_state):
     assert result.get("status") == "failed"
 
 
-def test_compare_graph_reconstructs_before_matching_and_persists_trace(base_state, tmp_path):
-    """Full happy path: both IRs load, align, compare, classify, persist."""
+def test_compare_graph_matches_imported_irs_and_persists_result_only(base_state, tmp_path):
+    """Compare consumes import-normalized IRs without a reconstruction stage."""
     from app.agent.compare_graph import compare_graph
-    from app.core.diff.reconstruction_trace import (
-        ALGORITHM_VERSION,
-        SCHEMA_VERSION,
-        DocumentTraceRef,
-        ReconstructionTrace,
-    )
-    from app.core.diff.table_reconstruction_pipeline import ReconstructionResult
     from app.core.types import DiffResult, DocumentIR
 
     mock_ir = DocumentIR(doc_id="d1", title="T", file_hash="h", sections=[], plain_text="")
     mock_result = DiffResult(task_id="task-001", baseline_version_id="ver-1", target_version_id="ver-2", items=[])
     initial_pairs = [object()]
-    reconstructed_pairs = [object()]
-    trace = ReconstructionTrace(
-        schema_version=SCHEMA_VERSION,
-        algorithm_version=ALGORITHM_VERSION,
-        baseline=DocumentTraceRef("d1", "h"),
-        target=DocumentTraceRef("d1", "h"),
-        decisions=[],
-        operations=[],
-    )
-    reconstruction = ReconstructionResult(mock_ir, mock_ir, reconstructed_pairs, trace)
     calls: list[str] = []
 
     def record_align(*args):
         calls.append("align")
         return initial_pairs
 
-    def record_reconstruct(*args, **kwargs):
-        calls.append("reconstruct")
-        assert args == (mock_ir, mock_ir)
-        assert kwargs["section_pairs"] is initial_pairs
-        return reconstruction
-
     def record_match(pairs, *args, **kwargs):
         calls.append("match")
-        assert pairs is reconstructed_pairs
+        assert pairs is initial_pairs
+        assert kwargs["baseline_document_title"] == "T"
+        assert kwargs["target_document_title"] == "T"
         return []
 
-    def record_persist(data_dir, task_id, items, persisted_trace):
+    def record_persist(data_dir, task_id, items):
         calls.append("persist")
-        assert persisted_trace is trace
-        exports_dir = Path(data_dir) / "exports"
-        return (
-            exports_dir / f"{task_id}.json",
-            exports_dir / f"{task_id}.reconstruction.json",
-        )
+        return Path(data_dir) / "exports" / f"{task_id}.json"
 
     base_state["data_dir"] = str(tmp_path)
 
@@ -125,42 +99,25 @@ def test_compare_graph_reconstructs_before_matching_and_persists_trace(base_stat
         patch("app.agent.compare_graph.compare_repo.insert_diff_items"),
         patch("app.agent.compare_graph._load_ir", return_value=mock_ir),
         patch("app.agent.compare_graph.align_sections", side_effect=record_align),
-        patch("app.agent.compare_graph.normalize_pair", side_effect=record_reconstruct),
         patch("app.agent.compare_graph.match_paragraphs", side_effect=record_match),
         patch("app.agent.compare_graph.classify", return_value=mock_result),
-        patch("app.agent.compare_graph.persist_compare_artifacts", side_effect=record_persist),
+        patch("app.agent.compare_graph.persist_compare_result", side_effect=record_persist),
     ):
         result = compare_graph.invoke(base_state)
 
-    assert calls == ["align", "reconstruct", "match", "persist"]
+    assert calls == ["align", "match", "persist"]
     assert result.get("error") is None
     assert result["task_id"] == "task-001"
     assert result["status"] == "completed"
-    assert result["_reconstruction_trace"] is trace
+    assert "_reconstruction_trace" not in result
 
 
-def test_graph_marks_failed_when_sidecar_publish_fails(base_state, tmp_path):
-    """A dual-artifact publish failure must never be recorded as completed."""
+def test_graph_marks_failed_when_result_publish_fails(base_state, tmp_path):
+    """A result publish failure must never be recorded as completed."""
     from app.agent.compare_graph import compare_graph
-    from app.core.diff.reconstruction_trace import (
-        ALGORITHM_VERSION,
-        SCHEMA_VERSION,
-        DocumentTraceRef,
-        ReconstructionTrace,
-    )
-    from app.core.diff.table_reconstruction_pipeline import ReconstructionResult
     from app.core.types import DiffResult, DocumentIR
 
     mock_ir = DocumentIR(doc_id="d1", title="T", file_hash="h", sections=[], plain_text="")
-    trace = ReconstructionTrace(
-        schema_version=SCHEMA_VERSION,
-        algorithm_version=ALGORITHM_VERSION,
-        baseline=DocumentTraceRef("d1", "h"),
-        target=DocumentTraceRef("d1", "h"),
-        decisions=[],
-        operations=[],
-    )
-    reconstruction = ReconstructionResult(mock_ir, mock_ir, [], trace)
     mock_result = DiffResult("task-001", "ver-1", "ver-2", [])
     statuses: list[str] = []
     base_state["data_dir"] = str(tmp_path)
@@ -174,17 +131,16 @@ def test_graph_marks_failed_when_sidecar_publish_fails(base_state, tmp_path):
         patch("app.agent.compare_graph.compare_repo.insert_diff_items"),
         patch("app.agent.compare_graph._load_ir", return_value=mock_ir),
         patch("app.agent.compare_graph.align_sections", return_value=[]),
-        patch("app.agent.compare_graph.normalize_pair", return_value=reconstruction),
         patch("app.agent.compare_graph.match_paragraphs", return_value=[]),
         patch("app.agent.compare_graph.classify", return_value=mock_result),
         patch(
-            "app.agent.compare_graph.persist_compare_artifacts",
-            side_effect=OSError("sidecar write failed"),
+            "app.agent.compare_graph.persist_compare_result",
+            side_effect=OSError("result write failed"),
         ),
     ):
         result = compare_graph.invoke(base_state)
 
     assert result["status"] == "failed"
-    assert result["error"] == "sidecar write failed"
+    assert result["error"] == "result write failed"
     assert statuses[-1] == "failed"
     assert "completed" not in statuses

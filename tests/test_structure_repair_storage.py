@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from app.core.normalization import NormalizationDepth
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 
@@ -32,7 +33,11 @@ def _raw_document() -> DocumentIR:
 def test_prepare_import_ir_persists_raw_normalized_and_trace(tmp_path):
     from app.core.structure_repair.storage import prepare_import_ir
 
-    artifacts = prepare_import_ir(tmp_path, _raw_document())
+    artifacts = prepare_import_ir(
+        tmp_path,
+        _raw_document(),
+        depth=NormalizationDepth.STANDARD,
+    )
 
     assert artifacts.raw_path == tmp_path / "parsed" / "raw" / "raw-doc.json"
     assert artifacts.normalized_path == tmp_path / "parsed" / "raw-doc.json"
@@ -62,7 +67,27 @@ def test_prepare_import_ir_persists_raw_normalized_and_trace(tmp_path):
     assert normalization_trace["structure_trace"] == trace
     assert normalization_trace["table_trace"]["baseline"]["doc_id"] == "raw-doc"
     assert boundary_profile["doc_id"] == "raw-doc"
-    assert boundary_profile["deferred_table_candidates"] == []
+    assert "deferred_table_candidates" not in boundary_profile
+
+
+def test_prepare_import_ir_persists_skipped_low_depth_artifacts(tmp_path):
+    from app.core.structure_repair.storage import prepare_import_ir
+
+    artifacts = prepare_import_ir(
+        tmp_path,
+        _raw_document(),
+        depth=NormalizationDepth.OFF,
+    )
+
+    raw = json.loads(artifacts.raw_path.read_text(encoding="utf-8"))
+    normalized = json.loads(artifacts.normalized_path.read_text(encoding="utf-8"))
+    trace = json.loads(
+        artifacts.normalization_trace_path.read_text(encoding="utf-8")
+    )
+
+    assert normalized == raw
+    assert trace["status"] == "skipped"
+    assert trace["normalization_depth"] == "off"
 
 
 def test_prepare_import_ir_falls_back_to_raw_when_repair_raises(

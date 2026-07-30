@@ -5,59 +5,68 @@ from __future__ import annotations
 import json
 from typing import Literal, cast
 
-from app.core.diff.reconstruction_trace import LLMJudgment, SourceRowRef
-from app.core.diff.table_boundary_context import (
+from app.core.normalization.table_trace import LLMJudgment, SourceRowRef
+from app.core.normalization.table_boundary_context import (
     BoundaryContextItem,
     TableBoundaryContext,
 )
-from app.core.diff.table_reconstruction import ContinuationCandidate, TableRowMatrix
+from app.core.normalization.tables import ContinuationCandidate, TableRowMatrix
 from app.core.model.base_provider import BaseProvider
 
 
 _RESPONSE_FIELDS = {
     "candidate_id",
     "continuation_role",
-    "action",
+    "row_action",
+    "table_action",
     "confidence",
     "reason",
 }
 _CONTINUATION_ROLES = {
     "continuation_row",
+    "new_business_row",
     "table_header",
     "page_header",
     "page_footer",
     "ordinary_text",
     "new_table",
 }
-_ACTIONS = {"merge", "keep"}
+_ROW_ACTIONS = {"merge", "keep"}
+_TABLE_ACTIONS = {"merge_fragments", "keep"}
 _MAX_PEER_ROWS = 2
 _MAX_REASON_LENGTH = 200
 _SYSTEM_MESSAGE = """You are a table reconstruction classifier.
 
 Task boundary:
-- Judge only whether candidate.continuation belongs to the same logical table row as
+- Make two independent judgments: whether the two table fragments belong to one logical
+  table, and whether candidate.continuation belongs to the same logical row as
   candidate.previous.
 - candidate.previous and candidate.continuation are fixed candidate slots. Never replace
   either slot with a row from candidate.next, nearby_context, or peer_rows.
 - candidate.next, nearby_context, and peer_rows are background evidence only. They can
   never become the target of action.
-- Do not rewrite cells, invent text, choose a column mapping, or return reconstruction
-  operations.
+- Do not rewrite cells, invent text, choose a column mapping, or replace the fixed
+  fragments or rows.
 
-Return exactly one JSON object with exactly these five fields:
-candidate_id, continuation_role, action, confidence, reason.
+Return exactly one JSON object with exactly these six fields:
+candidate_id, continuation_role, row_action, table_action, confidence, reason.
 
 Field contract:
 - candidate_id: JSON string. Copy the supplied candidate_id exactly.
 - continuation_role: JSON string classifying candidate.continuation only. It must be one
-  of: continuation_row, table_header, page_header, page_footer, ordinary_text, new_table.
-- action: JSON string. It must be exactly merge or keep. merge is valid only when
-  continuation_role is continuation_row. If the row may be a continuation but evidence
-  is insufficient, continuation_role may be continuation_row while action is keep.
+  of: continuation_row, new_business_row, table_header, page_header, page_footer,
+  ordinary_text, new_table.
+- row_action: JSON string, exactly merge or keep. row_action=merge is valid only when
+  continuation_role is continuation_row. A repeated header or a new business row must
+  use keep even when the fragments belong to one table. Use new_business_row when the
+  fixed row starts a complete new record in the continued table.
+- table_action: JSON string, exactly merge_fragments or keep. Decide this independently
+  from row_action. merge_fragments means the right fragment continues the left logical
+  table; it does not mean the boundary rows should be combined. new_table, page_header,
+  page_footer, and ordinary_text must use keep.
 - confidence: JSON number from 0.0 through 1.0 inclusive. Do not return a quoted number,
   boolean, null, NaN, or infinity.
-- reason: non-empty JSON string of at most 200 characters. Explain only the relationship
-  between candidate.previous and candidate.continuation.
+- reason: non-empty JSON string of at most 200 characters. Explain both relationships.
 
 Strict JSON rules:
 - Output one bare JSON object and nothing before or after it.
@@ -68,7 +77,8 @@ Strict JSON rules:
 
 Valid output example:
 {"candidate_id":"copy-exactly","continuation_role":"continuation_row",\
-"action":"merge","confidence":0.92,"reason":"Completes the previous row."}
+"row_action":"merge","table_action":"merge_fragments","confidence":0.92,\
+"reason":"Same table and completes the previous row."}
 """
 
 
@@ -195,10 +205,19 @@ def _parse_response(
         or continuation_role not in _CONTINUATION_ROLES
     ):
         return None
-    action = data["action"]
-    if not isinstance(action, str) or action not in _ACTIONS:
+    row_action = data["row_action"]
+    if not isinstance(row_action, str) or row_action not in _ROW_ACTIONS:
         return None
-    if action == "merge" and continuation_role != "continuation_row":
+    if row_action == "merge" and continuation_role != "continuation_row":
+        return None
+    table_action = data["table_action"]
+    if not isinstance(table_action, str) or table_action not in _TABLE_ACTIONS:
+        return None
+    if table_action == "merge_fragments" and continuation_role not in {
+        "continuation_row",
+        "table_header",
+        "new_business_row",
+    }:
         return None
     confidence = data["confidence"]
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
@@ -212,7 +231,7 @@ def _parse_response(
         or len(reason) > _MAX_REASON_LENGTH
     ):
         return None
-    merge = action == "merge"
+    merge = table_action == "merge_fragments" or row_action == "merge"
     return LLMJudgment(
         model=str(getattr(provider, "chat_model", provider.__class__.__name__)),
         decision=cast(
@@ -223,8 +242,8 @@ def _parse_response(
         reason=reason,
         mapping_id=f"{candidate.candidate_id}:mapping:0",
         roles={"continuation": continuation_role},
-        row_action="merge" if merge else "keep",
-        table_action="merge_fragments" if merge else "keep",
+        row_action=cast(Literal["merge", "keep"], row_action),
+        table_action=cast(Literal["merge_fragments", "keep"], table_action),
     )
 
 
@@ -244,7 +263,7 @@ def adjudicate_continuation(
     provider: BaseProvider,
     context: TableBoundaryContext | None = None,
 ) -> LLMJudgment | None:
-    """Request one strict candidate-bound judgment, retrying invalid output once."""
+    """Request exactly one strict candidate-bound judgment."""
     user_message = {
         "role": "user",
         "content": json.dumps(
@@ -262,23 +281,46 @@ def adjudicate_continuation(
         response = provider.chat(messages)
     except Exception:
         return None
-    judgment = _try_parse_response(response, candidate, provider)
-    if judgment is not None:
-        return judgment
+    return _try_parse_response(response, candidate, provider)
 
-    retry_messages = [
+
+def review_continuation(
+    candidate: ContinuationCandidate,
+    initial: LLMJudgment,
+    provider: BaseProvider,
+    context: TableBoundaryContext | None = None,
+) -> LLMJudgment | None:
+    """Review one accepted change once; invalid review fails closed."""
+    payload = _prompt_payload(candidate, context)
+    payload["initial_judgment"] = {
+        "continuation_role": initial.roles.get("continuation", "continuation_row"),
+        "row_action": initial.row_action,
+        "table_action": initial.table_action,
+        "confidence": initial.confidence,
+        "reason": initial.reason,
+    }
+    messages = [
         {
             "role": "system",
             "content": (
                 _SYSTEM_MESSAGE
-                + "\nThe previous response failed strict validation. Return a complete "
-                "replacement JSON object for the same fixed candidate slots."
+                + "\nReview the supplied initial_judgment against the original fixed "
+                "candidate. Return a complete independent replacement judgment. A "
+                "change will be applied only when both rounds agree."
             ),
         },
-        user_message,
+        {
+            "role": "user",
+            "content": json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        },
     ]
     try:
-        response = provider.chat(retry_messages)
+        response = provider.chat(messages)
     except Exception:
         return None
     return _try_parse_response(response, candidate, provider)
