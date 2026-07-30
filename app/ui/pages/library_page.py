@@ -249,13 +249,13 @@ class LibraryPage(QWidget):
         header.addStretch()
 
         depth_label = QLabel("思考深度")
-        depth_label.setStyleSheet(Theme.label_secondary())
+        depth_label.setStyleSheet(Theme.form_label())
         self._normalization_depth_label = depth_label
         header.addWidget(depth_label)
         depth_combo = QComboBox()
-        depth_combo.addItem("低（跳过规范化）", NormalizationDepth.OFF.value)
-        depth_combo.addItem("中（判断一次）", NormalizationDepth.STANDARD.value)
-        depth_combo.addItem("高（复核变更）", NormalizationDepth.REVIEW.value)
+        depth_combo.addItem("低", NormalizationDepth.OFF.value)
+        depth_combo.addItem("中", NormalizationDepth.STANDARD.value)
+        depth_combo.addItem("高", NormalizationDepth.REVIEW.value)
         depth_combo.setCurrentIndex(0)
         depth_combo.setToolTip(
             "低：不执行规范化，速度最快；中：每个候选判断一次；高：对变更再复核一次。"
@@ -317,7 +317,7 @@ class LibraryPage(QWidget):
         if hasattr(self, '_status'):
             self._status.setStyleSheet(Theme.label_secondary())
         if hasattr(self, '_normalization_depth_label'):
-            self._normalization_depth_label.setStyleSheet(Theme.label_secondary())
+            self._normalization_depth_label.setStyleSheet(Theme.form_label())
 
     def refresh(self) -> None:
         """Reload documents from DB."""
