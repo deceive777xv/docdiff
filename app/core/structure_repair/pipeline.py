@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
 import hashlib
 import json
+import os
 import re
 from typing import Iterable
 
@@ -28,7 +30,10 @@ from .models import (
 
 
 SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "post-parse-structure-v4"
+ALGORITHM_VERSION = "post-parse-structure-v5"
+CONTENT_CONSERVATION_DISABLE_ENV = (
+    "DOC_DIFF_AGENT_DISABLE_CONTENT_CONSERVATION"
+)
 
 _NUMBERED_TITLE_RE = re.compile(
     r"^\s*(?P<number>\d+(?:\.\d+)+)\s+(?P<title>\S.{0,100})\s*$"
@@ -1173,6 +1178,90 @@ def _content_is_conserved(
     )
 
 
+def _content_conservation_is_disabled() -> bool:
+    return os.environ.get(
+        CONTENT_CONSERVATION_DISABLE_ENV,
+        "",
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _run_checked_stage(
+    document: DocumentIR,
+    stage_name: str,
+    action: Callable[
+        [
+            DocumentIR,
+            list[StructureRepairOperation],
+            list[StructureRepairDecision],
+            list[RejectedStructureCandidate],
+        ],
+        None,
+    ],
+    operations: list[StructureRepairOperation],
+    decisions: list[StructureRepairDecision],
+    rejected: list[RejectedStructureCandidate],
+    warnings: list[str],
+    *,
+    enforce_content_conservation: bool,
+) -> DocumentIR:
+    candidate = deepcopy(document)
+    stage_operations: list[StructureRepairOperation] = []
+    stage_decisions: list[StructureRepairDecision] = []
+    stage_rejected: list[RejectedStructureCandidate] = []
+    action(
+        candidate,
+        stage_operations,
+        stage_decisions,
+        stage_rejected,
+    )
+    _rebuild_plain_text(candidate)
+    decisions.extend(stage_decisions)
+    rejected.extend(stage_rejected)
+
+    content_is_conserved = _content_is_conserved(
+        document,
+        candidate,
+        stage_operations,
+    )
+    if not content_is_conserved:
+        operation_rejection_reason = (
+            f"{stage_name} stage was discarded because its projected "
+            "content did not match its operations"
+            if enforce_content_conservation
+            else (
+                f"{stage_name} diagnostic output was retained, but this "
+                "operation was omitted because the projected content did "
+                "not match its operations"
+            )
+        )
+        rejected.extend(
+            RejectedStructureCandidate(
+                candidate_id=operation.operation_id,
+                code="content_conservation_failed",
+                reason=operation_rejection_reason,
+            )
+            for operation in stage_operations
+        )
+        if not stage_operations:
+            rejected.append(
+                RejectedStructureCandidate(
+                    candidate_id=f"stage:{stage_name}",
+                    code="content_conservation_failed",
+                    reason=(
+                        f"{stage_name} stage changed content without a matching "
+                        "operation"
+                    ),
+                )
+            )
+        warnings.append(f"content_conservation_failed:{stage_name}")
+        if enforce_content_conservation:
+            return document
+        return candidate
+
+    operations.extend(stage_operations)
+    return candidate
+
+
 def repair_document(
     document: DocumentIR,
     *,
@@ -1187,69 +1276,113 @@ def repair_document(
     decisions: list[StructureRepairDecision] = []
     rejected: list[RejectedStructureCandidate] = []
     warnings: list[str] = []
+    enforce_content_conservation = not _content_conservation_is_disabled()
+    if not enforce_content_conservation:
+        warnings.append("content_conservation_disabled")
 
-    _normalize_titles(repaired, operations)
-    _demote_generic_sections(repaired, operations)
-    _promote_numbered_paragraphs(repaired, operations)
-    _remove_noise(repaired, operations)
-    _adjudicate_page_boundary_noise(
-        repaired,
-        provider,
-        model,
-        operations,
-        decisions,
-        rejected,
-        review_changes=review_changes,
-    )
-    _adjudicate_paragraph_fragments(
-        repaired,
-        provider,
-        model,
-        operations,
-        decisions,
-        rejected,
-        review_changes=review_changes,
-    )
-    _adjudicate_unnumbered_sections(
-        repaired,
-        provider,
-        model,
-        operations,
-        decisions,
-        rejected,
-        review_changes=review_changes,
-    )
-    _rebuild_plain_text(repaired)
-
-    if not _content_is_conserved(document, repaired, operations):
-        fallback = deepcopy(document)
-        fallback_hash = _document_hash(fallback)
-        trace = StructureRepairTrace(
-            schema_version=SCHEMA_VERSION,
-            algorithm_version=ALGORITHM_VERSION,
-            doc_id=document.doc_id,
-            raw_hash=raw_hash,
-            normalized_hash=fallback_hash,
-            status="fallback",
-            operations=operations,
-            decisions=decisions,
-            rejected=rejected,
-            warnings=["content_conservation_failed"],
-        )
-        return StructureRepairResult(
-            document=fallback,
-            trace=trace,
-            status="fallback",
-            warnings=["content_conservation_failed"],
+    def run_stage(
+        stage_name: str,
+        action: Callable[
+            [
+                DocumentIR,
+                list[StructureRepairOperation],
+                list[StructureRepairDecision],
+                list[RejectedStructureCandidate],
+            ],
+            None,
+        ],
+    ) -> None:
+        nonlocal repaired
+        repaired = _run_checked_stage(
+            repaired,
+            stage_name,
+            action,
+            operations,
+            decisions,
+            rejected,
+            warnings,
+            enforce_content_conservation=enforce_content_conservation,
         )
 
-    status = "repaired" if operations else "unchanged"
+    run_stage(
+        "normalize_titles",
+        lambda candidate, stage_operations, _decisions, _rejected: (
+            _normalize_titles(candidate, stage_operations)
+        ),
+    )
+    run_stage(
+        "demote_generic_sections",
+        lambda candidate, stage_operations, _decisions, _rejected: (
+            _demote_generic_sections(candidate, stage_operations)
+        ),
+    )
+    run_stage(
+        "promote_numbered_paragraphs",
+        lambda candidate, stage_operations, _decisions, _rejected: (
+            _promote_numbered_paragraphs(candidate, stage_operations)
+        ),
+    )
+    run_stage(
+        "remove_noise",
+        lambda candidate, stage_operations, _decisions, _rejected: (
+            _remove_noise(candidate, stage_operations)
+        ),
+    )
+    run_stage(
+        "page_boundary_noise",
+        lambda candidate, stage_operations, stage_decisions, stage_rejected: (
+            _adjudicate_page_boundary_noise(
+                candidate,
+                provider,
+                model,
+                stage_operations,
+                stage_decisions,
+                stage_rejected,
+                review_changes=review_changes,
+            )
+        ),
+    )
+    run_stage(
+        "paragraph_fragments",
+        lambda candidate, stage_operations, stage_decisions, stage_rejected: (
+            _adjudicate_paragraph_fragments(
+                candidate,
+                provider,
+                model,
+                stage_operations,
+                stage_decisions,
+                stage_rejected,
+                review_changes=review_changes,
+            )
+        ),
+    )
+    run_stage(
+        "unnumbered_sections",
+        lambda candidate, stage_operations, stage_decisions, stage_rejected: (
+            _adjudicate_unnumbered_sections(
+                candidate,
+                provider,
+                model,
+                stage_operations,
+                stage_decisions,
+                stage_rejected,
+                review_changes=review_changes,
+            )
+        ),
+    )
+
+    normalized_hash = _document_hash(repaired)
+    status = (
+        "repaired"
+        if operations or normalized_hash != raw_hash
+        else "unchanged"
+    )
     trace = StructureRepairTrace(
         schema_version=SCHEMA_VERSION,
         algorithm_version=ALGORITHM_VERSION,
         doc_id=document.doc_id,
         raw_hash=raw_hash,
-        normalized_hash=_document_hash(repaired),
+        normalized_hash=normalized_hash,
         status=status,
         operations=operations,
         decisions=decisions,

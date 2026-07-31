@@ -30,7 +30,7 @@ from .models import (
 
 
 SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "unified-document-normalization-v4"
+ALGORITHM_VERSION = "unified-document-normalization-v5"
 def _empty_document_table_trace(document: DocumentIR) -> ReconstructionTrace:
     return ReconstructionTrace(
         schema_version=TABLE_SCHEMA_VERSION,

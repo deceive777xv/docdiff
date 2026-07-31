@@ -90,6 +90,44 @@ def test_prepare_import_ir_persists_skipped_low_depth_artifacts(tmp_path):
     assert trace["normalization_depth"] == "off"
 
 
+def test_prepare_import_ir_persists_diagnostic_output_when_conservation_disabled(
+    tmp_path,
+    monkeypatch,
+):
+    from app.core.structure_repair import pipeline
+    from app.core.structure_repair.storage import prepare_import_ir
+
+    def corrupt(document, _operations):
+        document.sections[0].paragraphs.pop()
+
+    monkeypatch.setattr(pipeline, "_remove_noise", corrupt)
+    monkeypatch.setenv(pipeline.CONTENT_CONSERVATION_DISABLE_ENV, "1")
+    raw_document = _raw_document()
+    raw_document.sections[0].title = "1.1 测试"
+
+    artifacts = prepare_import_ir(
+        tmp_path,
+        raw_document,
+        depth=NormalizationDepth.STANDARD,
+    )
+
+    normalized = json.loads(artifacts.normalized_path.read_text(encoding="utf-8"))
+    structure_trace = json.loads(artifacts.trace_path.read_text(encoding="utf-8"))
+    normalization_trace = json.loads(
+        artifacts.normalization_trace_path.read_text(encoding="utf-8")
+    )
+
+    assert normalized["sections"][0]["paragraphs"] == []
+    assert structure_trace["operations"] == []
+    assert structure_trace["status"] == "repaired"
+    assert normalization_trace["status"] == "repaired"
+    assert structure_trace["warnings"] == [
+        "content_conservation_disabled",
+        "content_conservation_failed:remove_noise",
+    ]
+    assert normalization_trace["warnings"] == structure_trace["warnings"]
+
+
 def test_prepare_import_ir_falls_back_to_raw_when_repair_raises(
     tmp_path,
     monkeypatch,

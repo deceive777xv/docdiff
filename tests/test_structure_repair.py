@@ -351,15 +351,16 @@ def test_repair_is_idempotent_and_preserves_raw_document():
     assert second.status == "unchanged"
 
 
-def test_unexplained_content_loss_falls_back_to_raw(monkeypatch):
+def test_unexplained_content_loss_rejects_only_the_unsafe_stage(monkeypatch):
     from app.core.structure_repair import pipeline
     from app.core.document_ir_codec import document_ir_to_dict
+    from app.core.structure_repair.models import StructureRepairOperation
 
     raw = _document(
         [
             Section(
                 "s1",
-                "1 范围",
+                "**1 范围**",
                 1,
                 [
                     _paragraph("p1", "必须保留的正文。", 1),
@@ -369,14 +370,96 @@ def test_unexplained_content_loss_falls_back_to_raw(monkeypatch):
         ]
     )
 
-    def corrupt(document, _operations):
+    def corrupt(document, operations):
         document.sections[0].paragraphs.pop()
+        operations.append(
+            StructureRepairOperation(
+                operation_id="bad-remove",
+                type="remove_noise",
+                source_ids=["p1"],
+                reason="incorrectly classified as noise",
+            )
+        )
 
     monkeypatch.setattr(pipeline, "_remove_noise", corrupt)
 
     result = pipeline.repair_document(raw)
 
-    assert result.status == "fallback"
-    assert document_ir_to_dict(result.document) == document_ir_to_dict(raw)
-    assert result.trace.status == "fallback"
-    assert result.trace.warnings == ["content_conservation_failed"]
+    assert result.status == "repaired"
+    assert result.document.sections[0].title == "1 范围"
+    assert document_ir_to_dict(result.document) != document_ir_to_dict(raw)
+    assert [
+        paragraph.paragraph_id
+        for paragraph in result.document.sections[0].paragraphs
+    ] == [
+        "p1",
+        "p2",
+    ]
+    assert [operation.type for operation in result.trace.operations] == [
+        "normalize_title"
+    ]
+    assert result.trace.status == "repaired"
+    assert result.trace.warnings == ["content_conservation_failed:remove_noise"]
+    assert any(
+        candidate.candidate_id == "bad-remove"
+        and candidate.code == "content_conservation_failed"
+        and "stage was discarded" in candidate.reason
+        for candidate in result.trace.rejected
+    )
+
+
+def test_content_conservation_can_be_disabled_for_diagnostics(
+    monkeypatch,
+):
+    from app.core.structure_repair import pipeline
+    from app.core.structure_repair.models import StructureRepairOperation
+
+    raw = _document(
+        [
+            Section(
+                "s1",
+                "**1 范围**",
+                1,
+                [
+                    _paragraph("p1", "必须保留的正文。", 1),
+                    _paragraph("p2", "另一段正文。", 1),
+                ],
+            )
+        ]
+    )
+
+    def corrupt(document, operations):
+        document.sections[0].paragraphs.pop()
+        operations.append(
+            StructureRepairOperation(
+                operation_id="bad-remove",
+                type="remove_noise",
+                source_ids=["p1"],
+                reason="incorrectly classified as noise",
+            )
+        )
+
+    monkeypatch.setattr(pipeline, "_remove_noise", corrupt)
+    monkeypatch.setenv(pipeline.CONTENT_CONSERVATION_DISABLE_ENV, "1")
+
+    result = pipeline.repair_document(raw)
+
+    assert [
+        paragraph.paragraph_id
+        for paragraph in result.document.sections[0].paragraphs
+    ] == [
+        "p1"
+    ]
+    assert [operation.type for operation in result.trace.operations] == [
+        "normalize_title"
+    ]
+    assert any(
+        candidate.candidate_id == "bad-remove"
+        and candidate.code == "content_conservation_failed"
+        and "diagnostic output was retained" in candidate.reason
+        for candidate in result.trace.rejected
+    )
+    assert result.trace.warnings == [
+        "content_conservation_disabled",
+        "content_conservation_failed:remove_noise",
+    ]
