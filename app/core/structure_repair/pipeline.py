@@ -30,7 +30,7 @@ from .models import (
 
 
 SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "post-parse-structure-v5"
+ALGORITHM_VERSION = "post-parse-structure-v6"
 CONTENT_CONSERVATION_DISABLE_ENV = (
     "DOC_DIFF_AGENT_DISABLE_CONTENT_CONSERVATION"
 )
@@ -1099,24 +1099,40 @@ def _content_counter(document: DocumentIR) -> Counter[str]:
     return content
 
 
-def _source_paragraphs(document: DocumentIR) -> dict[str, Paragraph]:
-    return {
-        paragraph.paragraph_id: paragraph
-        for section in document.sections
-        for paragraph in section.paragraphs
-    }
-
-
 def _allowed_removed_content(
     raw: DocumentIR,
     operations: list[StructureRepairOperation],
 ) -> Counter[str]:
-    paragraphs = _source_paragraphs(raw)
+    paragraphs: dict[str, Paragraph] = {}
+    paragraph_sections: dict[str, str] = {}
+    section_paragraph_ids: dict[str, list[str]] = {}
+    for section in raw.sections:
+        if section.section_id in section_paragraph_ids:
+            raise ValueError("content replay contains duplicate section ids")
+        section_paragraph_ids[section.section_id] = []
+        for paragraph in section.paragraphs:
+            if paragraph.paragraph_id in paragraphs:
+                raise ValueError("content replay contains duplicate paragraph ids")
+            paragraphs[paragraph.paragraph_id] = deepcopy(paragraph)
+            paragraph_sections[paragraph.paragraph_id] = section.section_id
+            section_paragraph_ids[section.section_id].append(
+                paragraph.paragraph_id
+            )
+    known_paragraph_ids = set(paragraphs)
+
+    def remove_paragraph(paragraph_id: str) -> Paragraph | None:
+        paragraph = paragraphs.pop(paragraph_id, None)
+        section_id = paragraph_sections.pop(paragraph_id, None)
+        if paragraph is None or section_id is None:
+            return None
+        section_paragraph_ids[section_id].remove(paragraph_id)
+        return paragraph
+
     removed: Counter[str] = Counter()
     for operation in operations:
         if operation.type == "remove_noise":
             for source_id in operation.source_ids:
-                paragraph = paragraphs.get(source_id)
+                paragraph = remove_paragraph(source_id)
                 if paragraph is None:
                     raise ValueError("noise operation references an unknown paragraph")
                 removed.update(_characters(paragraph.text))
@@ -1134,16 +1150,70 @@ def _allowed_removed_content(
                 if not 0 <= sentence_index < len(paragraph.sentences):
                     raise ValueError("row noise operation references an unknown sentence")
                 removed.update(_characters(paragraph.sentences[sentence_index].text))
-        elif operation.type == "merge_paragraphs" and operation.removed_text:
+            sentence_indexes = set(operation.source_sentence_indexes)
+            paragraph.sentences = [
+                sentence
+                for sentence_index, sentence in enumerate(paragraph.sentences)
+                if sentence_index not in sentence_indexes
+            ]
+            paragraph.text = "\n".join(
+                sentence.text for sentence in paragraph.sentences
+            )
+            if not paragraph.sentences:
+                remove_paragraph(paragraph.paragraph_id)
+        elif operation.type == "merge_paragraphs":
             if len(operation.source_ids) != 2:
                 raise ValueError("paragraph merge must reference exactly two paragraphs")
-            following = paragraphs.get(operation.source_ids[1])
-            if following is None:
+            previous_id, following_id = operation.source_ids
+            if previous_id == following_id:
+                raise ValueError("paragraph merge sources must be distinct")
+            previous = paragraphs.get(previous_id)
+            following = paragraphs.get(following_id)
+            if previous is None or following is None:
                 raise ValueError("paragraph merge references an unknown paragraph")
-            marker, _ = _split_join_list_marker(following.text.lstrip())
+            previous_section_id = paragraph_sections[previous_id]
+            following_section_id = paragraph_sections[following_id]
+            if (
+                previous_section_id != following_section_id
+                or operation.target_section_id != previous_section_id
+            ):
+                raise ValueError("paragraph merge crosses its target section")
+            paragraph_order = section_paragraph_ids[previous_section_id]
+            previous_index = paragraph_order.index(previous_id)
+            if (
+                previous_index + 1 >= len(paragraph_order)
+                or paragraph_order[previous_index + 1] != following_id
+            ):
+                raise ValueError("paragraph merge sources must be adjacent and ordered")
+            expected_output_id = _stable_id(
+                "paragraph",
+                operation.source_ids,
+            )
+            if operation.output_id != expected_output_id:
+                raise ValueError("paragraph merge output id is invalid")
+            if operation.output_id in known_paragraph_ids:
+                raise ValueError("paragraph merge output paragraph already exists")
+            merged_text, marker = _join_boundary_text(
+                previous.text,
+                following.text,
+            )
             if marker != operation.removed_text:
                 raise ValueError("paragraph merge removed marker does not match source")
             removed.update(_characters(marker))
+            for source_id in operation.source_ids:
+                paragraphs.pop(source_id)
+                paragraph_sections.pop(source_id)
+            paragraph_order[previous_index : previous_index + 2] = [
+                operation.output_id
+            ]
+            paragraphs[operation.output_id] = Paragraph(
+                paragraph_id=operation.output_id,
+                text=merged_text,
+                sentences=[],
+                page_no=previous.page_no,
+            )
+            paragraph_sections[operation.output_id] = previous_section_id
+            known_paragraph_ids.add(operation.output_id)
     return removed
 
 

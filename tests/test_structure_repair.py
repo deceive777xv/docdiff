@@ -463,3 +463,71 @@ def test_content_conservation_can_be_disabled_for_diagnostics(
         "content_conservation_disabled",
         "content_conservation_failed:remove_noise",
     ]
+
+
+def test_content_conservation_rejects_merge_output_that_reuses_a_source_id(
+    monkeypatch,
+):
+    from app.core.structure_repair import pipeline
+    from app.core.structure_repair.models import StructureRepairOperation
+
+    raw = _document(
+        [
+            Section(
+                "s1",
+                "1 范围",
+                1,
+                [
+                    _paragraph("p1", "前段内容并", 1),
+                    _paragraph("p2", "后段内容。", 1),
+                ],
+            )
+        ]
+    )
+
+    def corrupt(
+        document,
+        _provider,
+        _model,
+        operations,
+        _decisions,
+        _rejected,
+        *,
+        review_changes,
+    ):
+        del review_changes
+        document.sections[0].paragraphs = [
+            _paragraph("p1", "前段内容并后段内容。", 1)
+        ]
+        operations.append(
+            StructureRepairOperation(
+                operation_id="invalid-merge-output",
+                type="merge_paragraphs",
+                source_ids=["p1", "p2"],
+                output_id="p1",
+                target_section_id="s1",
+                reason="invalid replay fixture",
+                actor="llm",
+                confidence=0.99,
+            )
+        )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_adjudicate_paragraph_fragments",
+        corrupt,
+    )
+
+    result = pipeline.repair_document(raw)
+
+    assert [
+        paragraph.paragraph_id
+        for paragraph in result.document.sections[0].paragraphs
+    ] == [
+        "p1",
+        "p2",
+    ]
+    assert result.trace.operations == []
+    assert result.trace.warnings == [
+        "content_conservation_failed:paragraph_fragments"
+    ]

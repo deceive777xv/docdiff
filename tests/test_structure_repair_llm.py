@@ -1073,6 +1073,74 @@ def test_llm_paragraph_merge_rechecks_the_new_fragment_across_three_pages():
     ) == 2
 
 
+def test_content_conservation_replays_generated_paragraphs_in_chained_merges():
+    from app.core.structure_repair import repair_document
+
+    class MergeProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.paragraph_calls = 0
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "items" in payload:
+                return _page_noise_response(payload, lambda _text: "keep")
+            actions = ["keep", "merge_paragraphs", "merge_paragraphs"]
+            action = actions[self.paragraph_calls]
+            self.paragraph_calls += 1
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": action,
+                    "confidence": 0.98,
+                    "reason": "fixed chained-merge fixture",
+                }
+            )
+
+    first = (
+        "前段内容用于描述复杂控制条件和连续执行过程，在多个触发信号、"
+        "状态变化以及异常处理条件之间仍然保持语义连续，当前句子尚未结束并"
+    )
+    middle = "- 中间片段继续描述系统动作、域控判断和执行条件并"
+    final = "末段完成整个句子。"
+    document = DocumentIR(
+        "chained-merge-generated-id",
+        "Chained merge",
+        "chained-merge-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [
+                    Paragraph("p1", first, [Sentence(first)], 1),
+                    Paragraph("p2", middle, [Sentence(middle)], 2),
+                    Paragraph("p3", final, [Sentence(final)], 3),
+                ],
+            )
+        ],
+        "\n".join([first, middle, final]),
+    )
+
+    result = repair_document(document, provider=MergeProvider())
+
+    assert [paragraph.text for paragraph in result.document.sections[0].paragraphs] == [
+        first + middle.removeprefix("- ") + final
+    ]
+    merge_operations = [
+        operation
+        for operation in result.trace.operations
+        if operation.type == "merge_paragraphs"
+    ]
+    assert len(merge_operations) == 2
+    assert merge_operations[1].source_ids[1] == merge_operations[0].output_id
+    assert merge_operations[1].removed_text == "- "
+    assert "content_conservation_failed:paragraph_fragments" not in (
+        result.trace.warnings
+    )
+
+
 def test_paragraph_merge_preserves_non_boundary_sentences_and_drops_join_marker():
     from app.core.structure_repair import repair_document
 
