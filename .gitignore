@@ -14,11 +14,15 @@ venv/
 doc/
 .pytest_cache/
 .claude/
+.agents/
+.codex/
 Doc-Diff-Agent开发计划书.md
 model/
 app.log
 releases/
 .codegraph/
 .tmp/
+.test-tmp*/
+torchinductor_*/
 .worktrees/
 .codex-remote-attachments/
