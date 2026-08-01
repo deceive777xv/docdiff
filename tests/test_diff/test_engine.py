@@ -364,14 +364,22 @@ class TestCompare:
             policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
         )
 
-        assert len(result.items) == 1
-        item = result.items[0]
+        assert len(result.items) == 2
+        item = next(
+            candidate
+            for candidate in result.items
+            if "赵六" in candidate.baseline_text and "赵六" in candidate.target_text
+        )
         assert item.diff_type == "实质修改"
         assert item.risk_level == "high"
         assert "赵六" in item.baseline_text and "赵六" in item.target_text
+        assert any(
+            candidate.diff_type == "新增" and "序号" in candidate.target_text
+            for candidate in result.items
+        )
 
-    def test_compare_delegates_single_sided_table_header_to_llm(self):
-        """When LLM classification is available, matcher should not suppress headers first."""
+    def test_compare_does_not_delegate_single_sided_table_header_to_llm(self):
+        """Repeated-header cleanup belongs exclusively to import normalization."""
         from app.core.diff import compare
 
         class HeaderProvider:
@@ -380,10 +388,7 @@ class TestCompare:
 
             def chat(self, messages: list[dict], **kwargs) -> str:
                 self.prompts.append(messages[-1]["content"])
-                return (
-                    '{"should_report": false, "diff_type": "格式变化", '
-                    '"risk_level": "none", "explanation": "仅表格列名"}'
-                )
+                raise AssertionError("single-sided headers must not call compare LLM")
 
         baseline = _make_table_ir([
             "| 1 | Alpha |",
@@ -402,9 +407,9 @@ class TestCompare:
             provider=provider,  # type: ignore[arg-type]
         )
 
-        assert result.items == []
-        assert len(provider.prompts) == 1
-        assert "表头" in provider.prompts[0]
+        assert len(result.items) == 1
+        assert result.items[0].diff_type == "新增"
+        assert provider.prompts == []
 
     def test_compare_markdown_table_with_insert_and_reorder_keeps_business_rows_matched(self):
         """Real markdown table syntax should not compare separators or shifted rows."""

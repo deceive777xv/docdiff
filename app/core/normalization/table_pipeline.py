@@ -44,6 +44,7 @@ from app.core.normalization.table_boundary_context import (
     locate_table_boundary_context,
 )
 from app.core.model.base_provider import BaseProvider
+from app.core.llm_call_budget import LLMCallBudget
 from app.core.types import DocumentIR, Paragraph, Section
 
 
@@ -496,8 +497,15 @@ def _resolve_assessment(
             final_action="keep_separate",
             merge_rows=False,
             merge_fragments=False,
+            drop_repeated_header=False,
         ), None, None, None
-    judgment = adjudicate_continuation(candidate, provider, context)
+    call_budget = LLMCallBudget()
+    judgment = adjudicate_continuation(
+        candidate,
+        provider,
+        context,
+        call_budget,
+    )
     initial_judgment = judgment
     review_judgment: LLMJudgment | None = None
     if (
@@ -508,7 +516,13 @@ def _resolve_assessment(
             or judgment.table_action == "merge_fragments"
         )
     ):
-        review = review_continuation(candidate, judgment, provider, context)
+        review = review_continuation(
+            candidate,
+            judgment,
+            provider,
+            context,
+            call_budget,
+        )
         review_judgment = review
         if review is None:
             judgment = replace(
@@ -559,6 +573,23 @@ def _resolve_assessment(
         and judgment.row_action == "merge"
         and not row_vetoes.intersection(candidate.vetoes)
     )
+    repeated_header_confirmed = bool(
+        judgment is not None
+        and judgment.roles.get("continuation") == "table_header"
+        and (
+            not review_changes
+            or (
+                review_judgment is not None
+                and review_judgment.roles.get("continuation") == "table_header"
+            )
+        )
+    )
+    drop_repeated_header = bool(
+        merge_fragments
+        and repeated_header_confirmed
+        and candidate.retained_header_row is not None
+        and candidate.repeated_header_rows
+    )
     if judgment is not None and judgment.row_action == "merge" and not merge_rows:
         judgment = replace(judgment, row_action="keep")
     final_action = (
@@ -569,6 +600,7 @@ def _resolve_assessment(
         final_action=final_action,
         merge_rows=merge_rows,
         merge_fragments=merge_fragments,
+        drop_repeated_header=drop_repeated_header,
     ), judgment, initial_judgment, review_judgment
 
 
@@ -588,6 +620,7 @@ def _downgrade_with_conflict(
         final_action="keep_separate",
         merge_rows=False,
         merge_fragments=False,
+        drop_repeated_header=False,
     )
 
 
@@ -596,6 +629,8 @@ def _validate_resolved_assessments(
     judgments: Mapping[tuple[str, str], LLMJudgment | None],
     boundary_rows: Mapping[str, set[SourceRowRef]],
     boundary_paragraphs: Mapping[str, set[str]],
+    baseline_ir: DocumentIR,
+    target_ir: DocumentIR,
 ) -> list[CandidateAssessment]:
     def judgment_confidence(choice: CandidateAssessment) -> float:
         judgment = judgments.get(
@@ -676,10 +711,15 @@ def _validate_resolved_assessments(
             )
             continue
         try:
-            build_reconstruction_operations(
+            tentative_operations = build_reconstruction_operations(
                 [*validated, assessment],
                 boundary_rows,
                 boundary_paragraphs,
+            )
+            apply_reconstruction_operations(
+                baseline_ir,
+                target_ir,
+                tentative_operations,
             )
         except ValueError:
             validated.append(
@@ -862,6 +902,8 @@ def reconstruct_table_pairs(
         judgments,
         boundary_rows,
         boundary_paragraphs,
+        baseline_ir,
+        target_ir,
     )
     operations = build_reconstruction_operations(
         resolved,
@@ -966,6 +1008,8 @@ def reconstruct_document_tables(
         judgments,
         boundary_rows,
         boundary_paragraphs,
+        document,
+        document,
     )
     operations = build_reconstruction_operations(
         resolved,

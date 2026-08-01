@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.llm_call_budget import LLMCallBudget
 from app.core.types import Paragraph, Section
 
 
@@ -220,11 +221,35 @@ def _parse_page_noise_batch_response(
     return parsed, ""
 
 
+def _chat_and_parse_with_validation_retry(
+    provider: object,
+    messages: list[dict[str, str]],
+    model: str,
+    parse: Any,
+    call_budget: LLMCallBudget | None = None,
+) -> tuple[Any | None, str]:
+    budget = call_budget or LLMCallBudget()
+    for attempt in range(2):
+        if not budget.consume():
+            return None, "llm_call_budget_exhausted"
+        try:
+            raw = _chat(provider, messages, model)
+        except Exception:
+            return None, "llm_error"
+        parsed, failure_code = parse(raw)
+        if parsed is not None or failure_code == "low_confidence":
+            return parsed, failure_code
+        if attempt == 1 or budget.remaining <= 0:
+            return None, failure_code
+    return None, "invalid_response"
+
+
 def adjudicate_page_noise_batch(
     boundary_id: str,
     items: list[dict[str, str]],
     provider: object,
     model: str = "",
+    call_budget: LLMCallBudget | None = None,
 ) -> tuple[list[PageNoiseLabel] | None, str]:
     """Label one fixed page-boundary batch with strict, fail-closed validation."""
     payload: dict[str, object] = {
@@ -251,11 +276,13 @@ def adjudicate_page_noise_batch(
             ),
         },
     ]
-    try:
-        raw = _chat(provider, messages, model)
-    except Exception:
-        return None, "llm_error"
-    return _parse_page_noise_batch_response(raw, boundary_id, items)
+    return _chat_and_parse_with_validation_retry(
+        provider,
+        messages,
+        model,
+        lambda raw: _parse_page_noise_batch_response(raw, boundary_id, items),
+        call_budget,
+    )
 
 
 def review_page_noise_batch(
@@ -264,8 +291,9 @@ def review_page_noise_batch(
     initial_labels: list[PageNoiseLabel],
     provider: object,
     model: str = "",
+    call_budget: LLMCallBudget | None = None,
 ) -> tuple[list[PageNoiseLabel] | None, str]:
-    """Review one fixed batch once; malformed output is never retried."""
+    """Review one fixed batch within the caller's shared LLM call budget."""
     payload: dict[str, object] = {
         "boundary_id": boundary_id,
         "items": [
@@ -301,15 +329,21 @@ def review_page_noise_batch(
             ),
         },
     ]
-    try:
-        raw = _chat(provider, messages, model)
-    except Exception:
-        return None, "llm_error"
     review_items = [
         {"id": item["id"], "position": item["position"], "text": item["text"]}
         for item in items
     ]
-    return _parse_page_noise_batch_response(raw, boundary_id, review_items)
+    return _chat_and_parse_with_validation_retry(
+        provider,
+        messages,
+        model,
+        lambda raw: _parse_page_noise_batch_response(
+            raw,
+            boundary_id,
+            review_items,
+        ),
+        call_budget,
+    )
 
 
 def adjudicate_section_parent(
@@ -317,6 +351,7 @@ def adjudicate_section_parent(
     previous: Section,
     provider: object,
     model: str = "",
+    call_budget: LLMCallBudget | None = None,
 ) -> tuple[SectionMoveJudgment | None, str]:
     """Return a validated move judgment and a stable rejection code."""
     candidate_id = f"section:{section.section_id}"
@@ -361,36 +396,47 @@ def adjudicate_section_parent(
             ),
         },
     ]
-    try:
-        raw = _chat(provider, messages, model)
-        data: Any = json.loads(raw)
-    except Exception:
-        return None, "llm_error"
-    if not isinstance(data, dict) or set(data) != _SECTION_RESPONSE_FIELDS:
-        return None, "invalid_response"
-    if (
-        data["candidate_id"] != candidate_id
-        or data["action"] not in _ALLOWED_ACTIONS
-        or data["source_ids"] != [section.section_id]
-        or data["target_section_id"] != previous.section_id
-        or not isinstance(data["reason"], str)
-        or not data["reason"].strip()
-    ):
-        return None, "invalid_response"
-    confidence = data["confidence"]
-    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        return None, "invalid_response"
-    if not 0.0 <= float(confidence) <= 1.0:
-        return None, "invalid_response"
-    if float(confidence) < _MIN_CONFIDENCE:
-        return None, "low_confidence"
-    return (
-        SectionMoveJudgment(
-            action=str(data["action"]),
-            confidence=float(confidence),
-            reason=str(data["reason"]),
-        ),
-        "",
+    def parse(raw: str) -> tuple[SectionMoveJudgment | None, str]:
+        try:
+            data: Any = json.loads(
+                raw,
+                object_pairs_hook=_reject_duplicate_members,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None, "invalid_json"
+        if not isinstance(data, dict) or set(data) != _SECTION_RESPONSE_FIELDS:
+            return None, "invalid_response"
+        if (
+            data["candidate_id"] != candidate_id
+            or data["action"] not in _ALLOWED_ACTIONS
+            or data["source_ids"] != [section.section_id]
+            or data["target_section_id"] != previous.section_id
+            or not isinstance(data["reason"], str)
+            or not data["reason"].strip()
+        ):
+            return None, "invalid_response"
+        confidence = data["confidence"]
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            return None, "invalid_response"
+        if not 0.0 <= float(confidence) <= 1.0:
+            return None, "invalid_response"
+        if float(confidence) < _MIN_CONFIDENCE:
+            return None, "low_confidence"
+        return (
+            SectionMoveJudgment(
+                action=str(data["action"]),
+                confidence=float(confidence),
+                reason=str(data["reason"]),
+            ),
+            "",
+        )
+
+    return _chat_and_parse_with_validation_retry(
+        provider,
+        messages,
+        model,
+        parse,
+        call_budget,
     )
 
 
@@ -404,6 +450,7 @@ def adjudicate_paragraph_merge(
     rule_evidence: tuple[str, ...] = (),
     document_title: str = "",
     section_path: tuple[str, ...] = (),
+    call_budget: LLMCallBudget | None = None,
 ) -> tuple[ParagraphMergeJudgment | None, str]:
     """Return a validated merge judgment for two existing paragraph IDs."""
     candidate_id = f"paragraphs:{previous.paragraph_id}:{following.paragraph_id}"
@@ -500,8 +547,10 @@ def adjudicate_paragraph_merge(
             "",
         )
 
-    try:
-        raw = _chat(provider, messages, model)
-    except Exception:
-        return None, "llm_error"
-    return parse(raw)
+    return _chat_and_parse_with_validation_retry(
+        provider,
+        messages,
+        model,
+        parse,
+        call_budget,
+    )

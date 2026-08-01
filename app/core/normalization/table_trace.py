@@ -12,8 +12,8 @@ from typing import Literal, cast
 from app.core.types import DocumentIR
 
 
-SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "cross-page-table-v3"
+SCHEMA_VERSION = 3
+ALGORITHM_VERSION = "cross-page-table-v4"
 _LEGACY_ALGORITHM_VERSION = "cross-page-table-v1"
 
 _SIDES = {"baseline", "target"}
@@ -23,6 +23,7 @@ _OPERATION_TYPES = {
     "project_columns",
     "drop_boundary_rows",
     "drop_boundary_paragraphs",
+    "drop_repeated_table_header",
     "merge_rows",
     "merge_fragments",
 }
@@ -80,6 +81,7 @@ class ReconstructionOperation:
         "project_columns",
         "drop_boundary_rows",
         "drop_boundary_paragraphs",
+        "drop_repeated_table_header",
         "merge_rows",
         "merge_fragments",
     ]
@@ -259,7 +261,7 @@ def _parse_operation(value: object, label: str) -> ReconstructionOperation:
     return ReconstructionOperation(
         operation_id=_require_string(data.get("operation_id"), f"{label}.operation_id"),
         side=cast(Literal["baseline", "target"], _require_enum(data.get("side"), f"{label}.side", _SIDES)),
-        type=cast(Literal["project_columns", "drop_boundary_rows", "drop_boundary_paragraphs", "merge_rows", "merge_fragments"], _require_enum(data.get("type"), f"{label}.type", _OPERATION_TYPES)),
+        type=cast(Literal["project_columns", "drop_boundary_rows", "drop_boundary_paragraphs", "drop_repeated_table_header", "merge_rows", "merge_fragments"], _require_enum(data.get("type"), f"{label}.type", _OPERATION_TYPES)),
         source_rows=_parse_source_rows(data.get("source_rows", []), f"{label}.source_rows"),
         source_paragraph_ids=_parse_string_list(data.get("source_paragraph_ids", []), f"{label}.source_paragraph_ids"),
         column_mapping=_parse_column_mapping(data.get("column_mapping", {}), f"{label}.column_mapping"),

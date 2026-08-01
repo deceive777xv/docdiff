@@ -279,8 +279,8 @@ def test_llm_string_should_report_false_does_not_suppress_matched_paragraph():
     assert len(result.items) == 1
 
 
-def test_llm_can_suppress_single_sided_table_header():
-    """Unmatched table headers can be delegated to LLM before reporting."""
+def test_single_sided_table_header_is_reported_without_special_llm_fallback():
+    """Import normalization, not compare classification, owns repeated headers."""
     from app.core.diff.diff_classifier import classify
 
     class Provider:
@@ -289,10 +289,7 @@ def test_llm_can_suppress_single_sided_table_header():
 
         def chat(self, messages):
             self.prompts.append(messages[-1]["content"])
-            return (
-                '{"should_report": "false", "diff_type": "格式变化", '
-                '"risk_level": "none", "explanation": "仅表格列名"}'
-            )
+            raise AssertionError("single-sided additions must not call the classifier")
 
     provider = Provider()
     t_para = make_para("| 序号 | 姓名 | 部门 |")
@@ -300,7 +297,6 @@ def test_llm_can_suppress_single_sided_table_header():
         baseline_para=None,
         target_para=t_para,
         similarity=0.0,
-        target_table_header=True,
     )
 
     result = classify(
@@ -312,9 +308,9 @@ def test_llm_can_suppress_single_sided_table_header():
         target_version_id="t",
     )
 
-    assert result.items == []
-    assert len(provider.prompts) == 1
-    assert "表头" in provider.prompts[0]
+    assert len(result.items) == 1
+    assert result.items[0].diff_type == "新增"
+    assert provider.prompts == []
 
 
 def test_llm_none_risk_is_not_strengthened_by_numeric_metadata_changes():

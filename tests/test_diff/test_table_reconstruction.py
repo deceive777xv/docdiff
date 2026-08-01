@@ -705,7 +705,7 @@ def test_candidate_includes_first_retained_right_row_even_when_inferred_as_heade
         left, right, mapping, set(), (), "baseline"
     )
 
-    assert candidates
+    assert len(candidates) == 1
     assert candidates[0].continuation_row.source == right.rows[0].source
     assert "new_key_value" in candidates[0].vetoes
     assert candidates[0].next_full_row == right.rows[1]
@@ -942,12 +942,11 @@ def test_sparse_header_role_row_remains_a_continuation_after_repeated_page_metad
     )
 
     candidates = generate_continuation_candidates(
-        left, right, mapping, set(), (peer,), "baseline"
+        left, right, mapping, {right.rows[0].source}, (peer,), "baseline"
     )
 
     assert [candidate.continuation_row.source for candidate in candidates] == [
         right.rows[1].source,
-        right.rows[2].source,
     ]
 
 
@@ -2098,3 +2097,178 @@ def test_operation_builder_is_stable_and_uses_transformation_precedence():
     assert all(operation.operation_id for operation in first)
     assert first[6].generated_row_id
     assert first[7].generated_paragraph_id
+
+
+def test_accepted_repeated_header_merge_keeps_only_the_first_header():
+    section_id = "repeated-header-section"
+
+    def table_row(text: str, paragraph_id: str, index: int):
+        row = split_markdown_table_row(
+            text,
+            SourceRowRef(section_id, paragraph_id, index),
+        )
+        assert row is not None
+        return row
+
+    left_header = table_row("| 编号 | 名称 |", "left-table", 0)
+    left_separator = table_row("| --- | --- |", "left-table", 1)
+    left_body = table_row("| 1 | Alpha |", "left-table", 2)
+    repeated_header = table_row("| 编号 | 名称 |", "right-table", 0)
+    repeated_separator = table_row("| --- | --- |", "right-table", 1)
+    right_body = table_row("| 2 | Beta |", "right-table", 2)
+    mapping = ColumnMapping((0, 1), {0: 0, 1: 1}, 1.0)
+    candidate = ContinuationCandidate(
+        candidate_id="repeated-header-decision",
+        side="baseline",
+        previous_row=left_body,
+        continuation_row=repeated_header,
+        next_full_row=right_body,
+        mapping=mapping,
+        previous_mapping=mapping,
+        previous_fragment_rows=(left_body,),
+        continuation_fragment_rows=(repeated_header, right_body),
+        evidence=("boundary_artifacts_only", "cross_version_support"),
+        conflicts=(),
+        vetoes=(),
+        cross_version_rows=(),
+        retained_header_row=left_header,
+        repeated_header_rows=(repeated_header, repeated_separator),
+    )
+    assessment = CandidateAssessment(
+        candidate,
+        "high",
+        "merge",
+        merge_fragments=True,
+        drop_repeated_header=True,
+    )
+    operations = reconstruction.build_reconstruction_operations(
+        [assessment],
+        {"baseline": set(), "target": set()},
+        {"baseline": set(), "target": set()},
+    )
+
+    drop = next(
+        operation
+        for operation in operations
+        if operation.type == "drop_repeated_table_header"
+    )
+    assert drop.source_rows == [
+        left_header.source,
+        repeated_header.source,
+        repeated_separator.source,
+    ]
+
+    baseline = DocumentIR(
+        "repeated-header-doc",
+        "Repeated header",
+        "repeated-header-hash",
+        [
+            Section(
+                section_id,
+                "Table",
+                1,
+                [
+                    Paragraph(
+                        "left-table",
+                        "\n".join(
+                            (left_header.raw_text, left_separator.raw_text, left_body.raw_text)
+                        ),
+                        [
+                            Sentence(left_header.raw_text),
+                            Sentence(left_separator.raw_text),
+                            Sentence(left_body.raw_text),
+                        ],
+                    ),
+                    Paragraph(
+                        "right-table",
+                        "\n".join(
+                            (
+                                repeated_header.raw_text,
+                                repeated_separator.raw_text,
+                                right_body.raw_text,
+                            )
+                        ),
+                        [
+                            Sentence(repeated_header.raw_text),
+                            Sentence(repeated_separator.raw_text),
+                            Sentence(right_body.raw_text),
+                        ],
+                    ),
+                ],
+            )
+        ],
+    )
+    normalized, _ = reconstruction.apply_reconstruction_operations(
+        baseline,
+        DocumentIR("empty", "Empty", "empty-hash"),
+        operations,
+    )
+
+    assert normalized.plain_text.count("编号") == 1
+    assert normalized.plain_text.count("| --- | --- |") == 1
+    assert "Alpha" in normalized.plain_text
+    assert "Beta" in normalized.plain_text
+    assert len(normalized.sections[0].paragraphs) == 1
+
+
+def test_candidate_generation_binds_repeated_header_to_retained_header():
+    section_id = "candidate-header-section"
+
+    def table_row(text: str, paragraph_id: str, index: int):
+        row = split_markdown_table_row(
+            text,
+            SourceRowRef(section_id, paragraph_id, index),
+        )
+        assert row is not None
+        return row
+
+    left_rows = (
+        table_row("| 编号 | 名称 |", "left", 0),
+        table_row("| --- | --- |", "left", 1),
+        table_row("| 1 | Alpha |", "left", 2),
+    )
+    right_rows = (
+        table_row("| 编号 | 名称 |", "right", 0),
+        table_row("| --- | --- |", "right", 1),
+        table_row("| 2 | Beta |", "right", 2),
+    )
+    left = TableFragment(
+        section_id,
+        "left",
+        0,
+        left_rows,
+        (
+            TableRegion((left_rows[0],), 0, 1, "header"),
+            TableRegion((left_rows[1],), 1, 2, "boundary"),
+            TableRegion((left_rows[2],), 2, 3, "body"),
+        ),
+        (2,),
+        (0, 1),
+    )
+    right = TableFragment(
+        section_id,
+        "right",
+        1,
+        right_rows,
+        (
+            TableRegion((right_rows[0],), 0, 1, "header"),
+            TableRegion((right_rows[1],), 1, 2, "boundary"),
+            TableRegion((right_rows[2],), 2, 3, "body"),
+        ),
+        (2,),
+        (0, 1),
+    )
+
+    candidates = generate_continuation_candidates(
+        left,
+        right,
+        ColumnMapping((0, 1), {0: 0, 1: 1}, 1.0),
+        set(),
+        (),
+        "baseline",
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].continuation_row.source == right_rows[0].source
+    assert candidates[0].retained_header_row == left_rows[0]
+    assert candidates[0].repeated_header_rows == right_rows[:2]

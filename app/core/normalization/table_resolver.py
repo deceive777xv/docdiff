@@ -12,6 +12,7 @@ from app.core.normalization.table_boundary_context import (
 )
 from app.core.normalization.tables import ContinuationCandidate, TableRowMatrix
 from app.core.model.base_provider import BaseProvider
+from app.core.llm_call_budget import LLMCallBudget
 
 
 _RESPONSE_FIELDS = {
@@ -258,12 +259,35 @@ def _try_parse_response(
         return None
 
 
+def _chat_with_validation_retry(
+    provider: BaseProvider,
+    messages: list[dict[str, str]],
+    candidate: ContinuationCandidate,
+    call_budget: LLMCallBudget | None = None,
+) -> LLMJudgment | None:
+    budget = call_budget or LLMCallBudget()
+    for attempt in range(2):
+        if not budget.consume():
+            return None
+        try:
+            response = provider.chat(messages)
+        except Exception:
+            return None
+        judgment = _try_parse_response(response, candidate, provider)
+        if judgment is not None:
+            return judgment
+        if attempt == 1:
+            return None
+    return None
+
+
 def adjudicate_continuation(
     candidate: ContinuationCandidate,
     provider: BaseProvider,
     context: TableBoundaryContext | None = None,
+    call_budget: LLMCallBudget | None = None,
 ) -> LLMJudgment | None:
-    """Request exactly one strict candidate-bound judgment."""
+    """Request one strict judgment, retrying one validation failure within budget."""
     user_message = {
         "role": "user",
         "content": json.dumps(
@@ -277,11 +301,12 @@ def adjudicate_continuation(
         {"role": "system", "content": _SYSTEM_MESSAGE},
         user_message,
     ]
-    try:
-        response = provider.chat(messages)
-    except Exception:
-        return None
-    return _try_parse_response(response, candidate, provider)
+    return _chat_with_validation_retry(
+        provider,
+        messages,
+        candidate,
+        call_budget,
+    )
 
 
 def review_continuation(
@@ -289,6 +314,7 @@ def review_continuation(
     initial: LLMJudgment,
     provider: BaseProvider,
     context: TableBoundaryContext | None = None,
+    call_budget: LLMCallBudget | None = None,
 ) -> LLMJudgment | None:
     """Review one accepted change once; invalid review fails closed."""
     payload = _prompt_payload(candidate, context)
@@ -319,8 +345,9 @@ def review_continuation(
             ),
         },
     ]
-    try:
-        response = provider.chat(messages)
-    except Exception:
-        return None
-    return _try_parse_response(response, candidate, provider)
+    return _chat_with_validation_retry(
+        provider,
+        messages,
+        candidate,
+        call_budget,
+    )

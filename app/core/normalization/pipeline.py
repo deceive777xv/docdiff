@@ -29,8 +29,8 @@ from .models import (
 )
 
 
-SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "unified-document-normalization-v6"
+SCHEMA_VERSION = 3
+ALGORITHM_VERSION = "unified-document-normalization-v7"
 def _empty_document_table_trace(document: DocumentIR) -> ReconstructionTrace:
     return ReconstructionTrace(
         schema_version=TABLE_SCHEMA_VERSION,
@@ -110,24 +110,33 @@ def normalize_document(
         model=model,
         review_changes=depth is NormalizationDepth.REVIEW,
     )
+    warnings = list(structure_result.warnings)
     if structure_result.status == "fallback":
         normalized_document = structure_result.document
         table_trace = _empty_document_table_trace(normalized_document)
         status = "fallback"
     else:
-        table_result = reconstruct_document_tables(
-            structure_result.document,
-            provider,
-            review_changes=depth is NormalizationDepth.REVIEW,
-        )
-        normalized_document = table_result.document
-        table_trace = table_result.trace
-        status = (
-            "repaired"
-            if structure_result.status == "repaired" or table_trace.operations
-            else "unchanged"
-        )
-    warnings = list(structure_result.warnings)
+        try:
+            table_result = reconstruct_document_tables(
+                structure_result.document,
+                provider,
+                review_changes=depth is NormalizationDepth.REVIEW,
+            )
+        except Exception as exc:
+            normalized_document = structure_result.document
+            table_trace = _empty_document_table_trace(normalized_document)
+            status = "fallback"
+            warnings.append(
+                f"table_reconstruction_failed: {type(exc).__name__}: {exc}"
+            )
+        else:
+            normalized_document = table_result.document
+            table_trace = table_result.trace
+            status = (
+                "repaired"
+                if structure_result.status == "repaired" or table_trace.operations
+                else "unchanged"
+            )
     document_ref = DocumentTraceRef(document.doc_id, document.file_hash)
     trace = DocumentNormalizationTrace(
         scope="document",

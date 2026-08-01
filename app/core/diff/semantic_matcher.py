@@ -25,8 +25,6 @@ class ParagraphPair:
     split_unit: bool = False
     baseline_match_text: str | None = None
     target_match_text: str | None = None
-    baseline_table_header: bool = False
-    target_table_header: bool = False
 
 
 @dataclass
@@ -35,7 +33,6 @@ class _ParagraphUnit:
     split_unit: bool
     match_text: str | None = None
     table_values: list[str] | None = None
-    table_header: bool = False
     section_path: str = ""
     section_level: int = 0
     document_title: str = ""
@@ -77,6 +74,7 @@ _LLM_RERANK_MIN_CONFIDENCE = 0.6
 _LLM_CONFLICT_MAX_BASELINES = 6
 _LLM_CONFLICT_MAX_TARGETS = 8
 _EXACT_WINDOW_MIN_CHARS = 24
+_EXACT_CROSS_PARAGRAPH_WINDOW_MIN_CHARS = 4
 _EXACT_WINDOW_MAX_CHARS = 2000
 
 _MATCH_RERANK_PROMPT = """你是文档表格行匹配助手。请判断“基准行”应该和哪一个候选行视为同一条记录。
@@ -193,14 +191,6 @@ def _plain_cell(cell: str) -> str:
     return "".join(_cell_parts(cell)) or _strip_cell_markup(cell)
 
 
-def _normalize_cell(cell: str) -> str:
-    return _plain_cell(cell).strip().lower().rstrip("：:")
-
-
-def _header_label_from_cell(cell: str) -> str:
-    return _normalize_cell(cell)
-
-
 def _cell_part_is_emphasized(raw_part: str) -> bool:
     return bool(_EMPHASIZED_PART_RE.fullmatch(raw_part.strip()))
 
@@ -236,31 +226,6 @@ def _cell_value(cell: str, row_has_embedded_header_values: bool = False) -> str:
     if row_has_embedded_header_values and _cell_looks_like_header_value(cell):
         return "".join(parts[1:])
     return "".join(parts)
-
-
-def _table_header_labels(lines: list[str]) -> list[str]:
-    for index, line in enumerate(lines):
-        if "|" not in line or _is_table_separator_row(line) or _is_empty_table_row(line):
-            continue
-        following = next(
-            (
-                later
-                for later in lines[index + 1 :]
-                if "|" in later and not _is_empty_table_row(later)
-            ),
-            "",
-        )
-        if _is_table_separator_row(following) and not _row_has_embedded_header_values(line):
-            return [_header_label_from_cell(cell) for cell in _split_table_row(line)]
-        return []
-    return []
-
-
-def _is_table_header_row(line: str, header_labels: list[str]) -> bool:
-    if "|" not in line or not header_labels or _row_has_embedded_header_values(line):
-        return False
-    labels = [_header_label_from_cell(cell) for cell in _split_table_row(line)]
-    return labels == header_labels
 
 
 def _is_table_separator_row(line: str) -> bool:
@@ -299,26 +264,6 @@ def _join_table_values(values: list[str]) -> str:
 
 def _is_numeric_cell(value: str) -> bool:
     return bool(re.fullmatch(r"[-+]?\d+(?:[\.,]\d+)?%?", value.strip()))
-
-
-def _is_item_number_cell(value: str) -> bool:
-    return bool(re.fullmatch(r"\d+(?:\.\d+)+", value.strip()))
-
-
-def _looks_like_structural_table_header(line: str, following: str = "") -> bool:
-    if "|" not in line or not _is_table_separator_row(following):
-        return False
-    if _row_has_embedded_header_values(line):
-        return False
-
-    values = [value for value in _table_row_values(line) if value]
-    if len(values) < 2:
-        return False
-    if _leading_numeric_cell_count(values) > 0:
-        return False
-    if any(_is_item_number_cell(value) for value in values):
-        return False
-    return True
 
 
 def _leading_numeric_cell_count(values: list[str]) -> int:
@@ -475,56 +420,9 @@ def _reconcile_unique_exact_unmatched(
                 split_unit=False,
                 baseline_match_text=pair.baseline_match_text,
                 target_match_text=target_pair.target_match_text,
-                baseline_table_header=pair.baseline_table_header,
-                target_table_header=target_pair.target_table_header,
             )
         )
     return reconciled
-
-
-def _table_header_signature(unit: _ParagraphUnit) -> str:
-    if not unit.table_header:
-        return ""
-    values = unit.table_values
-    if values is None:
-        values = _table_row_values(unit.para.text) if "|" in unit.para.text else [_unit_match_text(unit)]
-    normalized = [_normalize_match_text(value) for value in values if _normalize_match_text(value)]
-    return "\x1f".join(normalized)
-
-
-def _table_header_signature_counts(units: list[_ParagraphUnit]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for unit in units:
-        signature = _table_header_signature(unit)
-        if signature:
-            counts[signature] = counts.get(signature, 0) + 1
-    return counts
-
-
-def _table_header_values_look_like_schema_labels(unit: _ParagraphUnit) -> bool:
-    values = [value for value in (unit.table_values or []) if value]
-    if len(values) < 2:
-        return False
-    if _leading_numeric_cell_count(values) > 0:
-        return False
-    if any(_is_item_number_cell(value) for value in values):
-        return False
-    return True
-
-
-def _should_suppress_unmatched_table_header(
-    unit: _ParagraphUnit,
-    same_header_counts: dict[str, int],
-    other_header_counts: dict[str, int],
-) -> bool:
-    signature = _table_header_signature(unit)
-    if not signature:
-        return False
-    return (
-        _table_header_values_look_like_schema_labels(unit)
-        or same_header_counts.get(signature, 0) > 1
-        or other_header_counts.get(signature, 0) > 0
-    )
 
 
 def _should_llm_rerank_candidates(
@@ -829,14 +727,12 @@ def _expand_paragraphs(
                 sentences=[Sentence(text=text)],
                 page_no=para.page_no,
             )
-            following = sentences[index + 1] if index + 1 < len(sentences) else ""
             units.append(
                 _ParagraphUnit(
                     para=unit_para,
                     split_unit=True,
                     match_text=_table_row_match_text(text) if is_table else text,
                     table_values=_table_row_values(text) if is_table else None,
-                    table_header=_looks_like_structural_table_header(text, following) if is_table else False,
                     section_path=section_path,
                     section_level=section_level,
                     document_title=document_title,
@@ -1221,13 +1117,28 @@ def _exact_adjacent_window_matches(
                 if anchored.intersection(indexes):
                     continue
                 window = units[start : start + size]
-                if len({unit.source_paragraph_id for unit in window}) != 1:
+                end = start + size
+                if (
+                    start > 0
+                    and units[start - 1].source_paragraph_id
+                    == window[0].source_paragraph_id
+                ):
+                    continue
+                if (
+                    end < len(units)
+                    and units[end].source_paragraph_id
+                    == window[-1].source_paragraph_id
+                ):
+                    continue
+                if len({unit.source_paragraph_id for unit in window}) > 2:
+                    continue
+                if len({unit.section_path for unit in window}) != 1:
                     continue
                 if not all(_is_ordinary_unit(unit) for unit in window):
                     continue
                 normalized = _window_normalized_text(window)
                 if not (
-                    _EXACT_WINDOW_MIN_CHARS
+                    _EXACT_CROSS_PARAGRAPH_WINDOW_MIN_CHARS
                     <= len(normalized)
                     <= _EXACT_WINDOW_MAX_CHARS
                 ):
@@ -1254,6 +1165,25 @@ def _exact_adjacent_window_matches(
     for normalized in baseline_windows.keys() & target_windows.keys():
         for baseline_indexes, baseline_unit in baseline_windows[normalized]:
             for target_indexes, target_unit in target_windows[normalized]:
+                if (
+                    len(normalized) < _EXACT_WINDOW_MIN_CHARS
+                    and baseline_unit.source_paragraph_id
+                    and target_unit.source_paragraph_id
+                ):
+                    continue
+                if (
+                    not baseline_unit.source_paragraph_id
+                    or not target_unit.source_paragraph_id
+                ) and baseline_unit.section_level != target_unit.section_level:
+                    continue
+                baseline_segment = sum(
+                    anchor < baseline_indexes[0] for anchor in anchored_baseline
+                )
+                target_segment = sum(
+                    anchor < target_indexes[0] for anchor in anchored_target
+                )
+                if baseline_segment != target_segment:
+                    continue
                 if len(baseline_indexes) == len(target_indexes) == 1:
                     continue
                 if (
@@ -1328,7 +1258,6 @@ def match_paragraphs(
     *,
     rerank_provider: BaseProvider | None = None,
     use_llm_rerank: bool = True,
-    suppress_unmatched_table_headers: bool = True,
     baseline_document_title: str = "",
     target_document_title: str = "",
 ) -> list[ParagraphPair]:
@@ -1379,8 +1308,6 @@ def match_paragraphs(
                 if _is_ordinary_unit(unit)
             )
         }
-        b_header_counts = _table_header_signature_counts(b_units)
-        t_header_counts = _table_header_signature_counts(t_units)
         sec_path = scope.title or ""
 
         if not b_units and not t_units:
@@ -1389,11 +1316,6 @@ def match_paragraphs(
         # Sections with no match in other doc → all paragraphs are added/removed
         if not b_units:
             for unit in t_units:
-                if (
-                    suppress_unmatched_table_headers
-                    and _should_suppress_unmatched_table_header(unit, t_header_counts, b_header_counts)
-                ):
-                    continue
                 results.append(ParagraphPair(
                     None,
                     unit.para,
@@ -1401,16 +1323,10 @@ def match_paragraphs(
                     section_path=unit.section_path or sec_path,
                     split_unit=unit.split_unit,
                     target_match_text=unit.match_text,
-                    target_table_header=unit.table_header,
                 ))
             continue
         if not t_units:
             for unit in b_units:
-                if (
-                    suppress_unmatched_table_headers
-                    and _should_suppress_unmatched_table_header(unit, b_header_counts, t_header_counts)
-                ):
-                    continue
                 results.append(ParagraphPair(
                     unit.para,
                     None,
@@ -1418,7 +1334,6 @@ def match_paragraphs(
                     section_path=unit.section_path or sec_path,
                     split_unit=unit.split_unit,
                     baseline_match_text=unit.match_text,
-                    baseline_table_header=unit.table_header,
                 ))
             continue
 
@@ -1593,15 +1508,8 @@ def match_paragraphs(
                     split_unit=b_unit.split_unit or target_unit.split_unit,
                     baseline_match_text=baseline_match_text,
                     target_match_text=target_match_text,
-                    baseline_table_header=b_unit.table_header,
-                    target_table_header=target_unit.table_header,
                 ))
             else:
-                if (
-                    suppress_unmatched_table_headers
-                    and _should_suppress_unmatched_table_header(b_unit, b_header_counts, t_header_counts)
-                ):
-                    continue
                 results.append(ParagraphPair(
                     b_unit.para,
                     None,
@@ -1609,16 +1517,10 @@ def match_paragraphs(
                     section_path=b_unit.section_path or sec_path,
                     split_unit=b_unit.split_unit,
                     baseline_match_text=b_unit.match_text,
-                    baseline_table_header=b_unit.table_header,
                 ))
 
         for j, t_unit in enumerate(t_units):
             if j not in t_used:
-                if (
-                    suppress_unmatched_table_headers
-                    and _should_suppress_unmatched_table_header(t_unit, t_header_counts, b_header_counts)
-                ):
-                    continue
                 results.append(ParagraphPair(
                     None,
                     t_unit.para,
@@ -1626,7 +1528,6 @@ def match_paragraphs(
                     section_path=t_unit.section_path or sec_path,
                     split_unit=t_unit.split_unit,
                     target_match_text=t_unit.match_text,
-                    target_table_header=t_unit.table_header,
                 ))
 
     return _reconcile_unique_exact_unmatched(results)

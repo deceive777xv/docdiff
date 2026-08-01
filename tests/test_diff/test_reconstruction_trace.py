@@ -73,6 +73,16 @@ def make_trace_with_every_operation() -> ReconstructionTrace:
             ReconstructionOperation("operation-1", "baseline", "project_columns", source_rows, column_mapping={1: 0}),
             ReconstructionOperation("operation-2", "baseline", "drop_boundary_rows", source_rows),
             ReconstructionOperation("operation-3", "target", "drop_boundary_paragraphs", source_paragraph_ids=["paragraph-2"]),
+            ReconstructionOperation(
+                "operation-header",
+                "baseline",
+                "drop_repeated_table_header",
+                [
+                    SourceRowRef("section-1", "paragraph-1", 0),
+                    SourceRowRef("section-1", "paragraph-2", 0),
+                ],
+                decision_id="candidate-1",
+            ),
             ReconstructionOperation("operation-4", "target", "merge_rows", source_rows, decision_id="candidate-1", generated_row_id="row-1"),
             ReconstructionOperation("operation-5", "target", "merge_fragments", source_rows, generated_paragraph_id="paragraph-3"),
         ],
@@ -108,7 +118,7 @@ def test_trace_round_trip_preserves_typed_mappings_and_llm_judgment(tmp_path):
 
     assert restored == trace
     assert restored.decisions[0].column_mapping == {1: 0, 3: 1}
-    assert restored.algorithm_version == "cross-page-table-v3"
+    assert restored.algorithm_version == "cross-page-table-v4"
     assert restored.decisions[0].previous_page_no == 4
     assert restored.decisions[0].llm.roles["continuation_row"] == "continuation_row"
     assert restored.decisions[0].llm.mapping_id == "candidate-1:mapping:0"
@@ -124,7 +134,7 @@ def test_trace_dict_round_trip_preserves_mapping_id():
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("schema_version", 3),
+        ("schema_version", SCHEMA_VERSION + 1),
         ("schema_version", True),
         ("algorithm_version", "unknown-version"),
     ],

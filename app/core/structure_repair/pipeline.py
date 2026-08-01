@@ -12,6 +12,7 @@ import re
 from typing import Iterable
 
 from app.core.document_ir_codec import document_ir_to_dict
+from app.core.llm_call_budget import LLMCallBudget
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 from .llm import (
@@ -508,11 +509,13 @@ def _adjudicate_page_boundary_noise(
             }
             for index, (position, item) in enumerate(targets, start=1)
         ]
+        call_budget = LLMCallBudget()
         initial, failure_code = adjudicate_page_noise_batch(
             boundary_id,
             request_items,
             provider,
             model,
+            call_budget,
         )
         if initial is None:
             rejected.append(
@@ -545,6 +548,7 @@ def _adjudicate_page_boundary_noise(
                 initial,
                 provider,
                 model,
+                call_budget,
             )
             if review is None:
                 rejected.append(
@@ -812,11 +816,13 @@ def _adjudicate_unnumbered_sections(
             or section.level > previous.level
         ):
             continue
+        call_budget = LLMCallBudget()
         judgment, rejection_code = adjudicate_section_parent(
             section,
             previous,
             provider,
             model,
+            call_budget,
         )
         candidate_id = f"section:{section.section_id}"
         if judgment is None:
@@ -834,6 +840,7 @@ def _adjudicate_unnumbered_sections(
                 previous,
                 provider,
                 model,
+                call_budget,
             )
             if review is None or review.action != judgment.action:
                 rejected.append(
@@ -947,6 +954,7 @@ def _adjudicate_paragraph_fragments(
             context = repaired[
                 max(0, index - 6) : min(len(repaired), index + 8)
             ]
+            call_budget = LLMCallBudget()
             judgment, rejection_code = adjudicate_paragraph_merge(
                 section,
                 previous_boundary_view,
@@ -961,6 +969,7 @@ def _adjudicate_paragraph_fragments(
                 ),
                 document_title=document.title,
                 section_path=section_paths.get(section.section_id, (section.title,)),
+                call_budget=call_budget,
             )
             candidate_id = (
                 f"paragraphs:{previous.paragraph_id}:{following.paragraph_id}"
@@ -990,6 +999,7 @@ def _adjudicate_paragraph_fragments(
                     ),
                     document_title=document.title,
                     section_path=section_paths.get(section.section_id, (section.title,)),
+                    call_budget=call_budget,
                 )
                 if review is None or review.action != judgment.action:
                     rejected.append(

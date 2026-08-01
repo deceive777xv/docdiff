@@ -203,7 +203,7 @@ def test_adjudicator_rejects_non_strict_or_unbound_responses(response):
     provider = RecordingProvider([response, response])
 
     assert adjudicate_continuation(make_medium_candidate(), provider) is None
-    assert len(provider.chat_calls) == 1
+    assert len(provider.chat_calls) == 2
 
 
 @pytest.mark.parametrize("error", [RuntimeError("offline"), TimeoutError("model timeout")])
@@ -345,7 +345,7 @@ def test_adjudicator_sends_detailed_strict_system_contract():
         assert required_instruction in prompt
 
 
-def test_adjudicator_does_not_retry_invalid_response():
+def test_adjudicator_retries_invalid_response_once():
     provider = RecordingProvider(
         [
             '{"row_action":"merge"}',
@@ -355,5 +355,21 @@ def test_adjudicator_does_not_retry_invalid_response():
 
     judgment = adjudicate_continuation(make_medium_candidate(), provider)
 
-    assert judgment is None
-    assert len(provider.chat_calls) == 1
+    assert judgment is not None
+    assert judgment.confidence == 0.91
+    assert len(provider.chat_calls) == 2
+
+
+def test_adjudicator_retries_invalid_json_once():
+    provider = RecordingProvider(
+        [
+            '{"candidate_id":',
+            _response(confidence=0.91, reason="corrected strict response"),
+        ]
+    )
+
+    judgment = adjudicate_continuation(make_medium_candidate(), provider)
+
+    assert judgment is not None
+    assert judgment.confidence == 0.91
+    assert len(provider.chat_calls) == 2

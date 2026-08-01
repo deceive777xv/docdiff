@@ -271,3 +271,55 @@ def test_normalize_document_does_not_apply_table_changes_after_structure_fallbac
     assert result.document == raw
     assert result.table_trace.decisions == []
     assert result.table_trace.operations == []
+
+
+def test_normalize_document_preserves_structure_repairs_when_table_stage_raises(
+    monkeypatch,
+):
+    from app.core.normalization import pipeline
+    from app.core.structure_repair.models import (
+        StructureRepairResult,
+        StructureRepairTrace,
+    )
+
+    raw = _document_with_sparse_cross_page_table()
+    repaired = deepcopy(raw)
+    repaired.sections[0].title = "3.1 已规范化的系统功能"
+    repaired_trace = StructureRepairTrace(
+        schema_version=1,
+        algorithm_version="test",
+        doc_id=raw.doc_id,
+        raw_hash="raw",
+        normalized_hash="repaired",
+        status="repaired",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "repair_document",
+        lambda *args, **kwargs: StructureRepairResult(
+            document=repaired,
+            trace=repaired_trace,
+            status="repaired",
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "reconstruct_document_tables",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("key column conflict at logical column 0")
+        ),
+    )
+
+    result = pipeline.normalize_document(
+        raw,
+        provider=_EchoTableMergeProvider(),
+        depth=NormalizationDepth.STANDARD,
+    )
+
+    assert result.document.sections[0].title == "3.1 已规范化的系统功能"
+    assert result.structure_trace is repaired_trace
+    assert result.status == "fallback"
+    assert result.table_trace.operations == []
+    assert result.warnings == [
+        "table_reconstruction_failed: ValueError: key column conflict at logical column 0"
+    ]

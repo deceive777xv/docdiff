@@ -40,25 +40,6 @@ _CLASSIFY_PROMPT = """你是一个专业的文档差异分析助手。请分析�
 - 无风险（none）对应 should_report=false
 """
 
-_SINGLE_SIDED_TABLE_HEADER_PROMPT = """你是文档表格差异审核助手。以下是一条只在一侧文档出现的表格行，解析器认为它可能是表头。
-
-出现位置：{side}
-表格行：
-{text}
-
-请判断它是否应该作为真实内容新增/删减报告。
-- 如果它只是表格列名、跨页重复表头、版式结构或解析噪声，should_report=false。
-- 如果它包含业务条目、编号项、要求、金额、日期、责任、状态等真实内容，should_report=true。
-
-请只输出JSON：
-{{
-  "should_report": false|true,
-  "diff_type": "新增|删减|格式变化",
-  "risk_level": "high|medium|low|none",
-  "explanation": "简短原因（30字以内）"
-}}
-"""
-
 _VALID_RISK_LEVELS = {"high", "medium", "low", "none"}
 _RISK_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 _RISK_ALIASES = {
@@ -183,32 +164,6 @@ def _llm_classify(
     return True, *_rule_classify(baseline, target, similarity)
 
 
-def _llm_classify_single_sided_table_header(
-    text: str,
-    side: str,
-    provider: BaseProvider,
-) -> tuple[bool, str, str, str] | None:
-    prompt = _SINGLE_SIDED_TABLE_HEADER_PROMPT.format(
-        side=side,
-        text=text[:500],
-    )
-    try:
-        response = provider.chat([{"role": "user", "content": prompt}])
-        match = re.search(r'\{.*\}', response, re.DOTALL)
-        if not match:
-            return None
-        data = json.loads(match.group())
-        return (
-            _normalize_bool(data.get("should_report"), default=True),
-            data.get("diff_type", "新增" if side == "目标文档" else "删减"),
-            _normalize_risk_level(data.get("risk_level")),
-            data.get("explanation", ""),
-        )
-    except Exception as e:
-        logger.warning("LLM table header classification failed, using rules: %s", e)
-    return None
-
-
 def _same_text_ignoring_whitespace(baseline: str, target: str) -> bool:
     return re.sub(r"\s+", "", baseline) == re.sub(r"\s+", "", target)
 
@@ -232,27 +187,6 @@ def classify(
     items: list[DiffItem] = []
     for pp in para_pairs:
         if pp.baseline_para is None and pp.target_para is not None:
-            if pp.target_table_header and policy.use_llm_classify and provider is not None:
-                header_result = _llm_classify_single_sided_table_header(
-                    pp.target_para.text,
-                    "目标文档",
-                    provider,
-                )
-                if header_result is not None:
-                    should_report, diff_type, risk_level, explanation = header_result
-                    if not should_report:
-                        continue
-                    items.append(DiffItem(
-                        diff_id=str(uuid.uuid4()),
-                        section_path=pp.section_path,
-                        diff_type=diff_type,
-                        risk_level=risk_level,
-                        baseline_text="",
-                        target_text=pp.target_para.text,
-                        similarity_score=0.0,
-                        explanation=explanation,
-                    ))
-                    continue
             items.append(DiffItem(
                 diff_id=str(uuid.uuid4()),
                 section_path=pp.section_path,
@@ -264,27 +198,6 @@ def classify(
                 explanation="目标文档新增段落",
             ))
         elif pp.baseline_para is not None and pp.target_para is None:
-            if pp.baseline_table_header and policy.use_llm_classify and provider is not None:
-                header_result = _llm_classify_single_sided_table_header(
-                    pp.baseline_para.text,
-                    "基准文档",
-                    provider,
-                )
-                if header_result is not None:
-                    should_report, diff_type, risk_level, explanation = header_result
-                    if not should_report:
-                        continue
-                    items.append(DiffItem(
-                        diff_id=str(uuid.uuid4()),
-                        section_path=pp.section_path,
-                        diff_type=diff_type,
-                        risk_level=risk_level,
-                        baseline_text=pp.baseline_para.text,
-                        target_text="",
-                        similarity_score=0.0,
-                        explanation=explanation,
-                    ))
-                    continue
             items.append(DiffItem(
                 diff_id=str(uuid.uuid4()),
                 section_path=pp.section_path,

@@ -452,6 +452,7 @@ def test_pipeline_excludes_role_invalid_high_confidence_choice(monkeypatch):
     provider = QueueProvider(
         [
             invalid_response,
+            invalid_response,
             _response("choice-b", confidence=0.80),
         ]
     )
@@ -463,6 +464,77 @@ def test_pipeline_excludes_role_invalid_high_confidence_choice(monkeypatch):
     assert decisions["choice-a"].final_action == "keep_separate"
     assert decisions["choice-b"].final_action == "merge"
 
+
+def _repeated_header_assessment(candidate_id: str) -> CandidateAssessment:
+    candidate = _candidate(candidate_id, "medium")
+    retained_header = _row(
+        ("编号", "名称", "状态"),
+        1,
+        f"{candidate_id}-left",
+    )
+    repeated_header = _row(
+        ("编号", "名称", "状态"),
+        0,
+        f"{candidate_id}-right",
+    )
+    candidate = replace(
+        candidate,
+        continuation_row=repeated_header,
+        continuation_fragment_rows=(repeated_header,),
+        retained_header_row=retained_header,
+        repeated_header_rows=(repeated_header,),
+    )
+    return CandidateAssessment(candidate, "medium", "needs_llm")
+
+
+def test_table_header_judgment_schedules_import_time_deduplication():
+    assessment = _repeated_header_assessment("header-medium")
+    provider = QueueProvider(
+        [
+            _response(
+                "header-medium",
+                decision="keep",
+                continuation_role="table_header",
+                table_action="merge_fragments",
+            )
+        ]
+    )
+
+    resolved, _, _, _ = pipeline._resolve_assessment(assessment, provider)
+
+    assert resolved.merge_fragments is True
+    assert resolved.merge_rows is False
+    assert resolved.drop_repeated_header is True
+
+
+def test_review_must_confirm_table_header_role_before_deduplication():
+    assessment = _repeated_header_assessment("header-review")
+    provider = QueueProvider(
+        [
+            _response(
+                "header-review",
+                decision="keep",
+                continuation_role="table_header",
+                table_action="merge_fragments",
+            ),
+            _response(
+                "header-review",
+                decision="keep",
+                continuation_role="new_business_row",
+                table_action="merge_fragments",
+            ),
+        ]
+    )
+
+    resolved, _, _, review = pipeline._resolve_assessment(
+        assessment,
+        provider,
+        review_changes=True,
+    )
+
+    assert review is not None
+    assert resolved.merge_fragments is True
+    assert resolved.drop_repeated_header is False
 
 def test_pipeline_does_not_fallback_when_confidence_winner_is_unsafe(monkeypatch):
     winner = _candidate("choice-a", "medium")
@@ -513,6 +585,66 @@ def test_pipeline_does_not_fallback_when_confidence_winner_is_unsafe(monkeypatch
     )
 
 
+def test_pipeline_preflights_operations_by_replaying_them():
+    previous = _row(("12", "drive", "prefix"), 0, "left", "baseline-section")
+    continuation = _row(("14", "", "suffix"), 0, "right", "baseline-section")
+    candidate = ContinuationCandidate(
+        candidate_id="key-conflict",
+        side="baseline",
+        previous_row=previous,
+        continuation_row=continuation,
+        next_full_row=None,
+        mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        previous_mapping=ColumnMapping((0, 1, 2), {0: 0, 1: 1, 2: 2}, 1.0),
+        previous_fragment_rows=(previous,),
+        continuation_fragment_rows=(continuation,),
+        evidence=("textual_continuity",),
+        conflicts=(),
+        vetoes=(),
+        cross_version_rows=(),
+    )
+    assessment = CandidateAssessment(
+        candidate,
+        "medium",
+        "merge",
+        merge_rows=True,
+        merge_fragments=True,
+    )
+    baseline = DocumentIR(
+        "baseline-doc",
+        "Baseline",
+        "baseline-hash",
+        [
+            Section(
+                "baseline-section",
+                "Tables",
+                1,
+                [
+                    Paragraph("left", previous.raw_text, [Sentence(previous.raw_text)]),
+                    Paragraph(
+                        "right",
+                        continuation.raw_text,
+                        [Sentence(continuation.raw_text)],
+                    ),
+                ],
+            )
+        ],
+    )
+    target = DocumentIR("target-doc", "Target", "target-hash", [])
+
+    validated = pipeline._validate_resolved_assessments(
+        [assessment],
+        {("baseline", "key-conflict"): None},
+        {"baseline": set(), "target": set()},
+        {"baseline": set(), "target": set()},
+        baseline,
+        target,
+    )
+
+    assert validated[0].final_action == "keep_separate"
+    assert "unsafe_fragment_projection" in validated[0].candidate.conflicts
+
+
 def test_pipeline_keeps_medium_separate_without_provider(monkeypatch):
     _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
     baseline, target, pairs = _documents()
@@ -521,6 +653,31 @@ def test_pipeline_keeps_medium_separate_without_provider(monkeypatch):
 
     assert result.trace.decisions[0].final_action == "keep_separate"
     assert result.trace.decisions[0].llm is None
+
+
+def test_review_depth_keeps_two_call_budget_when_initial_response_needs_retry(
+    monkeypatch,
+):
+    _stub_candidates(monkeypatch, [_candidate("retry-before-review", "medium")])
+    baseline, target, pairs = _documents()
+    provider = QueueProvider(
+        [
+            '{"candidate_id":',
+            _response("retry-before-review", confidence=0.91),
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(
+        pairs,
+        baseline,
+        target,
+        provider,
+        review_changes=True,
+    )
+
+    assert len(provider.chat_calls) == 2
+    assert result.trace.decisions[0].final_action == "keep_separate"
+    assert result.trace.decisions[0].review is None
 
 
 def test_pipeline_records_sub_threshold_llm_merge_but_keeps_separate(monkeypatch):

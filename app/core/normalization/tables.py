@@ -180,6 +180,8 @@ class ContinuationCandidate:
     conflicts: tuple[str, ...]
     vetoes: tuple[VetoCode, ...]
     cross_version_rows: tuple[TableRowMatrix, ...]
+    retained_header_row: TableRowMatrix | None = None
+    repeated_header_rows: tuple[TableRowMatrix, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -189,16 +191,22 @@ class CandidateAssessment:
     final_action: Literal["merge", "keep_separate", "needs_llm"]
     merge_rows: bool = False
     merge_fragments: bool = False
+    drop_repeated_header: bool = False
 
     def __post_init__(self) -> None:
         if self.final_action != "merge":
             object.__setattr__(self, "merge_rows", False)
             object.__setattr__(self, "merge_fragments", False)
+            object.__setattr__(self, "drop_repeated_header", False)
             return
         if not (self.merge_rows or self.merge_fragments):
             raise ValueError("merge assessment requires an explicit operation plan")
         if self.merge_rows and not self.merge_fragments:
             raise ValueError("row merge requires an accepted fragment link")
+        if self.drop_repeated_header and not self.merge_fragments:
+            raise ValueError(
+                "repeated header removal requires an accepted fragment link"
+            )
 
 
 def generate_continuation_candidates(
@@ -271,9 +279,7 @@ def generate_continuation_candidates(
     continuation_choices: list[tuple[TableRowMatrix, bool]] = []
     if leading_content_rows:
         continuation_choices.append((leading_content_rows[-1], True))
-    if not continuation_choices or (
-        continuation_choices[-1][0].source != right_body_rows[0].source
-    ):
+    else:
         continuation_choices.append((right_body_rows[0], False))
 
     candidates: list[ContinuationCandidate] = []
@@ -286,6 +292,26 @@ def generate_continuation_candidates(
         continuation_projection_sources = {
             row.source for row in right_body_rows
         } | {continuation_row.source}
+        retained_header_row = _matching_left_structural_header(
+            continuation_row,
+            left,
+            mapping,
+        )
+        repeated_header_rows: tuple[TableRowMatrix, ...] = ()
+        if retained_header_row is not None:
+            continuation_position = _row_position(right, continuation_row.source)
+            trailing_separator = next(
+                (
+                    row
+                    for row in right.rows[continuation_position + 1 : continuation_position + 2]
+                    if row.kind == "separator"
+                ),
+                None,
+            )
+            repeated_header_rows = (
+                continuation_row,
+                *((trailing_separator,) if trailing_separator is not None else ()),
+            )
         next_full_row = (
             first_full_row
             if is_leading_row
@@ -357,6 +383,8 @@ def generate_continuation_candidates(
                 conflicts=conflicts,
                 vetoes=vetoes,
                 cross_version_rows=cross_version_rows,
+                retained_header_row=retained_header_row,
+                repeated_header_rows=repeated_header_rows,
             )
         )
     return candidates
@@ -377,8 +405,9 @@ _OPERATION_PRECEDENCE = {
     "project_columns": 0,
     "drop_boundary_rows": 1,
     "drop_boundary_paragraphs": 2,
-    "merge_rows": 3,
-    "merge_fragments": 4,
+    "drop_repeated_table_header": 3,
+    "merge_rows": 4,
+    "merge_fragments": 5,
 }
 
 
@@ -552,6 +581,9 @@ def build_reconstruction_operations(
         if not merge_rows and not merge_fragments:
             continue
         candidate = assessment.candidate
+        repeated_header_sources = {
+            row.source for row in candidate.repeated_header_rows
+        } if assessment.drop_repeated_header else set()
         sources = [candidate.previous_row.source, candidate.continuation_row.source]
         source_paragraph_ids = list(
             dict.fromkeys(source.paragraph_id for source in sources)
@@ -598,7 +630,10 @@ def build_reconstruction_operations(
                 ),
             )
         for row in candidate.continuation_fragment_rows:
-            if row.source in dropped_candidate_rows:
+            if (
+                row.source in dropped_candidate_rows
+                or row.source in repeated_header_sources
+            ):
                 continue
             record_projection(
                 candidate.side,
@@ -608,6 +643,21 @@ def build_reconstruction_operations(
                     continuation_mapping,
                     previous_logical_width,
                 ),
+            )
+        if assessment.drop_repeated_header:
+            if candidate.retained_header_row is None or not candidate.repeated_header_rows:
+                raise ValueError("repeated header removal requires a retained header")
+            operations.append(
+                ReconstructionOperation(
+                    "",
+                    candidate.side,
+                    "drop_repeated_table_header",
+                    [
+                        candidate.retained_header_row.source,
+                        *(row.source for row in candidate.repeated_header_rows),
+                    ],
+                    decision_id=candidate.candidate_id,
+                )
             )
         if merge_rows:
             operations.append(
@@ -1889,20 +1939,10 @@ def _is_repeated_structural_header(
     cross_version_fragments: Sequence[TableFragment],
 ) -> bool:
     """Recognize a body-misclassified header only with independent peer structure."""
+    if _matching_left_structural_header(row, left, mapping) is not None:
+        return True
     if row.kind != "content":
         return False
-    mapped_cells = _mapped_logical_cells(row, mapping)
-    if mapped_cells and all(mapped_cells.values()):
-        for left_row in left.rows:
-            if _row_role(left, left_row.source) not in {"header", "boundary"}:
-                continue
-            left_cells = _left_logical_cells(left_row, left)
-            if {
-                column: value.casefold() for column, value in left_cells.items()
-            } == {
-                column: value.casefold() for column, value in mapped_cells.items()
-            }:
-                return True
     fingerprint = _row_fingerprint(row)
     for fragment in (right, *cross_version_fragments):
         for peer_row in fragment.rows:
@@ -1913,6 +1953,31 @@ def _is_repeated_structural_header(
             if _row_role(fragment, peer_row.source) in {"header", "boundary"}:
                 return True
     return False
+
+
+def _matching_left_structural_header(
+    row: TableRowMatrix,
+    left: TableFragment,
+    mapping: ColumnMapping,
+) -> TableRowMatrix | None:
+    """Return the earlier equivalent header that makes a later row redundant."""
+    if row.kind != "content":
+        return None
+    mapped_cells = _mapped_logical_cells(row, mapping)
+    if not mapped_cells or not all(mapped_cells.values()):
+        return None
+    folded_mapped = {
+        column: value.casefold() for column, value in mapped_cells.items()
+    }
+    for left_row in left.rows:
+        if _row_role(left, left_row.source) not in {"header", "boundary"}:
+            continue
+        left_cells = _left_logical_cells(left_row, left)
+        if {
+            column: value.casefold() for column, value in left_cells.items()
+        } == folded_mapped:
+            return left_row
+    return None
 
 
 def _mapping_is_incompatible(
@@ -2489,6 +2554,60 @@ def _apply_drop_boundary_paragraphs(
         ]
 
 
+def _header_signature(row: TableRowMatrix) -> tuple[str, ...]:
+    return tuple(
+        cell.casefold()
+        for cell in row.normalized_cells
+        if cell
+    )
+
+
+def _apply_drop_repeated_table_header(
+    document: DocumentIR,
+    operation: ReconstructionOperation,
+) -> None:
+    if len(operation.source_rows) < 2:
+        raise ValueError(
+            "drop_repeated_table_header requires retained and repeated header rows"
+        )
+    retained_source, repeated_source, *trailing_sources = operation.source_rows
+    retained_location = _resolve_row(document, retained_source)
+    repeated_location = _resolve_row(document, repeated_source)
+    retained_row = _parse_replay_row(retained_location[3], retained_source)
+    repeated_row = _parse_replay_row(repeated_location[3], repeated_source)
+    retained_signature = _header_signature(retained_row)
+    if (
+        len(retained_signature) < 2
+        or retained_signature != _header_signature(repeated_row)
+    ):
+        raise ValueError("repeated table header does not match retained header")
+
+    repeated_paragraph = repeated_location[1]
+    rows_to_remove = [repeated_location[3]]
+    expected_index = repeated_source.sentence_index + 1
+    for source in trailing_sources:
+        location = _resolve_row(document, source)
+        row = _parse_replay_row(location[3], source)
+        if (
+            location[1] is not repeated_paragraph
+            or source.sentence_index != expected_index
+            or row.kind != "separator"
+        ):
+            raise ValueError(
+                "repeated table header may only remove its adjacent separator"
+            )
+        rows_to_remove.append(location[3])
+        expected_index += 1
+
+    sentence_ids = {id(sentence) for sentence in rows_to_remove}
+    repeated_paragraph.sentences[:] = [
+        sentence
+        for sentence in repeated_paragraph.sentences
+        if id(sentence) not in sentence_ids
+    ]
+    _rebuild_paragraph(repeated_paragraph)
+
+
 def _apply_merge_rows(
     document: DocumentIR,
     operation: ReconstructionOperation,
@@ -2655,6 +2774,7 @@ def _apply_operation(
         "project_columns": _apply_project_columns,
         "drop_boundary_rows": _apply_drop_boundary_rows,
         "drop_boundary_paragraphs": _apply_drop_boundary_paragraphs,
+        "drop_repeated_table_header": _apply_drop_repeated_table_header,
         "merge_rows": _apply_merge_rows,
         "merge_fragments": _apply_merge_fragments,
     }

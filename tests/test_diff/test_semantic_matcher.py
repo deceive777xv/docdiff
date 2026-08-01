@@ -1107,3 +1107,117 @@ def test_inserted_child_path_is_not_attached_to_a_later_parent():
         if pair.baseline_para is not None and pair.target_para is not None
     )
     assert matched.section_path == "1 功能 / 1.1 失效保护"
+
+
+def test_exact_adjacent_paragraphs_match_one_combined_target_paragraph():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    first = "系统需采集用户操作信息并上传至平台进行后台监控；"
+    second = "主要用于方便功能问题排查和后台监控车辆问题。"
+    baseline = DocumentIR(
+        "baseline-window",
+        "Baseline",
+        "hash-a",
+        [make_section("1 功能", [make_para(first), make_para(second)])],
+    )
+    target = DocumentIR(
+        "target-window",
+        "Target",
+        "hash-b",
+        [make_section("1 功能", [make_para(first + second)])],
+    )
+
+    pairs = match_paragraphs(
+        align_sections(baseline, target),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0].baseline_para is not None
+    assert pairs[0].target_para is not None
+    assert pairs[0].baseline_para.text == first + "\n" + second
+    assert pairs[0].target_para.text == first + second
+    assert pairs[0].split_unit is True
+
+
+def test_one_combined_baseline_paragraph_matches_exact_adjacent_targets():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    first = "系统需采集用户操作信息并上传至平台进行后台监控；"
+    second = "主要用于方便功能问题排查和后台监控车辆问题。"
+    baseline = DocumentIR(
+        "baseline-window",
+        "Baseline",
+        "hash-a",
+        [make_section("1 功能", [make_para(first + second)])],
+    )
+    target = DocumentIR(
+        "target-window",
+        "Target",
+        "hash-b",
+        [make_section("1 功能", [make_para(first), make_para(second)])],
+    )
+
+    pairs = match_paragraphs(
+        align_sections(baseline, target),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0].baseline_para is not None
+    assert pairs[0].target_para is not None
+    assert pairs[0].baseline_para.text == first + second
+    assert pairs[0].target_para.text == first + "\n" + second
+    assert pairs[0].split_unit is True
+
+
+def test_short_adjacent_headings_match_one_combined_heading():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    baseline = make_section("目录", [make_para("功能"), make_para("说明")])
+    target = make_section("目录", [make_para("功能说明")])
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0].baseline_para is not None
+    assert pairs[0].target_para is not None
+    assert pairs[0].baseline_para.text == "功能\n说明"
+    assert pairs[0].target_para.text == "功能说明"
+
+
+def test_exact_window_does_not_take_partial_units_from_adjacent_paragraphs():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    baseline = make_section(
+        "正文",
+        [
+            make_para_with_sentences(["前置说明。", "第一段末尾内容很长并且需要保持完整。"]),
+            make_para_with_sentences(["第二段开头内容同样很长。", "后置说明。"]),
+        ],
+    )
+    target = make_section(
+        "正文",
+        [make_para("第一段末尾内容很长并且需要保持完整。第二段开头内容同样很长。")],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert not any(
+        pair.baseline_para is not None
+        and pair.target_para is not None
+        and pair.split_unit
+        for pair in pairs
+    )

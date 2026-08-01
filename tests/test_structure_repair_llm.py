@@ -89,6 +89,47 @@ def test_llm_can_move_unnumbered_section_under_existing_parent():
     assert "附表正文。" in prompt
 
 
+def test_section_llm_retries_invalid_json_once():
+    from app.core.structure_repair.llm import adjudicate_section_parent
+
+    class RetryProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return '{"candidate_id":'
+            payload = json.loads(messages[-1]["content"])
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "move_to_section",
+                    "source_ids": ["s2"],
+                    "target_section_id": "s1",
+                    "confidence": 0.93,
+                    "reason": "附表属于前一编号章节",
+                },
+                ensure_ascii=False,
+            )
+
+    provider = RetryProvider()
+
+    document = _document()
+    judgment, rejection_code = adjudicate_section_parent(
+        document.sections[1],
+        document.sections[0],
+        provider,
+    )
+
+    assert provider.calls == 2
+    assert rejection_code == ""
+    assert judgment is not None
+    assert judgment.action == "move_to_section"
+
+
 def test_invalid_or_low_confidence_llm_response_keeps_original_structure():
     from app.core.structure_repair import repair_document
 
@@ -805,7 +846,7 @@ def test_page_boundary_batch_keeps_everything_when_review_ids_are_incomplete():
     assert result.trace.rejected[0].code == "review_label_set_mismatch"
 
 
-def test_page_noise_llm_does_not_retry_invalid_batch_fields():
+def test_page_noise_llm_retries_invalid_batch_fields_once():
     from app.core.structure_repair import repair_document
 
     class InvalidProvider:
@@ -849,7 +890,7 @@ def test_page_noise_llm_does_not_retry_invalid_batch_fields():
 
     result = repair_document(document, provider=provider)
 
-    assert len(provider.messages) == 1
+    assert len(provider.messages) == 2
     system_prompt = provider.messages[0][0]["content"]
     assert "Every item has exactly id, position, and text" in system_prompt
     assert "labels must contain exactly one object per input item" in system_prompt
@@ -904,7 +945,7 @@ def test_page_noise_llm_cannot_replace_a_fixed_batch_item():
 
     result = repair_document(document, provider=provider)
 
-    assert provider.calls == 1
+    assert provider.calls == 2
     assert [
         paragraph.text for paragraph in result.document.sections[0].paragraphs
     ] == ["真实正文。"]
@@ -1327,7 +1368,7 @@ def test_review_mode_keeps_paragraphs_when_second_judgment_disagrees():
     )
 
 
-def test_paragraph_llm_fails_closed_without_retrying_extra_fields():
+def test_paragraph_llm_retries_extra_fields_once():
     from app.core.structure_repair import repair_document
 
     class RetryProvider:
@@ -1376,11 +1417,9 @@ def test_paragraph_llm_fails_closed_without_retrying_extra_fields():
 
     result = repair_document(document, provider=provider)
 
-    assert len(provider.messages) == 1
-    assert result.document.sections[0].paragraphs[0].paragraph_id == "p1"
-    assert any(
-        rejected.code == "invalid_fields" for rejected in result.trace.rejected
-    )
+    assert len(provider.messages) == 2
+    assert len(result.document.sections[0].paragraphs) == 1
+    assert "障碍物后回退。" in result.document.sections[0].paragraphs[0].text
 
 
 def test_structure_repair_leaves_repeated_header_tables_for_import_normalization():
