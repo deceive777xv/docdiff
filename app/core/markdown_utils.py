@@ -210,16 +210,24 @@ def strip_markdown_formatting(markdown_text: str) -> str:
 
     for raw_line in text.splitlines():
         line = raw_line.strip()
+
         if line.startswith("```"):
             in_code_block = not in_code_block
             continue
+
+        if in_code_block:
+            cleaned_lines.append(line)
+            continue
+
         if not line:
             continue
-        if not in_code_block and is_markdown_table_separator(line):
+
+        if is_markdown_table_separator(line):
             continue
-        if not in_code_block and line.startswith("|") and line.endswith("|"):
+
+        if line.startswith("|") and line.endswith("|"):
             line = " ".join(cell for cell in split_markdown_table_row(line) if cell)
-        elif not in_code_block:
+        else:
             line = re.sub(r"^#{1,6}\s+", "", line)
             line = re.sub(r"^>\s?", "", line)
             line = re.sub(r"^[-*+]\s+", "", line)
@@ -232,6 +240,7 @@ def strip_markdown_formatting(markdown_text: str) -> str:
         line = re.sub(r"[*_~]+", "", line)
         line = _HTML_TAG_RE.sub(" ", line)
         line = re.sub(r"\s+", " ", line).strip()
+
         if line:
             cleaned_lines.append(line)
 
