@@ -168,6 +168,19 @@ def _same_text_ignoring_whitespace(baseline: str, target: str) -> bool:
     return re.sub(r"\s+", "", baseline) == re.sub(r"\s+", "", target)
 
 
+_SEMANTIC_CORE_RE = re.compile(r"[a-zA-Z0-9\u4e00-\u9fff]+", re.IGNORECASE)
+
+
+def _semantic_core(text: str) -> str:
+  return "".join(_SEMANTIC_CORE_RE.findall(text or ""))
+
+
+def _semantically_equivalent(baseline: str, target: str, similarity: float) -> bool:
+  if similarity < 0.95:
+    return False
+  return _semantic_core(baseline) == _semantic_core(target)
+
+
 def _pair_compare_texts(pp: ParagraphPair) -> tuple[str, str]:
     baseline_text = pp.baseline_para.text if pp.baseline_para is not None else ""
     target_text = pp.target_para.text if pp.target_para is not None else ""
@@ -223,6 +236,8 @@ def classify(
                     similarity_score=pp.similarity,
                     explanation="仅顺序或序号变化",
                 ))
+                continue
+            if _semantically_equivalent(baseline_compare, target_compare, pp.similarity):
                 continue
             if policy.use_llm_classify and provider is not None:
                 should_report, diff_type, risk_level, explanation = _llm_classify(
