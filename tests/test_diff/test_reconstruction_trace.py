@@ -118,7 +118,7 @@ def test_trace_round_trip_preserves_typed_mappings_and_llm_judgment(tmp_path):
 
     assert restored == trace
     assert restored.decisions[0].column_mapping == {1: 0, 3: 1}
-    assert restored.algorithm_version == "cross-page-table-v4"
+    assert restored.algorithm_version == "cross-page-table-v5"
     assert restored.decisions[0].previous_page_no == 4
     assert restored.decisions[0].llm.roles["continuation_row"] == "continuation_row"
     assert restored.decisions[0].llm.mapping_id == "candidate-1:mapping:0"

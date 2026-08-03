@@ -274,7 +274,14 @@ def generate_continuation_candidates(
         row
         for row in right.rows[:first_full_position]
         if row.kind == "content" and row.source not in boundary_rows
-        and _row_role(right, row.source) != "boundary"
+        and (
+            _row_role(right, row.source) != "boundary"
+            or _is_plausible_sparse_leading_continuation(
+                row,
+                mapping,
+                key_logical_columns,
+            )
+        )
     )
     continuation_choices: list[tuple[TableRowMatrix, bool]] = []
     if leading_content_rows:
@@ -334,6 +341,14 @@ def generate_continuation_candidates(
             cross_version_fragments,
             key_logical_columns,
             allow_leading_header=is_leading_row,
+            allow_leading_sparse_boundary=(
+                is_leading_row
+                and _is_plausible_sparse_leading_continuation(
+                    continuation_row,
+                    mapping,
+                    key_logical_columns,
+                )
+            ),
             allow_non_table_gap=allow_non_table_gap,
         )
         evidence: tuple[EvidenceCode, ...] = ()
@@ -1888,6 +1903,27 @@ def _is_complete_logical_row(
     return occupied_count >= minimum_occupied
 
 
+def _is_plausible_sparse_leading_continuation(
+    row: TableRowMatrix,
+    mapping: ColumnMapping,
+    key_logical_columns: frozenset[int],
+) -> bool:
+    """Distinguish a partial business row from confirmed boundary noise."""
+    cells = _mapped_logical_cells(row, mapping)
+    occupied_columns = {
+        column for column, value in cells.items() if value
+    }
+    if not occupied_columns or len(occupied_columns) == len(cells):
+        return False
+    if any(cells.get(column, "") for column in key_logical_columns):
+        return False
+    return any(
+        value
+        for column, value in cells.items()
+        if column not in key_logical_columns
+    )
+
+
 def _row_position(fragment: TableFragment, source: SourceRowRef) -> int:
     return next(
         (index for index, row in enumerate(fragment.rows) if row.source == source),
@@ -2026,6 +2062,7 @@ def _candidate_vetoes(
     key_logical_columns: frozenset[int],
     *,
     allow_leading_header: bool = False,
+    allow_leading_sparse_boundary: bool = False,
     allow_non_table_gap: bool = False,
 ) -> tuple[VetoCode, ...]:
     previous_cells = _left_logical_cells(previous, left)
@@ -2038,7 +2075,10 @@ def _candidate_vetoes(
     if (
         continuation.kind != "content"
         or continuation.source in boundary_rows
-        or continuation_role == "boundary"
+        or (
+            continuation_role == "boundary"
+            and not allow_leading_sparse_boundary
+        )
         or (continuation_role == "header" and not allow_leading_header)
     ):
         vetoes.append("header_or_separator")

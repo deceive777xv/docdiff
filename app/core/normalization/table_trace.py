@@ -13,7 +13,7 @@ from app.core.types import DocumentIR
 
 
 SCHEMA_VERSION = 3
-ALGORITHM_VERSION = "cross-page-table-v4"
+ALGORITHM_VERSION = "cross-page-table-v5"
 _LEGACY_ALGORITHM_VERSION = "cross-page-table-v1"
 
 _SIDES = {"baseline", "target"}

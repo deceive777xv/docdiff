@@ -2272,3 +2272,63 @@ def test_candidate_generation_binds_repeated_header_to_retained_header():
     assert candidates[0].continuation_row.source == right_rows[0].source
     assert candidates[0].retained_header_row == left_rows[0]
     assert candidates[0].repeated_header_rows == right_rows[:2]
+
+
+def test_candidate_generation_keeps_sparse_boundary_role_row_as_continuation():
+    section = Section(
+        "sparse-continuation-section",
+        "耐久性要求",
+        1,
+        [
+            Paragraph(
+                "left-table",
+                "",
+                [
+                    Sentence("| 序号 | 项目 | 试验条件 | 技术要求 |"),
+                    Sentence("| --- | --- | --- | --- |"),
+                    Sentence("| 3 | 强度 | 条件A | 要求A |"),
+                    Sentence(
+                        "| 4 | 耐久性 | 左门：<br>常温：50000次，<br>40℃-85%：20000次，"
+                        "<br>80℃：15000次，<br>-30℃：15000次。 | "
+                        "2.1<br>开闭瞬间，车门不能出现卡滞、异响；<br>"
+                        "2.3<br>电动开闭左右侧开启或关闭时间差在0.5 s以 |"
+                    ),
+                ],
+                page_no=3,
+            ),
+            Paragraph(
+                "right-table",
+                "",
+                [
+                    Sentence(
+                        "||||||内。<br>2.4<br>车门上的各零部件不得有异响、明显变形、"
+                        "损坏、污染及失效，车门的塑性下沉量不大于0.5 mm，车门反力较"
+                        "耐久前的变化值不大于20%。||||"
+                    ),
+                    Sentence("||5|防水性|淋雨试验||不得渗水||||"),
+                    Sentence("||6|耐腐蚀|盐雾试验||不得锈蚀||||"),
+                ],
+                page_no=4,
+            ),
+        ],
+    )
+    left, right = collect_table_fragments(section)
+    mapping = ColumnMapping((1, 2, 3, 5), {1: 0, 2: 1, 3: 2, 5: 3}, 1.0)
+
+    assert right.regions[0].role == "boundary"
+
+    candidates = generate_continuation_candidates(
+        left,
+        right,
+        mapping,
+        set(),
+        (),
+        "baseline",
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].previous_row.source.sentence_index == 3
+    assert candidates[0].continuation_row.source.sentence_index == 0
+    assert candidates[0].next_full_row is not None
+    assert candidates[0].next_full_row.source.sentence_index == 1
+    assert candidates[0].vetoes == ()

@@ -1322,3 +1322,50 @@ def test_pipeline_requires_every_paragraph_in_a_gap_to_be_confirmed_boundary_mat
     }
     assert merge_by_source[("fragment-left", "fragment-right")] == "keep_separate"
     assert "cedar pre<br>lude-complete" not in result.baseline_ir.plain_text
+
+
+def test_document_pipeline_merges_sparse_first_row_across_page_boundary():
+    left_lines = [
+        "| 序号 | 项目 | 试验条件 | 技术要求 |",
+        "| --- | --- | --- | --- |",
+        "| 3 | 强度 | 条件A | 要求A |",
+        (
+            "| 4 | 耐久性 | 左门：常温50000次 | "
+            "2.3 电动开闭左右侧开启或关闭时间差在0.5 s以 |"
+        ),
+    ]
+    right_lines = [
+        (
+            "||||||内。<br>2.4<br>车门上的各零部件不得有异响、明显变形、"
+            "损坏、污染及失效。||||"
+        ),
+        "||5|防水性|淋雨试验||不得渗水||||",
+        "||6|耐腐蚀|盐雾试验||不得锈蚀||||",
+    ]
+    section = Section(
+        "sparse-boundary-section",
+        "耐久性要求",
+        1,
+        [
+            _paragraph("left-table", left_lines, page_no=3),
+            _paragraph("right-table", right_lines, page_no=4),
+        ],
+    )
+    document = DocumentIR(
+        "sparse-boundary-document",
+        "Sparse boundary",
+        "sparse-boundary-hash",
+        [section],
+    )
+
+    result = pipeline.reconstruct_document_tables(document, EchoMergeProvider())
+
+    merge_row = next(
+        operation
+        for operation in result.trace.operations
+        if operation.type == "merge_rows"
+    )
+    assert [source.sentence_index for source in merge_row.source_rows] == [3, 0]
+    assert "0.5 s以<br>内。<br>2.4" in result.document.plain_text
+    assert "| 5 | 防水性 | 淋雨试验 | 不得渗水 |" in result.document.plain_text
+    assert len(result.document.sections[0].paragraphs) == 1
