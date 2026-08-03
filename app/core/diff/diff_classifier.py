@@ -225,6 +225,11 @@ def classify(
             if pp.split_unit and _same_text_ignoring_whitespace(pp.baseline_para.text, pp.target_para.text):
                 continue
             baseline_compare, target_compare = _pair_compare_texts(pp)
+            if pp.coverage_reconciled and _same_text_ignoring_whitespace(
+                baseline_compare,
+                target_compare,
+            ):
+                continue
             if pp.split_unit and _same_text_ignoring_whitespace(baseline_compare, target_compare):
                 items.append(DiffItem(
                     diff_id=str(uuid.uuid4()),

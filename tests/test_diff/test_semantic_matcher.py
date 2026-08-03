@@ -1221,3 +1221,570 @@ def test_exact_window_does_not_take_partial_units_from_adjacent_paragraphs():
         and pair.split_unit
         for pair in pairs
     )
+
+
+def test_unique_short_paragraph_matches_across_unaligned_section_paths():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    shared = "唯一短文本"
+    baseline = DocumentIR(
+        "baseline-short",
+        "Baseline",
+        "hash-a",
+        [make_section("旧章节", [make_para(shared)])],
+    )
+    target = DocumentIR(
+        "target-short",
+        "Target",
+        "hash-b",
+        [make_section("新内容", [make_para(shared)])],
+    )
+
+    pairs = match_paragraphs(
+        align_sections(baseline, target),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0].baseline_para is not None
+    assert pairs[0].target_para is not None
+    assert pairs[0].similarity == 1.0
+
+
+def test_paragraph_is_silently_covered_by_equal_child_section_title():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    shared = "附表：悬停方式对应悬停动作"
+    baseline_parent = make_section("1 中断处理功能", [make_para(shared)])
+    baseline_parent.level = 1
+    target_parent = make_section("1 中断处理功能", [])
+    target_parent.level = 1
+    target_child = make_section(shared, [])
+    target_child.level = 2
+
+    pairs = match_paragraphs(
+        align_sections(
+            DocumentIR("baseline-title", "Baseline", "hash-a", [baseline_parent]),
+            DocumentIR(
+                "target-title",
+                "Target",
+                "hash-b",
+                [target_parent, target_child],
+            ),
+        ),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert pairs == []
+
+
+def test_target_paragraph_is_silently_covered_by_equal_baseline_title():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    shared = "附表：悬停方式对应悬停动作"
+    baseline_parent = make_section("1 中断处理功能", [])
+    baseline_parent.level = 1
+    baseline_child = make_section(shared, [])
+    baseline_child.level = 2
+    target_parent = make_section("1 中断处理功能", [make_para(shared)])
+    target_parent.level = 1
+
+    pairs = match_paragraphs(
+        align_sections(
+            DocumentIR(
+                "baseline-title-symmetric",
+                "Baseline",
+                "hash-a",
+                [baseline_parent, baseline_child],
+            ),
+            DocumentIR("target-title-symmetric", "Target", "hash-b", [target_parent]),
+        ),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert pairs == []
+
+
+def test_modified_paragraph_with_covered_short_neighbor_reports_only_residual_change():
+    from app.core.diff.diff_classifier import classify
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.types import ComparePolicy
+
+    old_main = (
+        "开启过程中探测到障碍物后，域控根据障碍物位置计算开门角度，"
+        "车门需保持安全距离。"
+    )
+    preserved = "随后平稳悬停。"
+    new_main = old_main.replace("车门需保持", "车门应保持")
+    baseline = make_section(
+        "中间悬停功能",
+        [make_para(old_main), make_para(preserved)],
+    )
+    target = make_section("中间悬停功能", [make_para(new_main + preserved)])
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+    result = classify(
+        pairs,
+        policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        provider=None,
+        task_id="covered-short",
+        baseline_version_id="baseline",
+        target_version_id="target",
+    )
+
+    assert len(result.items) == 1
+    assert result.items[0].diff_type == "实质修改"
+    assert result.items[0].baseline_text == old_main + "\n" + preserved
+    assert result.items[0].target_text == new_main + preserved
+
+
+def test_covered_short_neighbor_does_not_cross_incompatible_section_scope():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    old_main = "主章节中的稳定正文内容发生了少量修改。"
+    preserved = "独立章节正文。"
+    new_main = old_main.replace("少量", "局部")
+    baseline_main = make_section("1 主章节", [make_para(old_main)])
+    baseline_main.level = 1
+    baseline_other = make_section("2 独立章节", [make_para(preserved)])
+    baseline_other.level = 1
+    target_main = make_section("1 主章节", [make_para(new_main + preserved)])
+    target_main.level = 1
+
+    pairs = match_paragraphs(
+        [
+            SectionPair(baseline_main, target_main, 1.0, 0, 0),
+            SectionPair(baseline_other, None, 0.0, 1, None),
+        ],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 2
+    assert any(
+        pair.baseline_para is not None
+        and pair.baseline_para.text == preserved
+        and pair.target_para is None
+        for pair in pairs
+    )
+
+
+def test_repeated_paragraphs_match_repeated_titles_monotonically_within_scope():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    shared = "B）触发条件及执行动作"
+    baseline_parent = make_section(
+        "1 中间悬停功能",
+        [make_para(shared), make_para(shared)],
+    )
+    baseline_parent.level = 1
+    target_parent = make_section("1 中间悬停功能", [])
+    target_parent.level = 1
+    target_first = make_section(shared, [])
+    target_first.level = 2
+    target_second = make_section(shared, [])
+    target_second.level = 2
+
+    pairs = match_paragraphs(
+        align_sections(
+            DocumentIR("baseline-repeated-title", "Baseline", "a", [baseline_parent]),
+            DocumentIR(
+                "target-repeated-title",
+                "Target",
+                "b",
+                [target_parent, target_first, target_second],
+            ),
+        ),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert pairs == []
+
+
+def test_globally_unique_paragraph_is_covered_by_title_without_shared_scope():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    shared = "附表：悬停方式对应悬停动作"
+    baseline = DocumentIR(
+        "baseline-global-title",
+        "Baseline",
+        "a",
+        [make_section("旧章节", [make_para(shared)])],
+    )
+    target = DocumentIR(
+        "target-global-title",
+        "Target",
+        "b",
+        [make_section(shared, [])],
+    )
+
+    pairs = match_paragraphs(
+        align_sections(baseline, target),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert pairs == []
+
+
+def test_cross_scope_short_text_is_not_unique_when_opposite_title_repeats_it():
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.diff.structure_aligner import align_sections
+
+    shared = "唯一短文本"
+    baseline = DocumentIR(
+        "baseline-short-title-duplicate",
+        "Baseline",
+        "a",
+        [make_section("旧章节", [make_para(shared)])],
+    )
+    target = DocumentIR(
+        "target-short-title-duplicate",
+        "Target",
+        "b",
+        [
+            make_section("新内容", [make_para(shared)]),
+            make_section(shared, []),
+        ],
+    )
+
+    pairs = match_paragraphs(
+        align_sections(baseline, target),
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert len(pairs) == 2
+    assert all(
+        pair.baseline_para is None or pair.target_para is None
+        for pair in pairs
+    )
+
+
+def test_target_short_neighbor_covered_by_baseline_long_paragraph_is_symmetric():
+    from app.core.diff.diff_classifier import classify
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.types import ComparePolicy
+
+    old_main = "系统检测到障碍物后，车门需保持安全距离。"
+    preserved = "随后平稳悬停。"
+    new_main = old_main.replace("车门需保持", "车门应保持")
+    baseline = make_section("中间悬停功能", [make_para(old_main + preserved)])
+    target = make_section(
+        "中间悬停功能",
+        [make_para(new_main), make_para(preserved)],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+    result = classify(
+        pairs,
+        policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        provider=None,
+        task_id="covered-target-short",
+        baseline_version_id="baseline",
+        target_version_id="target",
+    )
+
+    assert len(result.items) == 1
+    assert result.items[0].diff_type == "实质修改"
+    assert result.items[0].baseline_text == old_main + preserved
+    assert result.items[0].target_text == new_main + "\n" + preserved
+
+
+def test_unique_middle_fragment_is_removed_before_residual_classification():
+    from app.core.diff.diff_classifier import classify
+    from app.core.diff.semantic_matcher import match_paragraphs
+    from app.core.types import ComparePolicy
+
+    main = "系统启动后继续执行后续流程。"
+    preserved = "保留短段。"
+    combined = "系统启动后" + preserved + "继续执行后续流程。"
+    baseline = make_section("流程控制", [make_para(main), make_para(preserved)])
+    target = make_section("流程控制", [make_para(combined)])
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+    result = classify(
+        pairs,
+        policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        provider=None,
+        task_id="covered-middle",
+        baseline_version_id="baseline",
+        target_version_id="target",
+    )
+
+    assert result.items == []
+
+
+def test_repeated_fragment_inside_long_paragraph_is_not_consumed():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    old_main = "系统启动后继续执行后续流程。"
+    preserved = "重复短段。"
+    new_main = old_main.replace("后续", "后面的")
+    baseline = make_section("流程控制", [make_para(old_main), make_para(preserved)])
+    target = make_section(
+        "流程控制",
+        [make_para(new_main + preserved + preserved)],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 2
+    assert any(
+        pair.baseline_para is not None
+        and pair.baseline_para.text == preserved
+        and pair.target_para is None
+        for pair in pairs
+    )
+
+
+def test_table_like_short_neighbor_is_not_consumed_as_covered_text():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    old_main = "系统检测到障碍物后，车门需保持安全距离。"
+    table_row = "状态|动作"
+    new_main = old_main.replace("车门需保持", "车门应保持")
+    baseline = make_section(
+        "中间悬停功能",
+        [make_para(old_main), make_para(table_row)],
+    )
+    target = make_section(
+        "中间悬停功能",
+        [make_para(new_main + table_row)],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 2
+    assert any(
+        pair.baseline_para is not None
+        and pair.baseline_para.text == table_row
+        and pair.target_para is None
+        for pair in pairs
+    )
+
+
+def test_competing_adjacent_short_fragments_are_not_consumed():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    before = "前置短段。"
+    old_main = "系统检测到障碍物后，车门需保持安全距离。"
+    after = "后置短段。"
+    new_main = old_main.replace("车门需保持", "车门应保持")
+    baseline = make_section(
+        "中间悬停功能",
+        [make_para(before), make_para(old_main), make_para(after)],
+    )
+    target = make_section(
+        "中间悬停功能",
+        [make_para(before + new_main + after)],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 3
+    unmatched_baseline_texts = {
+        pair.baseline_para.text
+        for pair in pairs
+        if pair.baseline_para is not None and pair.target_para is None
+    }
+    assert unmatched_baseline_texts == {before, after}
+
+
+def test_short_neighbor_already_inside_main_paragraph_is_not_consumed():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    main = "系统保持安全距离。"
+    duplicated_fragment = "安全距离"
+    baseline = make_section(
+        "中间悬停功能",
+        [make_para(main), make_para(duplicated_fragment)],
+    )
+    target = make_section("中间悬停功能", [make_para(main)])
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 2
+    assert any(
+        pair.baseline_para is not None
+        and pair.baseline_para.text == duplicated_fragment
+        and pair.target_para is None
+        for pair in pairs
+    )
+
+
+def test_title_coverage_preserves_unequal_total_occurrence_counts():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    shared = "重复内容"
+    baseline_parent = make_section(
+        "父章节",
+        [make_para(shared), make_para(shared)],
+    )
+    baseline_parent.level = 1
+    baseline_child = make_section(shared, [])
+    baseline_child.level = 2
+    target_parent = make_section("父章节", [])
+    target_parent.level = 1
+    target_first = make_section(shared, [])
+    target_first.level = 2
+    target_second = make_section(shared, [])
+    target_second.level = 2
+
+    pairs = match_paragraphs(
+        [
+            SectionPair(baseline_parent, target_parent, 1.0, 0, 0),
+            SectionPair(baseline_child, None, 0.0, 1, None),
+            SectionPair(None, target_first, 0.0, None, 1),
+            SectionPair(None, target_second, 0.0, None, 2),
+        ],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert len(pairs) == 2
+    assert all(
+        pair.baseline_para is not None and pair.target_para is None
+        for pair in pairs
+    )
+
+
+def test_cross_path_short_boundary_does_not_fall_through_to_long_matching():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    shared = "甲" * 24
+    baseline_section = make_section("旧章节", [make_para(shared)])
+    target_section = make_section("新章节", [make_para(shared)])
+    duplicate_title = make_section(shared, [])
+
+    pairs = match_paragraphs(
+        [
+            SectionPair(baseline_section, None, 0.0, 0, None),
+            SectionPair(None, target_section, 0.0, None, 0),
+            SectionPair(duplicate_title, None, 0.0, 1, None),
+        ],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert len(pairs) == 2
+    assert all(
+        pair.baseline_para is None or pair.target_para is None
+        for pair in pairs
+    )
+
+
+def test_covered_list_paragraph_removes_its_marker_from_middle_projection():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    old_main = "系统检测到障碍物后，车门需保持安全距离。"
+    preserved = "- 随后平稳悬停。"
+    new_main = old_main.replace("车门需保持", "车门应保持")
+    baseline = make_section(
+        "中间悬停功能",
+        [make_para(old_main), make_para(preserved)],
+    )
+    target = make_section(
+        "中间悬停功能",
+        [make_para(new_main + preserved)],
+    )
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0].coverage_reconciled is True
+    assert pairs[0].baseline_match_text == old_main
+    assert pairs[0].target_match_text == new_main
+
+
+def test_cross_path_exact_match_uses_more_specific_section_path():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    shared = "唯一短文本"
+    baseline_section = make_section("旧章节", [make_para(shared)])
+    baseline_section.level = 1
+    target_parent = make_section("新父章节", [])
+    target_parent.level = 1
+    target_child = make_section("新子章节", [make_para(shared)])
+    target_child.level = 2
+
+    pairs = match_paragraphs(
+        [
+            SectionPair(baseline_section, None, 0.0, 0, None),
+            SectionPair(None, target_parent, 0.0, None, 0),
+            SectionPair(None, target_child, 0.0, None, 1),
+        ],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.99,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0].section_path == "新父章节 / 新子章节"
+
+
+def test_mismatched_list_marker_is_not_removed_as_covered_text():
+    from app.core.diff.semantic_matcher import match_paragraphs
+
+    old_main = "系统检测状态正常并继续运行。"
+    preserved = "- 5"
+    new_main = old_main.replace("正常", "调整")
+    baseline = make_section(
+        "状态计算",
+        [make_para(old_main), make_para(preserved)],
+    )
+    target = make_section("状态计算", [make_para(new_main + "+ 5")])
+
+    pairs = match_paragraphs(
+        [SectionPair(baseline, target, 1.0)],
+        TokenOverlapEmbedder(),
+        similarity_threshold=0.75,
+    )
+
+    assert len(pairs) == 2
+    assert any(
+        pair.baseline_para is not None
+        and pair.baseline_para.text == preserved
+        and pair.target_para is None
+        for pair in pairs
+    )

@@ -25,6 +25,7 @@ class ParagraphPair:
     split_unit: bool = False
     baseline_match_text: str | None = None
     target_match_text: str | None = None
+    coverage_reconciled: bool = False
 
 
 @dataclass
@@ -76,6 +77,8 @@ _LLM_CONFLICT_MAX_TARGETS = 8
 _EXACT_WINDOW_MIN_CHARS = 24
 _EXACT_CROSS_PARAGRAPH_WINDOW_MIN_CHARS = 4
 _EXACT_WINDOW_MAX_CHARS = 2000
+_SHORT_TEXT_MAX_CHARS = 24
+_LEADING_LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+•]\s+)+")
 
 _MATCH_RERANK_PROMPT = """你是文档表格行匹配助手。请判断“基准行”应该和哪一个候选行视为同一条记录。
 
@@ -306,12 +309,15 @@ def _unit_match_text(unit: _ParagraphUnit) -> str:
 
 
 def _normalize_match_text(text: str) -> str:
-    without_list_marker = re.sub(
-        r"^\s*(?:[-*+•]\s+)+",
-        "",
-        text or "",
-    )
+    without_list_marker = _LEADING_LIST_MARKER_RE.sub("", text or "")
     return re.sub(r"\s+", "", without_list_marker).strip().lower()
+
+
+def _more_specific_section_path(*paths: str) -> str:
+    candidates = [path for path in paths if path]
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda path: path.count(" / "))
 
 
 def _pair_text(pair: ParagraphPair, side: str) -> str:
@@ -324,8 +330,29 @@ def _pair_text(pair: ParagraphPair, side: str) -> str:
     )
 
 
+def _document_content_counts(
+    pairs: list[SectionPair],
+    side: str,
+) -> dict[str, int]:
+    section_attribute = "baseline_section" if side == "baseline" else "target_section"
+    counts: dict[str, int] = {}
+    seen_sections: set[int] = set()
+    for pair in pairs:
+        section = getattr(pair, section_attribute)
+        if section is None or id(section) in seen_sections:
+            continue
+        seen_sections.add(id(section))
+        texts = [section.title] + [paragraph.text for paragraph in section.paragraphs]
+        for text in texts:
+            normalized = _normalize_match_text(text)
+            if normalized:
+                counts[normalized] = counts.get(normalized, 0) + 1
+    return counts
+
+
 def _reconcile_unique_exact_unmatched(
     results: list[ParagraphPair],
+    pairs: list[SectionPair],
 ) -> list[ParagraphPair]:
     baseline_indexes = [
         index
@@ -345,6 +372,8 @@ def _reconcile_unique_exact_unmatched(
     ]
     selected: dict[int, int] = {}
     target_used: set[int] = set()
+    baseline_counts = _document_content_counts(pairs, "baseline")
+    target_counts = _document_content_counts(pairs, "target")
 
     def select_unique(
         baseline_key,
@@ -386,7 +415,7 @@ def _reconcile_unique_exact_unmatched(
             results[index].section_path,
             _normalize_match_text(_pair_text(results[index], "target")),
         ),
-        predicate=lambda key: bool(key[1]) and len(key[1]) <= 24,
+        predicate=lambda key: bool(key[1]) and len(key[1]) <= _SHORT_TEXT_MAX_CHARS,
     )
     select_unique(
         lambda index: _normalize_match_text(
@@ -395,7 +424,34 @@ def _reconcile_unique_exact_unmatched(
         lambda index: _normalize_match_text(
             _pair_text(results[index], "target")
         ),
-        predicate=lambda key: len(key) >= 24,
+        predicate=lambda key: bool(key) and len(key) <= _SHORT_TEXT_MAX_CHARS,
+        pair_filter=lambda baseline_index, target_index: (
+            results[baseline_index].section_path
+            != results[target_index].section_path
+            and baseline_counts.get(
+                _normalize_match_text(
+                    _pair_text(results[baseline_index], "baseline")
+                ),
+                0,
+            )
+            == 1
+            and target_counts.get(
+                _normalize_match_text(
+                    _pair_text(results[target_index], "target")
+                ),
+                0,
+            )
+            == 1
+        ),
+    )
+    select_unique(
+        lambda index: _normalize_match_text(
+            _pair_text(results[index], "baseline")
+        ),
+        lambda index: _normalize_match_text(
+            _pair_text(results[index], "target")
+        ),
+        predicate=lambda key: len(key) > _SHORT_TEXT_MAX_CHARS,
         pair_filter=lambda baseline_index, target_index: (
             results[baseline_index].section_path
             != results[target_index].section_path
@@ -416,12 +472,409 @@ def _reconcile_unique_exact_unmatched(
                 baseline_para=pair.baseline_para,
                 target_para=target_pair.target_para,
                 similarity=1.0,
-                section_path=pair.section_path or target_pair.section_path,
+                section_path=_more_specific_section_path(
+                    pair.section_path,
+                    target_pair.section_path,
+                ),
                 split_unit=False,
                 baseline_match_text=pair.baseline_match_text,
                 target_match_text=target_pair.target_match_text,
             )
         )
+    return reconciled
+
+
+def _remove_paragraphs_covered_by_titles(
+    results: list[ParagraphPair],
+    pairs: list[SectionPair],
+) -> list[ParagraphPair]:
+    scopes = _section_match_scopes(pairs)
+    paragraph_scopes: dict[tuple[str, int], int] = {}
+    titles: dict[tuple[str, int, str], list[int]] = {}
+    global_titles: dict[tuple[str, str], list[int]] = {}
+    occurrence_counts: dict[tuple[str, str], int] = {}
+    scope_occurrence_counts: dict[tuple[str, int, str], int] = {}
+    for scope_index, scope in enumerate(scopes):
+        for side, sections in (
+            ("baseline", scope.baseline_sections),
+            ("target", scope.target_sections),
+        ):
+            for section in sections:
+                normalized_title = _normalize_match_text(section.title)
+                if normalized_title:
+                    titles.setdefault(
+                        (side, scope_index, normalized_title),
+                        [],
+                    ).append(id(section))
+                    global_titles.setdefault(
+                        (side, normalized_title),
+                        [],
+                    ).append(id(section))
+                    occurrence_counts[(side, normalized_title)] = (
+                        occurrence_counts.get((side, normalized_title), 0) + 1
+                    )
+                    scope_occurrence_counts[(side, scope_index, normalized_title)] = (
+                        scope_occurrence_counts.get(
+                            (side, scope_index, normalized_title),
+                            0,
+                        )
+                        + 1
+                    )
+                for paragraph in section.paragraphs:
+                    paragraph_scopes[(side, id(paragraph))] = scope_index
+                    normalized_paragraph = _normalize_match_text(paragraph.text)
+                    if normalized_paragraph:
+                        occurrence_counts[(side, normalized_paragraph)] = (
+                            occurrence_counts.get((side, normalized_paragraph), 0) + 1
+                        )
+                        scope_occurrence_counts[
+                            (side, scope_index, normalized_paragraph)
+                        ] = (
+                            scope_occurrence_counts.get(
+                                (side, scope_index, normalized_paragraph),
+                                0,
+                            )
+                            + 1
+                        )
+
+    paragraph_groups: dict[tuple[str, int, str], list[int]] = {}
+    for index, pair in enumerate(results):
+        if pair.split_unit:
+            continue
+        if pair.baseline_para is not None and pair.target_para is None:
+            scope_index = paragraph_scopes.get(("baseline", id(pair.baseline_para)))
+            normalized = _normalize_match_text(_pair_text(pair, "baseline"))
+            if scope_index is not None and normalized and "|" not in pair.baseline_para.text:
+                paragraph_groups.setdefault(
+                    ("baseline", scope_index, normalized),
+                    [],
+                ).append(index)
+        elif pair.baseline_para is None and pair.target_para is not None:
+            scope_index = paragraph_scopes.get(("target", id(pair.target_para)))
+            normalized = _normalize_match_text(_pair_text(pair, "target"))
+            if scope_index is not None and normalized and "|" not in pair.target_para.text:
+                paragraph_groups.setdefault(
+                    ("target", scope_index, normalized),
+                    [],
+                ).append(index)
+
+    covered: set[int] = set()
+    used_titles: set[tuple[str, int]] = set()
+    for (side, scope_index, normalized), indexes in paragraph_groups.items():
+        other_side = "target" if side == "baseline" else "baseline"
+        candidate_titles = titles.get((other_side, scope_index, normalized), [])
+        if (
+            not indexes
+            or len(indexes) != len(candidate_titles)
+            or scope_occurrence_counts.get((side, scope_index, normalized), 0)
+            != scope_occurrence_counts.get(
+                (other_side, scope_index, normalized),
+                0,
+            )
+        ):
+            continue
+        title_keys = [
+            (other_side, section_id)
+            for section_id in candidate_titles
+        ]
+        if any(title_key in used_titles for title_key in title_keys):
+            continue
+        covered.update(indexes)
+        used_titles.update(title_keys)
+
+    global_paragraph_groups: dict[tuple[str, str], list[int]] = {}
+    for (side, _scope_index, normalized), indexes in paragraph_groups.items():
+        global_paragraph_groups.setdefault((side, normalized), []).extend(
+            index for index in indexes if index not in covered
+        )
+    for (side, normalized), indexes in global_paragraph_groups.items():
+        other_side = "target" if side == "baseline" else "baseline"
+        candidate_titles = global_titles.get((other_side, normalized), [])
+        if (
+            len(indexes) != 1
+            or len(candidate_titles) != 1
+            or occurrence_counts.get((side, normalized), 0) != 1
+            or occurrence_counts.get((other_side, normalized), 0) != 1
+        ):
+            continue
+        title_key = (other_side, candidate_titles[0])
+        if title_key in used_titles:
+            continue
+        covered.add(indexes[0])
+        used_titles.add(title_key)
+
+    return [pair for index, pair in enumerate(results) if index not in covered]
+
+
+def _normalized_text_with_offsets(text: str) -> tuple[str, list[tuple[int, int]]]:
+    marker = _LEADING_LIST_MARKER_RE.match(text or "")
+    content_start = marker.end() if marker is not None else 0
+    normalized: list[str] = []
+    offsets: list[tuple[int, int]] = []
+    for index, character in enumerate(text or ""):
+        if index < content_start or character.isspace():
+            continue
+        lowered = character.lower()
+        normalized.extend(lowered)
+        offsets.extend((index, index + 1) for _ in lowered)
+    return "".join(normalized), offsets
+
+
+def _remove_unique_normalized_fragment(
+    text: str,
+    fragment: str,
+) -> str | None:
+    normalized, offsets = _normalized_text_with_offsets(text)
+    normalized_fragment = _normalize_match_text(fragment)
+    if not normalized_fragment:
+        return None
+    start = normalized.find(normalized_fragment)
+    if start < 0 or normalized.find(normalized_fragment, start + 1) >= 0:
+        return None
+    end = start + len(normalized_fragment)
+    if end > len(offsets):
+        return None
+    raw_start = offsets[start][0]
+    raw_end = offsets[end - 1][1]
+    normalized_start = start
+    fragment_marker = _LEADING_LIST_MARKER_RE.match(fragment or "")
+    if fragment_marker is not None:
+        marker = re.search(r"(?:[-*+•]\s+)+$", text[:raw_start])
+        if marker is not None:
+            fragment_symbols = re.findall(r"[-*+•]", fragment_marker.group(0))
+            projected_symbols = re.findall(r"[-*+•]", marker.group(0))
+            if fragment_symbols != projected_symbols:
+                return None
+            raw_start = marker.start()
+            while (
+                normalized_start > 0
+                and offsets[normalized_start - 1][0] >= raw_start
+            ):
+                normalized_start -= 1
+    residual = text[:raw_start] + text[raw_end:]
+    expected = normalized[:normalized_start] + normalized[end:]
+    if _normalize_match_text(residual) != expected:
+        return None
+    return residual
+
+
+def _paragraph_document_order(
+    pairs: list[SectionPair],
+    side: str,
+) -> dict[int, int]:
+    section_attribute = "baseline_section" if side == "baseline" else "target_section"
+    index_attribute = "baseline_index" if side == "baseline" else "target_index"
+    entries = []
+    for pair_position, pair in enumerate(pairs):
+        section = getattr(pair, section_attribute)
+        if section is None:
+            continue
+        section_index = getattr(pair, index_attribute)
+        entries.append((
+            section_index if section_index is not None else pair_position,
+            pair_position,
+            section,
+        ))
+    entries.sort(key=lambda entry: (entry[0], entry[1]))
+    order: dict[int, int] = {}
+    position = 0
+    seen_sections: set[int] = set()
+    for _, _, section in entries:
+        if section is None or id(section) in seen_sections:
+            continue
+        seen_sections.add(id(section))
+        for paragraph in section.paragraphs:
+            order[id(paragraph)] = position
+            position += 1
+    return order
+
+
+def _merge_display_paragraphs(paragraphs: list[Paragraph]) -> Paragraph:
+    return Paragraph(
+        paragraph_id="coverage:" + ":".join(
+            paragraph.paragraph_id for paragraph in paragraphs
+        ),
+        text="\n".join(paragraph.text for paragraph in paragraphs),
+        sentences=[
+            sentence
+            for paragraph in paragraphs
+            for sentence in paragraph.sentences
+        ],
+        page_no=paragraphs[0].page_no,
+    )
+
+
+def _reconcile_covered_short_paragraphs(
+    results: list[ParagraphPair],
+    pairs: list[SectionPair],
+) -> list[ParagraphPair]:
+    baseline_order = _paragraph_document_order(pairs, "baseline")
+    target_order = _paragraph_document_order(pairs, "target")
+    paragraph_scopes: dict[tuple[str, int], int] = {}
+    for scope_index, scope in enumerate(_section_match_scopes(pairs)):
+        for side, sections in (
+            ("baseline", scope.baseline_sections),
+            ("target", scope.target_sections),
+        ):
+            for section in sections:
+                for paragraph in section.paragraphs:
+                    paragraph_scopes[(side, id(paragraph))] = scope_index
+    candidates: list[tuple[int, int, str, str]] = []
+
+    matched_indexes = [
+        index
+        for index, pair in enumerate(results)
+        if pair.baseline_para is not None
+        and pair.target_para is not None
+        and not pair.split_unit
+    ]
+    baseline_unmatched = [
+        index
+        for index, pair in enumerate(results)
+        if pair.baseline_para is not None
+        and pair.target_para is None
+        and not pair.split_unit
+        and "|" not in pair.baseline_para.text
+    ]
+    target_unmatched = [
+        index
+        for index, pair in enumerate(results)
+        if pair.baseline_para is None
+        and pair.target_para is not None
+        and not pair.split_unit
+        and "|" not in pair.target_para.text
+    ]
+
+    for matched_index in matched_indexes:
+        matched = results[matched_index]
+        if matched.baseline_para is None or matched.target_para is None:
+            continue
+        baseline_position = baseline_order.get(id(matched.baseline_para))
+        target_position = target_order.get(id(matched.target_para))
+        if baseline_position is not None:
+            for unmatched_index in baseline_unmatched:
+                unmatched = results[unmatched_index]
+                paragraph = unmatched.baseline_para
+                if paragraph is None:
+                    continue
+                normalized = _normalize_match_text(_pair_text(unmatched, "baseline"))
+                if not normalized or len(normalized) > _SHORT_TEXT_MAX_CHARS:
+                    continue
+                if normalized in _normalize_match_text(
+                    _pair_text(matched, "baseline")
+                ):
+                    continue
+                unmatched_position = baseline_order.get(id(paragraph))
+                if unmatched_position is None or abs(unmatched_position - baseline_position) != 1:
+                    continue
+                if paragraph_scopes.get(("baseline", id(paragraph))) != paragraph_scopes.get(
+                    ("baseline", id(matched.baseline_para))
+                ):
+                    continue
+                residual = _remove_unique_normalized_fragment(
+                    _pair_text(matched, "target"),
+                    _pair_text(unmatched, "baseline"),
+                )
+                if residual is not None:
+                    candidates.append(
+                        (matched_index, unmatched_index, "baseline", residual)
+                    )
+        if target_position is not None:
+            for unmatched_index in target_unmatched:
+                unmatched = results[unmatched_index]
+                paragraph = unmatched.target_para
+                if paragraph is None:
+                    continue
+                normalized = _normalize_match_text(_pair_text(unmatched, "target"))
+                if not normalized or len(normalized) > _SHORT_TEXT_MAX_CHARS:
+                    continue
+                if normalized in _normalize_match_text(
+                    _pair_text(matched, "target")
+                ):
+                    continue
+                unmatched_position = target_order.get(id(paragraph))
+                if unmatched_position is None or abs(unmatched_position - target_position) != 1:
+                    continue
+                if paragraph_scopes.get(("target", id(paragraph))) != paragraph_scopes.get(
+                    ("target", id(matched.target_para))
+                ):
+                    continue
+                residual = _remove_unique_normalized_fragment(
+                    _pair_text(matched, "baseline"),
+                    _pair_text(unmatched, "target"),
+                )
+                if residual is not None:
+                    candidates.append(
+                        (matched_index, unmatched_index, "target", residual)
+                    )
+
+    matched_counts: dict[int, int] = {}
+    unmatched_counts: dict[int, int] = {}
+    for matched_index, unmatched_index, _, _ in candidates:
+        matched_counts[matched_index] = matched_counts.get(matched_index, 0) + 1
+        unmatched_counts[unmatched_index] = unmatched_counts.get(unmatched_index, 0) + 1
+
+    selected = {
+        matched_index: (unmatched_index, side, residual)
+        for matched_index, unmatched_index, side, residual in candidates
+        if matched_counts[matched_index] == 1
+        and unmatched_counts[unmatched_index] == 1
+    }
+    consumed_unmatched = {
+        unmatched_index
+        for unmatched_index, _, _ in selected.values()
+    }
+    reconciled: list[ParagraphPair] = []
+    for index, pair in enumerate(results):
+        if index in consumed_unmatched:
+            continue
+        selection = selected.get(index)
+        if selection is None:
+            reconciled.append(pair)
+            continue
+        unmatched_index, side, residual = selection
+        unmatched = results[unmatched_index]
+        if pair.baseline_para is None or pair.target_para is None:
+            reconciled.append(pair)
+            continue
+        if side == "baseline":
+            paragraph = unmatched.baseline_para
+            if paragraph is None:
+                reconciled.append(pair)
+                continue
+            paragraphs = sorted(
+                [pair.baseline_para, paragraph],
+                key=lambda item: baseline_order[id(item)],
+            )
+            reconciled.append(ParagraphPair(
+                baseline_para=_merge_display_paragraphs(paragraphs),
+                target_para=pair.target_para,
+                similarity=pair.similarity,
+                section_path=pair.section_path,
+                split_unit=True,
+                baseline_match_text=_pair_text(pair, "baseline"),
+                target_match_text=residual,
+                coverage_reconciled=True,
+            ))
+        else:
+            paragraph = unmatched.target_para
+            if paragraph is None:
+                reconciled.append(pair)
+                continue
+            paragraphs = sorted(
+                [pair.target_para, paragraph],
+                key=lambda item: target_order[id(item)],
+            )
+            reconciled.append(ParagraphPair(
+                baseline_para=pair.baseline_para,
+                target_para=_merge_display_paragraphs(paragraphs),
+                similarity=pair.similarity,
+                section_path=pair.section_path,
+                split_unit=True,
+                baseline_match_text=residual,
+                target_match_text=_pair_text(pair, "target"),
+                coverage_reconciled=True,
+            ))
     return reconciled
 
 
@@ -1530,4 +1983,6 @@ def match_paragraphs(
                     target_match_text=t_unit.match_text,
                 ))
 
-    return _reconcile_unique_exact_unmatched(results)
+    reconciled = _reconcile_unique_exact_unmatched(results, pairs)
+    reconciled = _remove_paragraphs_covered_by_titles(reconciled, pairs)
+    return _reconcile_covered_short_paragraphs(reconciled, pairs)
