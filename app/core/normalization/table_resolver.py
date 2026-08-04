@@ -40,12 +40,13 @@ _SYSTEM_MESSAGE = """You are a table reconstruction classifier.
 
 Task boundary:
 - Make two independent judgments: whether the two table fragments belong to one logical
-  table, and whether candidate.continuation belongs to the same logical row as
+  table, and whether candidate.continuation belongs to the same row as
   candidate.previous.
 - candidate.previous and candidate.continuation are fixed candidate slots. Never replace
   either slot with a row from candidate.next, nearby_context, or peer_rows.
 - candidate.next, nearby_context, and peer_rows are background evidence only. They can
   never become the target of action.
+- Structural clues: Table fragments may appear as Markdown-style rows with pipe (|) delimiters.
 - Do not rewrite cells, invent text, choose a column mapping, or replace the fixed
   fragments or rows.
 
@@ -57,6 +58,10 @@ Field contract:
 - continuation_role: JSON string classifying candidate.continuation only. It must be one
   of: continuation_row, new_business_row, table_header, page_header, page_footer,
   ordinary_text, new_table.
+  - `continuation_row`: Use when the content in `candidate.continuation`
+    is the remaining part of the same row as `candidate.previous`.
+  - `new_business_row`: Use when `candidate.continuation` is a complete new row of the same table,
+    not a continuation of the previous row.
 - row_action: JSON string, exactly merge or keep. row_action=merge is valid only when
   continuation_role is continuation_row. A repeated header or a new business row must
   use keep even when the fragments belong to one table. Use new_business_row when the
@@ -64,7 +69,8 @@ Field contract:
 - table_action: JSON string, exactly merge_fragments or keep. Decide this independently
   from row_action. merge_fragments means the right fragment continues the left logical
   table; it does not mean the boundary rows should be combined. new_table, page_header,
-  page_footer, and ordinary_text must use keep.
+  page_footer, and ordinary_text must use keep. row_action=merge is valid when continuation_role
+  is continuation_row or new_business_row.
 - confidence: JSON number from 0.0 through 1.0 inclusive. Do not return a quoted number,
   boolean, null, NaN, or infinity.
 - reason: non-empty JSON string of at most 200 characters. Explain both relationships.
