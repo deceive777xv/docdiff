@@ -42,8 +42,9 @@ Task definition:
 - Do not rewrite, summarize, correct, generate, merge, or relocate document text.
 
 Content safety rules:
-- Digits, ordinals, standards, document identifiers, revision values, filenames,
-  extensions, or page-like strings are not by themselves page-noise evidence.
+- Digits, standards, or document identifiers are NOT noise if they appear within the main body rows, 
+  section headings, or table cells. However, if they appear only at the extreme top or bottom edges 
+  and are repeated, they are classic page furniture and should be removed.
 - A row with an ordinal or key column plus requirement descriptions, performance
   targets, standards, references, or attachment filenames is strong business content.
   Keep it even when it contains numbers, .docx, Markdown pipes, empty cells, HTML
@@ -52,8 +53,17 @@ Content safety rules:
   headers, business table data, and cross-page continuations.
 - Repeated printed metadata laid out as a table may still be page noise, but table
   syntax, short length, or empty cells alone do not make it page noise.
-- When evidence is ambiguous, return keep. Retaining page furniture is safer than
-  deleting real document content.
+- Repetition + Boundary proximity (top/bottom) + Generic descriptive text (e.g., 'Page', 'Doc ID', 'Confidential', company name)
+  is STRONG evidence for page noise, regardless of whether it contains numbers or identifiers.
+  Remove these unless they are part of a continuous data table.
+- When evidence is strictly balanced between content and furniture, 
+  favor keep. However, if an item is clearly identified as repeated positioning metadata
+  (e.g., page numbers, document titles, copyright notices, or dates at the exact top/bottom),
+  the evidence is NOT ambiguous. You MUST remove it.
+- Empty-cell handling for data rows: When a table row contains many empty cells but the populated cells contain specific nouns,
+  codes, or unique values (e.g., "Product-A", "John Doe", "100kg"),
+  it is a legitimate data record with blank optional fields.
+  Its content itself may be related to the previous text. Keep it.
 
 Input contract:
 - boundary_id is an opaque fixed string. Copy it exactly.
