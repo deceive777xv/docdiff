@@ -658,6 +658,7 @@ def _validate_resolved_assessments(
         ranked = sorted(
             choices,
             key=lambda choice: (
+                -int(choice.merge_rows),
                 -judgment_confidence(choice),
                 choice.candidate.candidate_id,
             ),
