@@ -12,7 +12,7 @@ from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 SENTENCE_END_PATTERN = re.compile(
     r"(?:(?<!\d)[.!?](?!\d))\s+"
-    r"|(?<=[。！？])\s*"
+    r"|[。！？](?=\s|$)"
 )
 TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
 
