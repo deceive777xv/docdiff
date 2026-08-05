@@ -4,7 +4,7 @@ from app.core.types import DocumentIR, Chunk
 import uuid
 
 
-def build_chunks(ir: DocumentIR, version_id: str, max_chars: int = 500) -> list[Chunk]:
+def build_chunks(ir: DocumentIR, version_id: str, max_chars: int = 2000) -> list[Chunk]:
     """
     Slice a DocumentIR into Chunks suitable for embedding and retrieval.
     Each paragraph becomes one chunk. If a paragraph exceeds max_chars,
