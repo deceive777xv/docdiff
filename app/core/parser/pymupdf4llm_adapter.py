@@ -12,7 +12,7 @@ from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
 SENTENCE_END_PATTERN = re.compile(
     r"(?:(?<!\d)[.!?](?!\d))\s+"
-    r"|[。！？](?=\s|$)"
+    r"|[。！？.!?](?=\s|$)"
 )
 TABLE_ROW_PATTERN = re.compile(r"^\s*\|.*\|\s*$")
 
@@ -44,7 +44,7 @@ def extract(file_path: str) -> DocumentIR:
     )
 
 
-def _split_sentences(text: str) -> list[str]:
+def _split_sentences(text: str, max_buffer_len: int = 500) -> list[str]:
     lines = text.split("\n")
     buffer: list[str] = []
     sentences: list[str] = []
@@ -52,12 +52,38 @@ def _split_sentences(text: str) -> list[str]:
     def flush_buffer() -> None:
         if not buffer:
             return
-        merged = " ".join(buffer)
-        sentences.extend(
-            sentence.strip()
-            for sentence in SENTENCE_END_PATTERN.split(merged)
-            if sentence.strip()
-        )
+        merged = " ".join(buffer).strip()
+        if not merged:
+            buffer.clear()
+            return
+
+        if len(merged) <= max_buffer_len:
+            sentences.append(merged)
+        else:
+            parts = SENTENCE_END_PATTERN.split(merged)
+            ends = SENTENCE_END_PATTERN.findall(merged)
+            
+            raw_sentences = []
+            for i, part in enumerate(parts):
+                if not part.strip():
+                    continue
+                end = ends[i] if i < len(ends) else ''
+                raw_sentences.append(part + end)
+
+            current_chunk = ""
+            for s in raw_sentences:
+                if not current_chunk:
+                    current_chunk = s
+                else:
+                    candidate = current_chunk + s
+                    if len(candidate) <= max_buffer_len:
+                        current_chunk = candidate
+                    else:
+                        sentences.append(current_chunk.strip())
+                        current_chunk = s
+            if current_chunk:
+                sentences.append(current_chunk.strip())
+
         buffer.clear()
 
     for line in lines:

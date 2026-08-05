@@ -46,47 +46,62 @@ def extract(
 
 SENTENCE_END_PATTERN = re.compile(
     r'(?:(?<!\d)[.!?](?!\d))\s+'   # 英文句末标点：点前非数字，点后非数字（防止日期、小数等）
-    r"|[。！？](?=\s|$)"            # 中文句末标点
+    r"|[。！？.!?](?=\s|$)"            # 中文句末标点
 )
 
 # 匹配 Markdown 表格行（整行以 | 开头和结尾）
 TABLE_ROW_PATTERN = re.compile(r'^\s*\|.*\|\s*$')
 
-def _split_sentences(text: str) -> list[str]:
-    """
-    将段落文本切分为句子列表。
-    - 普通文本：按增强的句末标点规则切分（避免切分数字编号）
-    - Markdown 表格行：每行作为一个独立的句子
-    """
-    lines = text.split('\n')
-    buffer: list[str] = []       # 存放非表格行的文本行
+def _split_sentences(text: str, max_buffer_len: int = 500) -> list[str]:
+    lines = text.split("\n")
+    buffer: list[str] = []
     sentences: list[str] = []
+
+    def flush_buffer() -> None:
+        if not buffer:
+            return
+        merged = " ".join(buffer).strip()
+        if not merged:
+            buffer.clear()
+            return
+
+        if len(merged) <= max_buffer_len:
+            sentences.append(merged)
+        else:
+            parts = SENTENCE_END_PATTERN.split(merged)
+            ends = SENTENCE_END_PATTERN.findall(merged)
+            
+            raw_sentences = []
+            for i, part in enumerate(parts):
+                if not part.strip():
+                    continue
+                end = ends[i] if i < len(ends) else ''
+                raw_sentences.append(part + end)
+
+            current_chunk = ""
+            for s in raw_sentences:
+                if not current_chunk:
+                    current_chunk = s
+                else:
+                    candidate = current_chunk + s
+                    if len(candidate) <= max_buffer_len:
+                        current_chunk = candidate
+                    else:
+                        sentences.append(current_chunk.strip())
+                        current_chunk = s
+            if current_chunk:
+                sentences.append(current_chunk.strip())
+
+        buffer.clear()
 
     for line in lines:
         if TABLE_ROW_PATTERN.match(line):
-            # 1. 先清空缓存中的普通文本
-            if buffer:
-                merged = ' '.join(buffer)
-                for sent in SENTENCE_END_PATTERN.split(merged):
-                    sent = sent.strip()
-                    if sent:
-                        sentences.append(sent)
-                buffer.clear()
-            # 2. 表格行整体作为一个句子
-            cleaned = line.strip()
-            if cleaned:
-                sentences.append(cleaned)
+            flush_buffer()
+            if line.strip():
+                sentences.append(line.strip())
         else:
             buffer.append(line)
-
-    # 3. 处理最后剩余的普通文本
-    if buffer:
-        merged = ' '.join(buffer)
-        for sent in SENTENCE_END_PATTERN.split(merged):
-            sent = sent.strip()
-            if sent:
-                sentences.append(sent)
-
+    flush_buffer()
     return sentences
 
 def _parse_markdown(md_text: str, title: str, doc_hash: str) -> DocumentIR:
