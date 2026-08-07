@@ -813,8 +813,29 @@ class ComparePage(QWidget):
                 lookup[key] = item
         return lookup
 
+    def _find_diff_item(
+        self,
+        text: str,
+        lookup: dict[str, DiffItem],
+        diff_items: list[DiffItem],
+        side: str,
+    ) -> DiffItem | None:
+        key = _normalizae_diff_text(text)
+        item = lookup.get(key)
+        if item is not None:
+            return item
+        for candidate in diff_items:
+            candidate_text = candidate.baseline_text if side == "baseline" else candidate.target_text
+            candidate_key = _normalize_diff_text(candidate_text)
+            if not candidate_key:
+                continue
+            if candidate_key in key or key in candidate_key:
+                return candidate
+        return None
+        
     def _render_full_document(self, ir: DocumentIR, lookup: dict[str, DiffItem], side: str) -> str:
         parts: list[str] = []
+        diff_items = list(lookup.values())
         for section in ir.sections:
             title = _render_inline_markdown(section.title or "正文")
             parts.append(f"<h3>{title}</h3>")
@@ -824,9 +845,9 @@ class ComparePage(QWidget):
                 elif len(para.text) > 500 and len(para.sentences) > 1:
                     for sent in para.sentences:
                         if sent.text.strip():
-                            parts.append(self._render_text_unit(sent.text.strip(), lookup, side, line=True))
+                            parts.append(self._render_text_unit(sent.text.strip(), lookup, diff_items, side, line=True))
                 else:
-                    parts.append(self._render_text_unit(para.text, lookup, side, line=False))
+                    parts.append(self._render_text_unit(para.text, lookup, diff_items, side, line=False))
         return "".join(parts)
 
     def _paragraph_looks_like_table(self, para: Paragraph) -> bool:
@@ -837,12 +858,12 @@ class ComparePage(QWidget):
         self,
         text: str,
         lookup: dict[str, DiffItem],
+        diff_items: list[DiffItem],
         side: str,
         *,
         line: bool,
     ) -> str:
-        key = _normalize_diff_text(text)
-        item = lookup.get(key)
+        item = self._find_diff_item(text, lookup, diff_items, side)
         if item is not None:
             css_cls, _ = _diff_css().get(item.diff_type, ("format", Theme.DIFF_FORMAT))
             other_text = item.target_text if side == "baseline" else item.baseline_text
@@ -860,6 +881,7 @@ class ComparePage(QWidget):
         if not rows:
             rows = [line.strip() for line in para.text.splitlines() if line.strip()]
 
+        diff_items = list(lookup.values())
         rendered_rows: list[str] = []
         for index, row in enumerate(rows):
             if _is_markdown_table_separator(row):
@@ -867,7 +889,7 @@ class ComparePage(QWidget):
 
             is_header = index + 1 < len(rows) and _is_markdown_table_separator(rows[index + 1])
             cells = _split_markdown_table_row(row) if "|" in row else [row]
-            item = lookup.get(_normalize_diff_text(row))
+            item = self._find_diff_item(text, lookup, diff_items, side)
             row_attrs = 'class="doc-row"'
             other_cells: list[str] = []
 
