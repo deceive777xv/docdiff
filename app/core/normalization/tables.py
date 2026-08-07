@@ -1475,14 +1475,31 @@ def infer_monotonic_column_mapping(
             if occ:
                 all_occupied.add(phys)
     mapped_physical = set(logical_by_physical)
+    used_logical = set(logical_by_physical.values())
     for phys in sorted(all_occupied - mapped_physical):
         left_neighbour = max(
             (p for p in mapped_physical if p < phys),
             default = None,
         )
+        right_neighbour = min(
+            (p for p in mapped_physical if p > phys),
+            default = None,
+        )
         if left_neighbour is not None:
             gap = phys - left_neighbour
-            logical_by_physical[phys] = logical_by_physical[left_neighbour] + gap
+            condidate_logical = logical_by_physical[left_neighbour] + gap
+            if right_neighbour is not None:
+                right_logical = logical_by_physical[right_neighbour]
+                if condidate_logical >= right_logical:
+                    continue
+            while candidate_logical in used_logical:
+                candidate_logical += 1
+                if right_neighbour is not None and condidate_logical >= logical_by_physical[right_neighbour]:
+                    break
+            if right_neighbour is not None and condidate_logical >= logical_by_physical[right_neighbour]:
+                continue
+            logical_by_physical[phys] = candidate_logical
+            used_logical.add(candidate_logical)
     
     return ColumnMapping(tuple(logical_by_physical), logical_by_physical, normalized_score)
 
