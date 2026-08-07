@@ -237,7 +237,7 @@ def strip_markdown_formatting(markdown_text: str) -> str:
         line = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", line)
         line = re.sub(r"`([^`]*)`", r"\1", line)
         line = line.replace("`", "")
-        line = re.sub(r"[*_~]+", "", line)
+        line = re.sub(r"[*_]+", "", line)
         line = _HTML_TAG_RE.sub(" ", line)
         line = re.sub(r"\s+", " ", line).strip()
 
