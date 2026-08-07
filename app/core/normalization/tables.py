@@ -1467,6 +1467,23 @@ def infer_monotonic_column_mapping(
     logical_by_physical = {
         right_columns[right_index]: left_index for left_index, right_index in aligned_pairs
     }
+
+    right_body_rows = _body_rows(right)
+    all_occupied: set[int] = set()
+    for row in right_body_rows:
+        for phys, occ in enumerate(row.occupied):
+            if occ:
+                all_occupied.add(phys)
+    mapped_physical = set(logical_by_physical)
+    for phys in sorted(all_occupied - mapped_physical):
+        left_neighbour = max(
+            (p for p in mapped_physical if p < phys),
+            default = None,
+        )
+        if left_neighbour is not None:
+            gap = phys - left_neighbour
+            logical_by_physical[phys] = logical_by_physical[left_neighbour] + gap
+    
     return ColumnMapping(tuple(logical_by_physical), logical_by_physical, normalized_score)
 
 
