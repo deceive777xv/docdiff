@@ -683,14 +683,19 @@ def _validate_resolved_assessments(
             for choice in ranked[1:]
         )
     build_reconstruction_operations([], boundary_rows, boundary_paragraphs)
-    for assessment in assessments:
-        if assessment.final_action != "merge":
-            validated.append(assessment)
-            continue
-        candidate_key = (
-            assessment.candidate.side,
-            assessment.candidate.previous_row.source,
-        )
+
+    merge_candidates = sorted(
+        (
+            a for a in assessments
+            if a.final_action == "merge"
+        ),
+        key=lambda a: (
+            -judgment_confidence(a),
+            a.candidate.candidate_id,
+        ),
+    )
+    merge_seen: set[tuple[str, str]] = set()
+    for assessment in merge_candidates:
         decision_key = (
             assessment.candidate.side,
             assessment.candidate.candidate_id,
@@ -703,6 +708,10 @@ def _validate_resolved_assessments(
                 )
             )
             continue
+        candidate_key = (
+            assessment.candidate.side,
+            assessment.candidate.previous_row.source,
+        )
         if candidate_key in ambiguous_previous_rows:
             validated.append(
                 _downgrade_with_conflict(
@@ -730,6 +739,11 @@ def _validate_resolved_assessments(
                 )
             )
         else:
+            validated.append(assessment)
+            merge_seen.add(decision_key)
+    
+    for assessment in assessments:
+        if assessment.final_action != "merge":
             validated.append(assessment)
     return validated
 
