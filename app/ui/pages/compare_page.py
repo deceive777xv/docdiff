@@ -36,7 +36,7 @@ from app.core.markdown_utils import (
     strip_markdown_formatting as _core_strip_markdown_formatting,
 )
 from app.core.document_ir_codec import document_ir_from_dict
-from app.core.types import ComparePolicy, DiffItem, DiffResult, DocumentIR
+from app.core.types import ComparePolicy, DiffItem, DiffResult, DocumentIR, Sentence, Section, Paragraph
 from app.db import document_repo
 from app.ui.app_context import AppContext
 from app.ui.theme import Theme
