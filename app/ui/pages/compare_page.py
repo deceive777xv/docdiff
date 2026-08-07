@@ -820,7 +820,7 @@ class ComparePage(QWidget):
         diff_items: list[DiffItem],
         side: str,
     ) -> DiffItem | None:
-        key = _normalizae_diff_text(text)
+        key = _normalize_diff_text(text)
         item = lookup.get(key)
         if item is not None:
             return item
@@ -889,7 +889,7 @@ class ComparePage(QWidget):
 
             is_header = index + 1 < len(rows) and _is_markdown_table_separator(rows[index + 1])
             cells = _split_markdown_table_row(row) if "|" in row else [row]
-            item = self._find_diff_item(text, lookup, diff_items, side)
+            item = self._find_diff_item(row, lookup, diff_items, side)
             row_attrs = 'class="doc-row"'
             other_cells: list[str] = []
 

@@ -47,18 +47,18 @@ _PAGE_NOISE_SYSTEM_MESSAGE = """你需要对接近物理页面边界的固定文
 - 数据行的空单元格处理：若表格行中有很多空单元格，但已填单元格包含特定名词、代码或唯一值（如“Product-A”、“John Doe”、“100kg”），则属于合法数据记录，空单元格为可选字段，其内容可能与前文相关，应保留。
 
 输入约定：
-- boundary_id 为不透明固定字符串，请完全复制。
-- items 为完整固定列表，每项仅包含 id、position 和 text。
-- id 为请求局部且不透明，请完全复制且保持顺序。
-- position 仅作为边界证据，其值为 previous_page_end、next_page_start、document_start 或 document_end。
+- `boundary_id` 为不透明固定字符串，请完全复制。
+- `items` 为完整固定列表，每项仅包含 id、position 和 text。
+- `id` 为请求局部且不透明，请完全复制且保持顺序。
+- `position` 仅作为边界证据，其值为 `previous_page_end`、`next_page_start`、`document_start` 或 `document_end`。
 
 输出约定：
-- 返回恰好一个 JSON 对象，包含 boundary_id 和 labels。
-- labels 必须与输入项顺序一致，每项一个对象。
-- 每个标签必须包含 id、action、confidence 和 reason。
-- action 必须为 remove_as_page_noise 或 keep。
-- confidence 必须为 0.0 到 1.0 的 JSON 数字，不能加引号或使用布尔、null、NaN、无穷。
-- reason 必须为非空 JSON 字符串，最多 200 个字符，仅讨论对应固定项。
+- 返回恰好一个 JSON 对象，包含 `boundary_id` 和 `labels`。
+- `labels` 必须与输入项顺序一致，每项一个对象。
+- 每个标签必须包含 `id`、`action`、`confidence` 和 `reason`。
+- `action` 必须为 `remove_as_page_noise` 或 `keep`。
+- `confidence` 必须为 0.0 到 1.0 的 JSON 数字，不能加引号或使用布尔、null、NaN、无穷。
+- `reason` 必须为非空 JSON 字符串，最多 200 个字符，仅讨论对应固定项。
 - 不得使用 Markdown 标记或 JSON 对象外的文本，也不得添加字段。
 
 合法的输出格式示例:
@@ -66,16 +66,16 @@ _PAGE_NOISE_SYSTEM_MESSAGE = """你需要对接近物理页面边界的固定文
 """
 _PAGE_NOISE_REVIEW_SYSTEM_MESSAGE = _PAGE_NOISE_SYSTEM_MESSAGE + """
 审核任务：
-- 这是对所提供的 initial_labels 中相同固定项目的最终安全审核。请根据原始文本和完整边界批次重新评估每个项目。
+- 这是对所提供的 `initial_labels` 中相同固定项目的最终安全审核。请根据原始文本和完整边界批次重新评估每个项目。
 - 特别注意编号业务行、需求、目标、标准、参考文献以及附件文件名的误删。
 - 返回完整的替换标签列表。不要仅仅批准初始结果。
-- 仅当两轮独立审核都返回有效的、高置信度的 remove_as_page_noise 标签时，候选项才会被移除。如不确定，请返回 keep。
+- 仅当两轮独立审核都返回有效的、高置信度的 `remove_as_page_noise` 标签时，候选项才会被移除。如不确定，请返回 `keep`。
 """
 _PARAGRAPH_SYSTEM_MESSAGE = """你是一个文档段落合并分类器。
 任务边界：
-- 只判断 candidate.continuation 是否为 candidate.previous 的续写，并且两者属于同一原始段落。
-- candidate.previous 和 candidate.continuation 是固定的槽位。绝不使用 nearby_context 中的文本替换它们。
-- nearby_context 和 rule_evidence 仅作为背景证据。
+- 只判断 `candidate.continuation` 是否为 `candidate.previous` 的续写，并且两者属于同一原始段落。
+- `candidate.previous` 和 `candidate.continuation` 是固定的槽位。绝不使用 `nearby_context` 中的文本替换它们。
+- `nearby_context` 和 `rule_evidence` 仅作为背景证据。
 - 文本结构仅作为辅助判断，尤其是列表结构符号“- ”可能是解析时产生的噪声。
 - 不要重写、总结、纠正、移除或生成文档文本。
 
@@ -83,7 +83,7 @@ _PARAGRAPH_SYSTEM_MESSAGE = """你是一个文档段落合并分类器。
 
 字段要求：
 - candidate_id：JSON 字符串。精确复制提供的 candidate_id。
-- action：JSON 字符串。必须是 merge_paragraphs 或 keep。
+- action：JSON 字符串。必须是 `merge_paragraphs` 或 `keep`。
 - confidence：JSON 数字，从 0.0 到 1.0（含）。不要返回带引号的数字、布尔值、null、NaN 或无穷大。
 - reason：非空 JSON 字符串，最多 200 个字符。仅解释固定 previous 和 continuation 槽位之间的关系。
 
@@ -353,15 +353,14 @@ def adjudicate_section_parent(
         {
             "role": "system",
             "content": (
-                "Judge whether the candidate unnumbered section belongs under the previous "
-                "numbered section. Return exactly one JSON object with these fields:\n"
-                "- candidate_id: the candidate identifier, e.g. \"section:xxx\" (string)\n"
-                "- action: exactly \"keep\" or \"move_to_section\"\n"
-                "- source_ids: a JSON array containing exactly one element, the candidate_id value\n"
-                "- target_section_id: the previous section's section_id (string, without prefix)\n"
-                "- confidence: a number between 0.0 and 1.0\n"
-                "- reason: a non-empty string explaining your decision\n"
-                "Use only supplied IDs. Never rewrite or generate document text."
+                "判断待处理的无编号章节是否应归入前一个有编号章节之下。请返回一个包含以下字段的 JSON 对象：\n"
+                "- candidate_id：待处理章节的标识符，例如 \"section:xxx\"（字符串）\n"
+                "- action：必须为 \"keep\" 或 \"move_to_section\"\n"
+                "- source_ids：一个包含且仅包含一个元素（即 candidate_id 的值）的 JSON 数组\n"
+                "- target_section_id：前一个章节的 section_id（字符串，不带前缀）\n"
+                "- confidence：0.0 到 1.0 之间的数值\n"
+                "- reason：解释您判断依据的非空字符串\n"
+                "仅使用提供的 ID。切勿重写或生成文档文本。"
             ),
         },
         {

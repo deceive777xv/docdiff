@@ -1487,16 +1487,16 @@ def infer_monotonic_column_mapping(
         )
         if left_neighbour is not None:
             gap = phys - left_neighbour
-            condidate_logical = logical_by_physical[left_neighbour] + gap
+            candidate_logical = logical_by_physical[left_neighbour] + gap
             if right_neighbour is not None:
                 right_logical = logical_by_physical[right_neighbour]
-                if condidate_logical >= right_logical:
+                if candidate_logical >= right_logical:
                     continue
             while candidate_logical in used_logical:
                 candidate_logical += 1
-                if right_neighbour is not None and condidate_logical >= logical_by_physical[right_neighbour]:
+                if right_neighbour is not None and candidate_logical >= logical_by_physical[right_neighbour]:
                     break
-            if right_neighbour is not None and condidate_logical >= logical_by_physical[right_neighbour]:
+            if right_neighbour is not None and candidate_logical >= logical_by_physical[right_neighbour]:
                 continue
             logical_by_physical[phys] = candidate_logical
             used_logical.add(candidate_logical)
