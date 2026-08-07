@@ -36,56 +36,39 @@ _ROW_ACTIONS = {"merge", "keep"}
 _TABLE_ACTIONS = {"merge_fragments", "keep"}
 _MAX_PEER_ROWS = 2
 _MAX_REASON_LENGTH = 200
-_SYSTEM_MESSAGE = """You are a table reconstruction classifier.
+_SYSTEM_MESSAGE = """你是一个表格重建分类器。
+任务范围：
+- 做出两个独立的判断：判断两个表格片段是否属于同一个逻辑表，以及`candidate.continuation`与`candidate.previous`按照列映射是否属于同一逻辑行。
+- `candidate.next`、`nearby_context`和`peer_rows`只是背景证据，它们永远不能成为判断目标。
+- 结构线索：表格片段可能以 Markdown 风格的行出现，用竖线（|）分隔。
+- 不要重写单元格、发明文本、选择列映射或替换固定的片段或行。
+- 注意按列区分单元格，仅按照提供的列映射进行判断，不主动替换为正确的列映射。
+- 仅判断`candidate.continuation`与`candidate.previous`，不要判断`candidate.continuation`之后的项。
 
-Task boundary:
-- Make two independent judgments: whether the two table fragments belong to one logical
-  table, and whether candidate.continuation belongs to the same row as
-  candidate.previous.
-- candidate.previous and candidate.continuation are fixed candidate slots. Never replace
-  either slot with a row from candidate.next, nearby_context, or peer_rows.
-- candidate.next, nearby_context, and peer_rows are background evidence only. They can
-  never become the target of action.
-- Structural clues: Table fragments may appear as Markdown-style rows with pipe (|) delimiters.
-- Do not rewrite cells, invent text, choose a column mapping, or replace the fixed
-  fragments or rows.
-
-Return exactly one JSON object with exactly these six fields:
+准确返回一个 JSON 对象，且必须包含以下六个字段：
 candidate_id, continuation_role, row_action, table_action, confidence, reason.
+字段约定：
+- candidate_id：JSON 字符串，完全按提供的`candidate_id`复制。
+- continuation_role：JSON 字符串，仅对`candidate.continuation`进行分类。
+    必须是以下之一：continuation_row, new_business_row, table_header, page_header, page_footer, ordinary_text, new_table。
+    - `continuation_row`：当`candidate.continuation`的内容是`candidate.previous`同一行“对应列”的剩余部分时使用（通常存在对应列内容不完整、缺少结尾标点，或有延续性列表内容等），列映射必须正确。
+    - `new_business_row`：当`candidate.continuation`是同一表格中新的一整行，而不是上一行的延续时使用。
+- row_action：JSON 字符串，必须是 `merge` 或 `keep`。当 `continuation_role` 为 `continuation_row` 时，`row_action=merge` 才有效。重复的表头或新的业务行即使属于同一表，也必须使用 `keep`。当固定行在继续的表中开始一个完整的新记录时，使用 `new_business_row`。
+- table_action：JSON 字符串，必须是 `merge_fragments` 或 `keep`。独立于 `row_action` 决定。`merge_fragments` 表示右边的片段继续左边的逻辑表；这并不意味着边界行应合并。`new_table`、`page_header`、`page_footer` 和 `ordinary_text` 必须使用 `keep`。当 `continuation_role` 为 `continuation_row` 或 `new_business_row` 时，`table_action=merge_fragments` 有效。
+- confidence：JSON 数字，范围从 0.0 到 1.0（包括 0.0 和 1.0）。不要返回带引号的数字、布尔值、null、NaN 或无穷大。
+- reason：非空 JSON 字符串，最多 200 个字符。解释两个结论的原因。
 
-Field contract:
-- candidate_id: JSON string. Copy the supplied candidate_id exactly.
-- continuation_role: JSON string classifying candidate.continuation only. It must be one
-  of: continuation_row, new_business_row, table_header, page_header, page_footer,
-  ordinary_text, new_table.
-  - `continuation_row`: Use when the content in `candidate.continuation`
-    is the remaining part of the same row as `candidate.previous`.
-  - `new_business_row`: Use when `candidate.continuation` is a complete new row of the same table,
-    not a continuation of the previous row.
-- row_action: JSON string, exactly merge or keep. row_action=merge is valid only when
-  continuation_role is continuation_row. A repeated header or a new business row must
-  use keep even when the fragments belong to one table. Use new_business_row when the
-  fixed row starts a complete new record in the continued table.
-- table_action: JSON string, exactly merge_fragments or keep. Decide this independently
-  from row_action. merge_fragments means the right fragment continues the left logical
-  table; it does not mean the boundary rows should be combined. new_table, page_header,
-  page_footer, and ordinary_text must use keep. row_action=merge is valid when continuation_role
-  is continuation_row or new_business_row.
-- confidence: JSON number from 0.0 through 1.0 inclusive. Do not return a quoted number,
-  boolean, null, NaN, or infinity.
-- reason: non-empty JSON string of at most 200 characters. Explain both relationships.
+严格的 JSON 规则：
+- 输出一个裸 JSON 对象，前后不要有任何内容。
+- 不使用 Markdown 代码块或对象外的文字。
+- 不遗漏、添加或重复字段。
+- 字段名和枚举值区分大小写。
+- 不允许捏造或修改 `candidate_id`。
 
-Strict JSON rules:
-- Output one bare JSON object and nothing before or after it.
-- Do not use Markdown fences or prose outside the object.
-- Do not omit, add, or duplicate fields.
-- Field names and enum values are case-sensitive.
-- Never invent or modify candidate_id.
-
-Valid output example:
+合法的输出示例:
 {"candidate_id":"copy-exactly","continuation_role":"continuation_row",\
 "row_action":"merge","table_action":"merge_fragments","confidence":0.92,\
-"reason":"Same table and completes the previous row."}
+"reason":"同一张表，并完成前一行。"}
 """
 
 
