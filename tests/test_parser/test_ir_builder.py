@@ -65,8 +65,8 @@ def test_build_chunks_basic():
     assert chunks[3].section_path == "Section B"
 
 
-def test_build_chunks_large_para_splits():
-    """A paragraph longer than 500 chars should be split into sentence-level chunks."""
+def test_build_chunks_keeps_paragraph_below_default_limit_intact():
+    """Paragraphs below the 2000-character default remain one authoritative chunk."""
     long_sent_1 = "A" * 200 + "."
     long_sent_2 = "B" * 200 + "."
     long_sent_3 = "C" * 200 + "."
@@ -81,12 +81,8 @@ def test_build_chunks_large_para_splits():
 
     chunks = build_chunks(ir, "v2")
 
-    # Should produce ≥ 3 sentence-level chunks
-    assert len(chunks) >= 3
-    texts = [c.text for c in chunks]
-    assert long_sent_1 in texts
-    assert long_sent_2 in texts
-    assert long_sent_3 in texts
+    assert len(chunks) == 1
+    assert chunks[0].text == long_text
 
 
 def test_chunk_no_is_sequential():

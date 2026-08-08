@@ -83,8 +83,8 @@ def test_classifies_deletion():
     assert result.items[0].baseline_text == b_para.text
 
 
-def test_rule_classify_format_change():
-    """Identical texts with only whitespace difference → diff_type='格式变化', risk='none'."""
+def test_rule_suppresses_whitespace_only_change():
+    """Whitespace-only differences are equivalent and should not be reported."""
     from app.core.diff.diff_classifier import classify
 
     b_para = make_para("本合同自签署之日起生效。")
@@ -100,9 +100,7 @@ def test_rule_classify_format_change():
         target_version_id="v1",
     )
 
-    assert len(result.items) == 1
-    assert result.items[0].diff_type == "格式变化"
-    assert result.items[0].risk_level == "none"
+    assert result.items == []
 
 
 def test_rule_classify_substantial():

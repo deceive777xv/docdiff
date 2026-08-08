@@ -31,6 +31,21 @@ from app.db import document_repo
 logger = logging.getLogger(__name__)
 
 
+DOCUMENT_FILE_FILTER = (
+    "支持的文档 (*.pdf *.doc *.docx *.docm *.ppt *.pps *.pot *.pptx *.pptm *.ppsx *.ppsm "
+    "*.xls *.xlsx *.xlsm *.xlsb *.odt *.ods *.odp *.rtf *.epub *.csv *.html *.htm "
+    "*.json *.xml *.txt *.md *.markdown)"
+    ";;PDF (*.pdf)"
+    ";;Word (*.doc *.docx *.docm)"
+    ";;PowerPoint (*.ppt *.pps *.pot *.pptx *.pptm *.ppsx *.ppsm)"
+    ";;Excel (*.xls *.xlsx *.xlsm *.xlsb)"
+    ";;OpenDocument (*.odt *.ods *.odp)"
+    ";;网页 (*.html *.htm)"
+    ";;Markdown (*.md *.markdown)"
+    ";;其他 (*.rtf *.epub *.csv *.json *.xml *.txt)"
+)
+
+
 _INGEST_NODE_PROGRESS = {
     "file_check": ("file_checked", 10, "正在解析文档"),
     "parse_doc": ("parsed", 35, "正在规范化段落与跨页表格"),
@@ -354,10 +369,7 @@ class LibraryPage(QWidget):
     def _import_document(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self, "选择文档", "",
-            "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt *.md *.markdown)"
-            ";;PDF (*.pdf);;Word (*.docx);;PowerPoint (*.pptx)"
-            ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;Markdown (*.md *.markdown)"
-            ";;其他 (*.csv *.json *.xml *.epub *.txt)"
+            DOCUMENT_FILE_FILTER,
         )
         if not paths:
             return
@@ -545,10 +557,7 @@ class LibraryPage(QWidget):
             self,
             f"为《{doc_name}》选择新版本文件",
             "",
-            "支持的文档 (*.pdf *.docx *.pptx *.xlsx *.xls *.html *.htm *.csv *.json *.xml *.epub *.txt *.md *.markdown)"
-            ";;PDF (*.pdf);;Word (*.docx);;PowerPoint (*.pptx)"
-            ";;Excel (*.xlsx *.xls);;网页 (*.html *.htm);;Markdown (*.md *.markdown)"
-            ";;其他 (*.csv *.json *.xml *.epub *.txt)",
+            DOCUMENT_FILE_FILTER,
         )
         self._start_ingest_batch(paths, document_id=doc_id)
 

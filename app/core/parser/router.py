@@ -1,16 +1,24 @@
-"""Document parsing router — format guard + dispatcher to markitdown_adapter."""
+"""Document parsing router with explicit parser ownership by format."""
 from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.parser import markitdown_adapter, pymupdf4llm_adapter
+from app.core.parser import anydoc_adapter, markitdown_adapter, pymupdf4llm_adapter
 from app.core.types import DocumentIR, ParseQualityReport
 
-SUPPORTED_EXTENSIONS = {
-    ".pdf", ".docx", ".pptx", ".xlsx", ".xls",
-    ".html", ".htm", ".csv", ".json", ".xml", ".epub",
-    ".txt", ".md", ".markdown",
-}
+
+PDF_EXTENSIONS = frozenset({".pdf"})
+ANYDOC_EXTENSIONS = frozenset({
+    ".doc", ".docx", ".docm",
+    ".ppt", ".pps", ".pot", ".pptx", ".pptm", ".ppsx", ".ppsm",
+    ".xls", ".xlsx", ".xlsm", ".xlsb",
+    ".odt", ".ods", ".odp",
+    ".rtf", ".epub", ".csv",
+})
+MARKITDOWN_EXTENSIONS = frozenset({
+    ".html", ".htm", ".json", ".xml", ".txt", ".md", ".markdown",
+})
+SUPPORTED_EXTENSIONS = PDF_EXTENSIONS | ANYDOC_EXTENSIONS | MARKITDOWN_EXTENSIONS
 
 
 def parse_document(
@@ -21,12 +29,13 @@ def parse_document(
     suffix = Path(file_path).suffix.lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise ValueError(f"Unsupported format: {suffix!r}")
-    if suffix == ".pdf":
+    if suffix in PDF_EXTENSIONS:
         ir = pymupdf4llm_adapter.extract(file_path)
+    elif suffix in ANYDOC_EXTENSIONS:
+        ir = anydoc_adapter.extract(file_path)
     else:
         ir = markitdown_adapter.extract(file_path, llm_client, llm_model)
-    report = evaluate_quality(ir)
-    return ir, report
+    return ir, evaluate_quality(ir)
 
 
 def evaluate_quality(ir: DocumentIR) -> ParseQualityReport:
@@ -47,7 +56,6 @@ def evaluate_quality(ir: DocumentIR) -> ParseQualityReport:
 
     avg_len = sum(len(p.text) for p in all_paras) / len(all_paras)
     short_ratio = sum(1 for p in all_paras if len(p.text) < 10) / len(all_paras)
-
     score = 1.0
 
     if avg_len < 20:
@@ -64,10 +72,8 @@ def evaluate_quality(ir: DocumentIR) -> ParseQualityReport:
         score -= 0.1
 
     score = max(0.0, min(1.0, score))
-    needs_ocr = score < 0.4
-
     return ParseQualityReport(
         quality_score=round(score, 2),
-        needs_ocr=needs_ocr,
+        needs_ocr=score < 0.4,
         warnings=warnings,
     )

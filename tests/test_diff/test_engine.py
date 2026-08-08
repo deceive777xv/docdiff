@@ -103,15 +103,13 @@ class TestEvaluateQuality:
 # ── compare() tests ────────────────────────────────────────────────────────────
 
 class TestCompare:
-    def test_compare_identical_docs_returns_mostly_format_changes(self):
+    def test_compare_identical_docs_returns_no_changes(self):
         from app.core.diff import compare
         ir = _make_ir()
         result = compare(ir, ir)
         assert result.task_id
         assert isinstance(result.items, list)
-        # Identical docs → all pairs match at high similarity → 格式变化 or 微调
-        non_add_del = [i for i in result.items if i.diff_type not in ("新增", "删减")]
-        assert len(non_add_del) > 0
+        assert result.items == []
 
     def test_compare_empty_vs_populated_returns_adds(self):
         from app.core.diff import compare
@@ -492,7 +490,7 @@ class TestCompare:
     def test_compare_markdown_table_with_insert_and_reorder_keeps_business_rows_matched(self):
         """Real markdown table syntax should not compare separators or shifted rows."""
         from app.core.diff import compare
-        from app.core.parser.markitdown_adapter import _parse_markdown
+        from app.core.parser.markdown_ir import parse_markdown
 
         baseline_md = """
 # 项目数据统计表
@@ -521,8 +519,8 @@ class TestCompare:
 """.strip()
 
         result = compare(
-            _parse_markdown(baseline_md, "baseline", "b"),
-            _parse_markdown(target_md, "target", "t"),
+            parse_markdown(baseline_md, "baseline", "b"),
+            parse_markdown(target_md, "target", "t"),
             policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
         )
 

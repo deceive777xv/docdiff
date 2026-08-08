@@ -22,7 +22,7 @@ Doc Diff Agent 是一个面向 Windows 桌面场景的文档比对与问答工�
 | 层次 | 技术 |
 |------|------|
 | 桌面界面 | PySide6 |
-| 文档解析 | pymupdf4llm（PDF）+ markitdown[all]（Office / HTML / 表格 / 文本等）、markitdown-ocr |
+| 文档解析 | pymupdf4llm（PDF）+ AnyDoc（Office / OpenDocument / RTF / EPUB / CSV）+ MarkItDown 兼容解析 |
 | Agent 编排 | LangGraph（ingest / compare / QA 三图） |
 | 流式生成 | LangChain `ChatOpenAI`（streaming=True）|
 | 向量检索 | FAISS-cpu |
@@ -89,11 +89,11 @@ data/
 
 ## 文档处理说明
 
-文档解析采用 `pymupdf4llm + markitdown` 的组合方案：PDF 优先由 [pymupdf4llm](https://github.com/pymupdf/RAG) 转换为 Markdown，DOCX、PPTX、XLSX、HTML、CSV、EPUB、TXT 等格式由 [markitdown](https://github.com/microsoft/markitdown) 转换为 Markdown。两条解析路径随后统一转换为内部 DocumentIR 结构，保留章节、段落、句子与 Markdown 表格行，供检索、比对和报告生成复用。
+文档解析采用显式三级路由：PDF 由 [pymupdf4llm](https://github.com/pymupdf/RAG) 处理；Word、PowerPoint、Excel、OpenDocument、RTF、EPUB 和 CSV 由本地 [AnyDoc](https://github.com/firecrawl/anydoc) 转换为干净的 GitHub-Flavored Markdown；AnyDoc 不支持的 HTML、JSON、XML、TXT 和 Markdown 继续由 [MarkItDown](https://github.com/microsoft/markitdown) 兼容解析。各路径随后转换为内部 DocumentIR，供导入规范化、检索、比对和报告生成复用。
 
-支持格式：`.pdf`、`.docx`、`.pptx`、`.xlsx`、`.xls`、`.html`、`.htm`、`.csv`、`.json`、`.xml`、`.epub`、`.txt`
+支持格式：`.pdf`；`.doc`、`.docx`、`.docm`；`.ppt`、`.pps`、`.pot`、`.pptx`、`.pptm`、`.ppsx`、`.ppsm`；`.xls`、`.xlsx`、`.xlsm`、`.xlsb`；`.odt`、`.ods`、`.odp`；`.rtf`、`.epub`、`.csv`；`.html`、`.htm`、`.json`、`.xml`、`.txt`、`.md`、`.markdown`。
 
-**OCR 支持**：在设置页配置 OpenAI 兼容 API 后，MarkItDown 插件链会启用 markitdown-ocr 辅助识别。PDF 当前优先使用 pymupdf4llm 的文本抽取能力；若解析质量不足，质量报告会提示可能需要 OCR 或人工检查。
+**OCR 支持**：AnyDoc 是纯本地结构解析器，不执行 OCR。MarkItDown 兼容路径在设置 OpenAI 兼容 API 后仍可启用 markitdown-ocr 插件。PDF 当前使用 pymupdf4llm 文本抽取；若解析质量不足，质量报告会提示可能需要 OCR 或人工检查。
 
 ## 测试
 
@@ -112,7 +112,7 @@ app/
   core/
     diff/     结构对齐、语义匹配、差异分类
     model/    BaseProvider、OpenAI 适配、本地 Embedding、LangChain 工厂
-    parser/   文档解析路由（pymupdf4llm_adapter + markitdown_adapter + router）
+    parser/   文档解析路由（pymupdf4llm / AnyDoc / MarkItDown + 共享 Markdown IR）
     retrieval/ BM25 + FAISS 混合检索
     types.py  核心数据结构
   db/         SQLite 仓储层（documents / chunks / compare_tasks / qa_sessions / checkpoints）

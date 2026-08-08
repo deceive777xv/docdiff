@@ -13,6 +13,13 @@ from app.db.schema import DDL
 from app.ui.app_context import AppContext
 
 
+def test_document_file_filter_covers_every_supported_extension():
+    from app.core.parser.router import SUPPORTED_EXTENSIONS
+    from app.ui.pages.library_page import DOCUMENT_FILE_FILTER
+
+    assert all(f"*{extension}" in DOCUMENT_FILE_FILTER for extension in SUPPORTED_EXTENSIONS)
+
+
 class _FakeSignal:
     def __init__(self):
         self.connections = []

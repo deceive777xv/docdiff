@@ -74,6 +74,8 @@ hiddenimports = [
     "rank_bm25",
     "docx",
     "fitz",  # PyMuPDF
+    "anydoc",
+    "anydoc._anydoc",  # firecrawl-anydoc native extension (_anydoc.pyd on Windows)
 ]
 hiddenimports += collect_submodules("app")
 

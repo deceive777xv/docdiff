@@ -11,7 +11,7 @@ SPEC_PATH = ROOT / "build" / "doc_diff_agent.spec"
 FA_BUNDLE_DIR = Path("assets/fonts/fontawesome-free-7.2.0-desktop")
 
 
-def _load_spec_datas(monkeypatch) -> list[tuple[str, str]]:
+def _load_spec_config(monkeypatch) -> dict[str, list]:
     hooks = ModuleType("PyInstaller.utils.hooks")
     hooks.collect_data_files = lambda *args, **kwargs: []
     hooks.collect_submodules = lambda *args, **kwargs: []
@@ -25,10 +25,11 @@ def _load_spec_datas(monkeypatch) -> list[tuple[str, str]]:
     monkeypatch.setitem(sys.modules, "PyInstaller.utils", utils)
     monkeypatch.setitem(sys.modules, "PyInstaller.utils.hooks", hooks)
 
-    captured: dict[str, list[tuple[str, str]]] = {}
+    captured: dict[str, list] = {}
 
     def analysis(*args, **kwargs):
         captured["datas"] = kwargs["datas"]
+        captured["hiddenimports"] = kwargs["hiddenimports"]
         return SimpleNamespace(
             pure=[],
             zipped_data=[],
@@ -48,7 +49,11 @@ def _load_spec_datas(monkeypatch) -> list[tuple[str, str]]:
             "COLLECT": lambda *args, **kwargs: object(),
         },
     )
-    return captured["datas"]
+    return captured
+
+
+def _load_spec_datas(monkeypatch) -> list[tuple[str, str]]:
+    return _load_spec_config(monkeypatch)["datas"]
 
 
 def _expand_bundle_paths(datas: list[tuple[str, str]]) -> set[Path]:
@@ -91,3 +96,9 @@ def test_non_fontawesome_runtime_assets_remain_bundled(monkeypatch):
         for path in bundled
         if path.is_relative_to(Path("assets/fonts/HarmonyOS_Sans"))
     )
+
+
+def test_anydoc_native_extension_is_an_explicit_hidden_import(monkeypatch):
+    hiddenimports = set(_load_spec_config(monkeypatch)["hiddenimports"])
+
+    assert {"anydoc", "anydoc._anydoc"} <= hiddenimports

@@ -21,7 +21,7 @@ Doc Diff Agent 是一个面向 Windows 桌面的文档版本管理、语义比�
 | --- | --- | --- |
 | 桌面 UI | PySide6 / Qt WebEngine | 主窗口、页面导航、表格、对比双栏 Web 视图、后台线程 |
 | 工作流编排 | LangGraph | 导入、比对、问答三个工作流 |
-| 文档解析 | pymupdf4llm + markitdown[all] + markitdown-ocr | PDF 走 pymupdf4llm，其它格式走 MarkItDown |
+| 文档解析 | pymupdf4llm + firecrawl-anydoc + MarkItDown | PDF、AnyDoc 支持格式、兼容文本格式显式三级路由 |
 | 数据库 | SQLite | 文档、版本、chunk、任务、差异、QA 会话和 checkpoint |
 | 向量索引 | FAISS-cpu | 每个文档版本独立索引 |
 | 关键词检索 | rank-bm25 | 中文使用字符级 token 化 |
@@ -29,7 +29,7 @@ Doc Diff Agent 是一个面向 Windows 桌面的文档版本管理、语义比�
 | 流式问答 | LangChain ChatOpenAI streaming | QA 页面逐 token 输出 |
 | 报告导出 | python-docx / HTML | 导出 DOCX 和独立 HTML |
 | 打包 | PyInstaller onedir + Inno Setup | 生成 Windows 离线安装器 |
-| 测试 | pytest / pytest-qt | 当前全量测试 254 个通过 |
+| 测试 | pytest / pytest-qt | 当前全量测试 632 个通过 |
 
 ## 3. 目录结构
 
@@ -245,13 +245,18 @@ file_check
 调用 `app/core/parser/router.py`：
 
 - `.pdf`：使用 `pymupdf4llm_adapter.extract()`。
-- 其它支持格式：使用 `markitdown_adapter.extract()`。
+- Word、PowerPoint、Excel、OpenDocument、RTF、EPUB、CSV：使用 `anydoc_adapter.extract()`。
+- HTML、JSON、XML、TXT、Markdown：使用 `markitdown_adapter.extract()`。
 
 支持格式：
 
 ```text
-.pdf, .docx, .pptx, .xlsx, .xls, .html, .htm,
-.csv, .json, .xml, .epub, .txt
+.pdf,
+.doc, .docx, .docm,
+.ppt, .pps, .pot, .pptx, .pptm, .ppsx, .ppsm,
+.xls, .xlsx, .xlsm, .xlsb,
+.odt, .ods, .odp, .rtf, .epub, .csv,
+.html, .htm, .json, .xml, .txt, .md, .markdown
 ```
 
 解析后会进行质量评估：
@@ -285,13 +290,17 @@ PDF 当前优先使用 `pymupdf4llm.to_markdown()` 转 Markdown，再走统一 M
 - 对 PDF 文本抽取和版面结构更友好。
 - 输出 Markdown，方便后续统一处理表格、标题和段落。
 
-### 10.2 非 PDF 解析
+### 10.2 AnyDoc 非 PDF 解析
 
-DOCX、PPTX、XLSX、HTML、CSV、EPUB、TXT 等由 `MarkItDown` 转 Markdown。
+AnyDoc 支持的 Word、PowerPoint、Excel、OpenDocument、RTF、EPUB 和 CSV 由 `anydoc.to_markdown()` 在本地转换为 GitHub-Flavored Markdown。AnyDoc 的公开文档模型不携带页码，因此这些格式生成的 paragraph 保持 `page_no=None`。
+
+### 10.3 MarkItDown 兼容解析
+
+HTML、JSON、XML、TXT、Markdown 等 AnyDoc 不支持的原有格式继续由 `MarkItDown` 转换。
 
 当设置页配置了 OpenAI 兼容 API 后，`MarkItDown` 初始化时会启用插件链，供 `markitdown-ocr` 辅助处理可识别内容。
 
-### 10.3 Markdown 到 DocumentIR
+### 10.4 Markdown 到 DocumentIR
 
 解析器会：
 
@@ -301,14 +310,14 @@ DOCX、PPTX、XLSX、HTML、CSV、EPUB、TXT 等由 `MarkItDown` 转 Markdown。
 - 对普通文本按中英文句末标点拆分 sentence。
 - 对表格将每一行作为 sentence，方便后续表格行级比对。
 
-`clean_md_table.py` 用于清理 Markdown 表格单元格，减少格式噪声对检索和比对的影响。
+`markdown_cleanup.py` 只删除 Markdown 表格单元格中的 `=DISPIMG(...)` 解析噪声。`NaN`、`None`、`NA`、`N/A` 等字面值作为原始内容保留。AnyDoc 与 MarkItDown 共用 `markdown_ir.py` 转换逻辑。
 
 ## 11. Chunk 与索引
 
-`build_chunks(ir, version_id, max_chars=500)` 的策略：
+`build_chunks(ir, version_id, max_chars=2000)` 的策略：
 
 - 普通短段落直接作为一个 chunk。
-- 超过 `500` 字符的段落按 `sentences` 拆成句子级 chunk。
+- 超过 `2000` 字符的段落按 `sentences` 拆成句子级 chunk。
 - 表格行在解析阶段已保存为 sentence，因此大表格也能拆成更细的检索单元。
 
 索引流程：
@@ -747,7 +756,7 @@ dist/DocDiffAgent-v1.0.1-setup.exe
 | `tests/test_db/` | SQLite schema、仓储层、FAISS 文件存储 |
 | `tests/test_diff/` | 章节对齐、语义匹配、差异分类、表格行比对 |
 | `tests/test_model/` | OpenAI provider、本地 embedding、LangChain factory |
-| `tests/test_parser/` | MarkItDown 解析、IR 构建、OCR 接口、解析路由 |
+| `tests/test_parser/` | AnyDoc、MarkItDown、PDF、共享 Markdown IR、清理、OCR 接口与解析路由 |
 | `tests/test_retrieval/` | BM25、FAISS indexer、混合检索 |
 | `tests/test_services/` | 导入、比对、QA service、报告、备份、更新 |
 | `tests/ui/` | 首页、文档库、对比页、QA 页交互与样式 |
@@ -772,7 +781,7 @@ $env:TMP = $tmp
 最近一次验证结果：
 
 ```text
-254 passed, 3 warnings
+632 passed, 3 warnings
 ```
 
 ## 24. 主要扩展点
