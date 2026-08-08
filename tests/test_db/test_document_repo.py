@@ -30,6 +30,20 @@ def _insert_doc(conn, *, doc_name="Contract A", doc_type="pdf",
     )
 
 
+def _write_import_artifacts(data_dir, artifact_id):
+    paths = (
+        data_dir / "parsed" / f"{artifact_id}.json",
+        data_dir / "parsed" / "raw" / f"{artifact_id}.json",
+        data_dir / "parsed" / "traces" / f"{artifact_id}.structure.json",
+        data_dir / "parsed" / "traces" / f"{artifact_id}.normalization.json",
+        data_dir / "parsed" / "profiles" / f"{artifact_id}.boundary.json",
+    )
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    return paths
+
+
 # ── Tests ──────────────────────────────────────────────────────────────────────
 
 def test_insert_and_get_by_hash(db_conn):
@@ -100,6 +114,52 @@ def test_insert_version_and_list(db_conn):
     assert versions[1]["id"] == v1_id
 
 
+def test_list_library_entries_returns_every_version_and_empty_document(db_conn):
+    versioned_doc = _insert_doc(
+        db_conn,
+        doc_name="Versioned",
+        file_hash="hash_versioned",
+    )
+    v1_id = document_repo.insert_version(
+        db_conn,
+        document_id=versioned_doc,
+        version_no=1,
+    )
+    v2_id = document_repo.insert_version(
+        db_conn,
+        document_id=versioned_doc,
+        version_no=2,
+    )
+    empty_doc = _insert_doc(
+        db_conn,
+        doc_name="Empty",
+        file_hash="hash_empty",
+        file_path="/tmp/empty.pdf",
+    )
+    db_conn.execute(
+        "UPDATE documents SET created_at = ? WHERE id = ?",
+        ("2026-01-01T00:00:00", versioned_doc),
+    )
+    db_conn.execute(
+        "UPDATE documents SET created_at = ? WHERE id = ?",
+        ("2026-01-02T00:00:00", empty_doc),
+    )
+    db_conn.commit()
+
+    entries = document_repo.list_library_entries(db_conn)
+
+    assert [
+        (entry["document_id"], entry["version_id"])
+        for entry in entries
+    ] == [
+        (empty_doc, None),
+        (versioned_doc, v2_id),
+        (versioned_doc, v1_id),
+    ]
+    assert entries[0]["doc_name"] == "Empty"
+    assert entries[1]["version_no"] == 2
+
+
 def test_list_latest_versions_filters_by_source_type(db_conn):
     """list_latest_versions returns one latest version per document."""
     std_doc = _insert_doc(db_conn, doc_name="Standard", file_hash="hash_std")
@@ -140,3 +200,167 @@ def test_update_version_status(db_conn):
 
     row_after = document_repo.get_version_by_id(db_conn, version_id)
     assert row_after["status"] == "archived"
+
+
+def test_delete_version_removes_only_selected_versions_data(db_conn, tmp_path):
+    doc_id = _insert_doc(db_conn)
+    sibling_paths = _write_import_artifacts(tmp_path, "sibling-artifact")
+    selected_paths = _write_import_artifacts(tmp_path, "selected-artifact")
+    sibling_id = document_repo.insert_version(
+        db_conn,
+        document_id=doc_id,
+        version_no=1,
+        parsed_json_path=str(sibling_paths[0]),
+    )
+    selected_id = document_repo.insert_version(
+        db_conn,
+        document_id=doc_id,
+        version_no=2,
+        parsed_json_path=str(selected_paths[0]),
+    )
+    db_conn.execute(
+        """INSERT INTO chunks
+           (id, version_id, chunk_no, section_path, page_no, text, faiss_index_id)
+           VALUES (?,?,?,?,?,?,?)""",
+        ("selected-chunk", selected_id, 0, "", 1, "text", -1),
+    )
+    db_conn.execute(
+        """INSERT INTO compare_tasks
+           (id, baseline_version_id, target_version_id, status, created_at)
+           VALUES (?,?,?,?,?)""",
+        ("selected-task", sibling_id, selected_id, "completed", "2026-01-01"),
+    )
+    db_conn.execute(
+        """INSERT INTO diff_items
+           (id, compare_task_id, diff_type, risk_level)
+           VALUES (?,?,?,?)""",
+        ("selected-diff", "selected-task", "modified", "low"),
+    )
+    db_conn.commit()
+    selected_faiss = tmp_path / "faiss" / selected_id
+    selected_faiss.mkdir(parents=True)
+    (selected_faiss / "index.faiss").write_bytes(b"index")
+
+    result = document_repo.delete_version(
+        db_conn,
+        selected_id,
+        data_dir=str(tmp_path),
+    )
+
+    assert result.document_deleted is False
+    assert result.cleanup_failures == ()
+    assert document_repo.get_document_by_id(db_conn, doc_id) is not None
+    assert document_repo.get_version_by_id(db_conn, sibling_id) is not None
+    assert document_repo.get_version_by_id(db_conn, selected_id) is None
+    assert db_conn.execute(
+        "SELECT 1 FROM chunks WHERE version_id = ?", (selected_id,)
+    ).fetchone() is None
+    assert db_conn.execute(
+        "SELECT 1 FROM compare_tasks WHERE id = 'selected-task'"
+    ).fetchone() is None
+    assert db_conn.execute(
+        "SELECT 1 FROM diff_items WHERE id = 'selected-diff'"
+    ).fetchone() is None
+    assert not selected_faiss.exists()
+    assert all(not path.exists() for path in selected_paths)
+    assert all(path.exists() for path in sibling_paths)
+
+
+def test_delete_version_removes_parent_when_it_was_the_last_version(
+    db_conn,
+    tmp_path,
+):
+    doc_id = _insert_doc(db_conn)
+    artifact_paths = _write_import_artifacts(tmp_path, "last-artifact")
+    version_id = document_repo.insert_version(
+        db_conn,
+        document_id=doc_id,
+        version_no=1,
+        parsed_json_path=str(artifact_paths[0]),
+    )
+
+    result = document_repo.delete_version(
+        db_conn,
+        version_id,
+        data_dir=str(tmp_path),
+    )
+
+    assert result.document_deleted is True
+    assert result.cleanup_failures == ()
+    assert document_repo.get_document_by_id(db_conn, doc_id) is None
+    assert all(not path.exists() for path in artifact_paths)
+
+
+def test_delete_version_commits_database_and_reports_artifact_cleanup_failure(
+    db_conn,
+    tmp_path,
+    monkeypatch,
+):
+    doc_id = _insert_doc(db_conn)
+    artifact_paths = _write_import_artifacts(tmp_path, "locked-artifact")
+    version_id = document_repo.insert_version(
+        db_conn,
+        document_id=doc_id,
+        version_no=1,
+        parsed_json_path=str(artifact_paths[0]),
+    )
+    locked_path = artifact_paths[1].resolve()
+    path_type = type(locked_path)
+    original_unlink = path_type.unlink
+
+    def fail_locked(path, *args, **kwargs):
+        if path == locked_path:
+            raise PermissionError("locked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "unlink", fail_locked)
+
+    result = document_repo.delete_version(
+        db_conn,
+        version_id,
+        data_dir=str(tmp_path),
+    )
+
+    assert result.cleanup_failures == (locked_path,)
+    assert document_repo.get_version_by_id(db_conn, version_id) is None
+    assert document_repo.get_document_by_id(db_conn, doc_id) is None
+    assert locked_path.exists()
+
+
+def test_delete_missing_version_changes_nothing(db_conn, tmp_path):
+    doc_id = _insert_doc(db_conn)
+
+    with pytest.raises(ValueError, match="Version not found"):
+        document_repo.delete_version(
+            db_conn,
+            "missing-version",
+            data_dir=str(tmp_path),
+        )
+
+    assert document_repo.get_document_by_id(db_conn, doc_id) is not None
+
+
+def test_delete_document_removes_every_versions_complete_artifact_set(
+    db_conn,
+    tmp_path,
+):
+    doc_id = _insert_doc(db_conn)
+    first_paths = _write_import_artifacts(tmp_path, "first-artifact")
+    second_paths = _write_import_artifacts(tmp_path, "second-artifact")
+    document_repo.insert_version(
+        db_conn,
+        document_id=doc_id,
+        version_no=1,
+        parsed_json_path=str(first_paths[0]),
+    )
+    document_repo.insert_version(
+        db_conn,
+        document_id=doc_id,
+        version_no=2,
+        parsed_json_path=str(second_paths[0]),
+    )
+
+    document_repo.delete_document(db_conn, doc_id, data_dir=str(tmp_path))
+
+    assert all(not path.exists() for path in first_paths)
+    assert all(not path.exists() for path in second_paths)

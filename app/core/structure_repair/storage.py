@@ -43,6 +43,57 @@ class ImportStructureArtifacts:
     boundary_profile: DocumentBoundaryProfile
 
 
+def import_artifact_paths(
+    data_dir: str | Path,
+    parsed_json_path: str | Path,
+) -> tuple[Path, ...]:
+    """Return the exact import artifacts associated with one normalized IR."""
+    parsed_dir = (Path(data_dir) / "parsed").resolve()
+    normalized_path = Path(parsed_json_path).resolve()
+    if (
+        normalized_path.parent != parsed_dir
+        or normalized_path.suffix != ".json"
+        or normalized_path.name != f"{normalized_path.stem}.json"
+    ):
+        raise ValueError(
+            f"Parsed JSON path is outside the expected parsed root: {parsed_json_path}"
+        )
+
+    artifact_id = normalized_path.stem
+    candidates = (
+        normalized_path,
+        parsed_dir / "raw" / f"{artifact_id}.json",
+        parsed_dir / "traces" / f"{artifact_id}.structure.json",
+        parsed_dir / "traces" / f"{artifact_id}.normalization.json",
+        parsed_dir / "profiles" / f"{artifact_id}.boundary.json",
+    )
+    resolved: list[Path] = []
+    for candidate in candidates:
+        path = candidate.resolve()
+        try:
+            path.relative_to(parsed_dir)
+        except ValueError as exc:
+            raise ValueError(
+                f"Import artifact path is outside the expected parsed root: {path}"
+            ) from exc
+        resolved.append(path)
+    return tuple(resolved)
+
+
+def delete_import_artifacts(
+    data_dir: str | Path,
+    parsed_json_path: str | Path,
+) -> list[Path]:
+    """Delete one version's import artifacts and return paths that could not be removed."""
+    failures: list[Path] = []
+    for path in import_artifact_paths(data_dir, parsed_json_path):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            failures.append(path)
+    return failures
+
+
 def _hash(document: DocumentIR) -> str:
     payload = json.dumps(
         document_ir_to_dict(document),

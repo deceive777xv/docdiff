@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PySide6.QtWidgets import QMessageBox
 
 from app.config.settings import AppSettings
 from app.db import document_repo
@@ -195,8 +196,8 @@ def test_run_ingest_finished_discards_the_finished_thread(library_page):
     assert second_thread in library_page._threads
 
 
-def test_refresh_shows_latest_version_and_version_count(library_page, mem_conn):
-    """The library table should make newly added versions visible to users."""
+def test_refresh_shows_each_document_version_as_its_own_row(library_page, mem_conn):
+    """The library table should expose every version as an independently selectable row."""
     doc_id = document_repo.insert_document(
         mem_conn,
         doc_name="合同",
@@ -222,8 +223,109 @@ def test_refresh_shows_latest_version_and_version_count(library_page, mem_conn):
 
     assert library_page._table.columnCount() == 4
     assert library_page._table.horizontalHeaderItem(2).text() == "版本"
-    assert library_page._table.item(0, 2).text() == "v2（终稿） · 共 2 版"
+    assert library_page._table.rowCount() == 2
+    assert library_page._table.item(0, 0).text() == "合同"
+    assert library_page._table.item(0, 2).text() == "v2（终稿）"
+    assert library_page._table.item(1, 0).text() == "合同"
+    assert library_page._table.item(1, 2).text() == "v1（初稿）"
     assert library_page._status.text() == "共 1 份文档，2 个版本"
+
+
+def test_delete_button_removes_only_the_selected_version(library_page, mem_conn):
+    doc_id = document_repo.insert_document(
+        mem_conn,
+        doc_name="合同",
+        doc_type="docx",
+        file_path="/docs/contract.docx",
+        file_hash="delete-selected-version-hash",
+        source_type="standard",
+    )
+    v1_id = document_repo.insert_version(
+        mem_conn,
+        document_id=doc_id,
+        version_no=1,
+        version_label="初稿",
+    )
+    v2_id = document_repo.insert_version(
+        mem_conn,
+        document_id=doc_id,
+        version_no=2,
+        version_label="终稿",
+    )
+    library_page.refresh()
+    library_page._table.selectRow(0)
+    assert library_page._delete_btn.text() == "删除版本"
+
+    with patch(
+        "app.ui.pages.library_page.QMessageBox.question",
+        return_value=QMessageBox.StandardButton.Yes,
+    ) as question:
+        library_page._delete_btn.click()
+
+    assert "v2（终稿）" in question.call_args.args[2]
+    assert document_repo.get_document_by_id(mem_conn, doc_id) is not None
+    assert document_repo.get_version_by_id(mem_conn, v1_id) is not None
+    assert document_repo.get_version_by_id(mem_conn, v2_id) is None
+    assert library_page._table.rowCount() == 1
+    assert library_page._table.item(0, 2).text() == "v1（初稿）"
+
+
+def test_last_version_confirmation_explains_parent_document_deletion(
+    library_page,
+    mem_conn,
+):
+    doc_id = document_repo.insert_document(
+        mem_conn,
+        doc_name="合同",
+        doc_type="docx",
+        file_path="/docs/contract.docx",
+        file_hash="last-version-confirmation-hash",
+        source_type="standard",
+    )
+    version_id = document_repo.insert_version(
+        mem_conn,
+        document_id=doc_id,
+        version_no=1,
+    )
+    library_page.refresh()
+    library_page._table.selectRow(0)
+
+    with patch(
+        "app.ui.pages.library_page.QMessageBox.question",
+        return_value=QMessageBox.StandardButton.No,
+    ) as question:
+        library_page._delete_btn.click()
+
+    assert "最后一个版本" in question.call_args.args[2]
+    assert "文档记录也会一并删除" in question.call_args.args[2]
+    assert document_repo.get_document_by_id(mem_conn, doc_id) is not None
+    assert document_repo.get_version_by_id(mem_conn, version_id) is not None
+
+
+def test_empty_document_is_visible_and_can_be_deleted(library_page, mem_conn):
+    doc_id = document_repo.insert_document(
+        mem_conn,
+        doc_name="空文档",
+        doc_type="pdf",
+        file_path="/docs/empty.pdf",
+        file_hash="empty-document-hash",
+        source_type="standard",
+    )
+    library_page.refresh()
+
+    assert library_page._table.rowCount() == 1
+    assert library_page._table.item(0, 2).text() == "暂无版本"
+    library_page._table.selectRow(0)
+    assert library_page._delete_btn.text() == "删除文档"
+
+    with patch(
+        "app.ui.pages.library_page.QMessageBox.question",
+        return_value=QMessageBox.StandardButton.Yes,
+    ):
+        library_page._delete_btn.click()
+
+    assert document_repo.get_document_by_id(mem_conn, doc_id) is None
+    assert library_page._table.rowCount() == 0
 
 
 @pytest.mark.parametrize(

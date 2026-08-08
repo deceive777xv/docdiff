@@ -31,6 +31,10 @@ from app.db import document_repo
 logger = logging.getLogger(__name__)
 
 
+DOCUMENT_ID_ROLE = Qt.ItemDataRole.UserRole
+VERSION_ID_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
 DOCUMENT_FILE_FILTER = (
     "支持的文档 (*.pdf *.doc *.docx *.docm *.ppt *.pps *.pot *.pptx *.pptm *.ppsx *.ppsm "
     "*.xls *.xlsx *.xlsm *.xlsb *.odt *.ods *.odp *.rtf *.epub *.csv *.html *.htm "
@@ -293,7 +297,7 @@ class LibraryPage(QWidget):
         self._delete_btn = QPushButton("删除")
         self._delete_btn.setStyleSheet(Theme.btn_danger())
         self._delete_btn.setEnabled(False)
-        self._delete_btn.clicked.connect(self._delete_document)
+        self._delete_btn.clicked.connect(self._delete_selected)
         header.addWidget(self._delete_btn)
 
         layout.addLayout(header)
@@ -337,34 +341,50 @@ class LibraryPage(QWidget):
     def refresh(self) -> None:
         """Reload documents from DB."""
         try:
-            docs = self.ctx.conn.execute(
-                "SELECT * FROM documents ORDER BY created_at DESC"
-            ).fetchall()
-            self._table.setRowCount(len(docs))
+            entries = document_repo.list_library_entries(self.ctx.conn)
+            self._table.setRowCount(len(entries))
+            document_ids: set[str] = set()
             version_total = 0
-            for row, doc in enumerate(docs):
-                versions = document_repo.list_versions(self.ctx.conn, doc["id"])
-                version_total += len(versions)
-                item0 = QTableWidgetItem(doc["doc_name"])
-                item0.setData(Qt.UserRole, doc["id"])
+            for row, entry in enumerate(entries):
+                document_id = str(entry["document_id"])
+                document_ids.add(document_id)
+                version_id = entry["version_id"]
+                if version_id is not None:
+                    version_total += 1
+                item0 = QTableWidgetItem(entry["doc_name"])
+                item0.setData(DOCUMENT_ID_ROLE, document_id)
+                item0.setData(VERSION_ID_ROLE, version_id)
                 self._table.setItem(row, 0, item0)
-                self._table.setItem(row, 1, QTableWidgetItem(doc["doc_type"].upper()))
-                self._table.setItem(row, 2, QTableWidgetItem(self._format_version_summary(versions)))
-                created = str(doc["created_at"])[:10]
+                self._table.setItem(
+                    row,
+                    1,
+                    QTableWidgetItem(entry["doc_type"].upper()),
+                )
+                self._table.setItem(
+                    row,
+                    2,
+                    QTableWidgetItem(self._format_version(entry)),
+                )
+                created_at = (
+                    entry["version_created_at"]
+                    if version_id is not None
+                    else entry["document_created_at"]
+                )
+                created = str(created_at)[:10]
                 self._table.setItem(row, 3, QTableWidgetItem(created))
-            self._status.setText(f"共 {len(docs)} 份文档，{version_total} 个版本")
+            self._status.setText(
+                f"共 {len(document_ids)} 份文档，{version_total} 个版本"
+            )
         except Exception as e:
             logger.exception("Failed to refresh library")
             self._status.setText(f"加载失败：{e}")
 
-    def _format_version_summary(self, versions) -> str:
-        if not versions:
+    def _format_version(self, entry) -> str:
+        if entry["version_id"] is None:
             return "暂无版本"
-        latest = versions[0]
-        version = f"v{latest['version_no']}"
-        label = latest["version_label"] or ""
-        latest_text = f"{version}（{label}）" if label else version
-        return f"{latest_text} · 共 {len(versions)} 版"
+        version = f"v{entry['version_no']}"
+        label = entry["version_label"] or ""
+        return f"{version}（{label}）" if label else version
 
     def _import_document(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -538,7 +558,16 @@ class LibraryPage(QWidget):
             )
 
     def _on_selection_changed(self) -> None:
-        has_selection = len(self._table.selectedItems()) > 0
+        rows = self._table.selectionModel().selectedRows()
+        has_selection = bool(rows)
+        if has_selection:
+            row = rows[0].row()
+            version_id = self._table.item(row, 0).data(VERSION_ID_ROLE)
+            self._delete_btn.setText(
+                "删除版本" if version_id is not None else "删除文档"
+            )
+        else:
+            self._delete_btn.setText("删除")
         self._add_version_btn.setEnabled(
             has_selection and self._import_batch is None
         )
@@ -551,7 +580,7 @@ class LibraryPage(QWidget):
         if not rows:
             return
         row = rows[0].row()
-        doc_id = self._table.item(row, 0).data(Qt.UserRole)
+        doc_id = self._table.item(row, 0).data(DOCUMENT_ID_ROLE)
         doc_name = self._table.item(row, 0).text()
         paths, _ = QFileDialog.getOpenFileNames(
             self,
@@ -561,27 +590,63 @@ class LibraryPage(QWidget):
         )
         self._start_ingest_batch(paths, document_id=doc_id)
 
-    def _delete_document(self) -> None:
+    def _delete_selected(self) -> None:
         rows = self._table.selectionModel().selectedRows()
         if not rows:
             return
         row = rows[0].row()
-        doc_id = self._table.item(row, 0).data(Qt.UserRole)
-        doc_name = self._table.item(row, 0).text()
+        item = self._table.item(row, 0)
+        doc_id = item.data(DOCUMENT_ID_ROLE)
+        version_id = item.data(VERSION_ID_ROLE)
+        doc_name = item.text()
+
+        if version_id is None:
+            message = f"删除空文档《{doc_name}》的记录，且不可恢复。\n\n是否继续？"
+        else:
+            version_text = self._table.item(row, 2).text()
+            versions = document_repo.list_versions(self.ctx.conn, doc_id)
+            last_version_note = (
+                "\n这是该文档的最后一个版本，文档记录也会一并删除。"
+                if len(versions) == 1
+                else ""
+            )
+            message = (
+                f"删除《{doc_name}》{version_text} 将同时删除该版本的规格化产物、"
+                f"向量索引和关联对比记录，且不可恢复。{last_version_note}"
+                "\n\n是否继续？"
+            )
 
         confirm = QMessageBox.question(
             self,
             "确认删除",
-            f"删除《{doc_name}》将同时删除该文档的所有版本、向量索引和关联的对比记录，且不可恢复。\n\n是否继续？",
+            message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
         try:
-            from app.db.document_repo import delete_document
-            delete_document(self.ctx.conn, doc_id, data_dir=self.ctx.data_dir)
+            if version_id is None:
+                cleanup_failures = document_repo.delete_document(
+                    self.ctx.conn,
+                    doc_id,
+                    data_dir=self.ctx.data_dir,
+                )
+            else:
+                result = document_repo.delete_version(
+                    self.ctx.conn,
+                    version_id,
+                    data_dir=self.ctx.data_dir,
+                )
+                cleanup_failures = result.cleanup_failures
             self.refresh()
+            if cleanup_failures:
+                paths = "\n".join(f"- {path}" for path in cleanup_failures)
+                QMessageBox.warning(
+                    self,
+                    "删除完成（部分文件未清理）",
+                    f"版本记录已删除，但以下本地文件未能清理：\n{paths}",
+                )
         except Exception as e:
-            logger.exception("Failed to delete document")
+            logger.exception("Failed to delete library selection")
             QMessageBox.critical(self, "删除失败", str(e))

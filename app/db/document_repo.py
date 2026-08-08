@@ -1,8 +1,18 @@
 """CRUD for documents and document_versions tables."""
 from __future__ import annotations
+
+import shutil
 import sqlite3
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class DeleteVersionResult:
+    document_deleted: bool
+    cleanup_failures: tuple[Path, ...] = ()
 
 
 def _now() -> str:
@@ -55,6 +65,26 @@ def list_documents(
         ).fetchall()
     return conn.execute(
         "SELECT * FROM documents ORDER BY created_at DESC"
+    ).fetchall()
+
+
+def list_library_entries(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return every document version as a row, retaining documents without versions."""
+    return conn.execute(
+        """
+        SELECT
+            d.id AS document_id,
+            d.doc_name,
+            d.doc_type,
+            d.created_at AS document_created_at,
+            v.id AS version_id,
+            v.version_no,
+            v.version_label,
+            v.created_at AS version_created_at
+        FROM documents d
+        LEFT JOIN document_versions v ON v.document_id = d.id
+        ORDER BY d.created_at DESC, v.version_no DESC
+        """
     ).fetchall()
 
 
@@ -130,50 +160,128 @@ def update_version_status(conn: sqlite3.Connection, version_id: str, status: str
     conn.commit()
 
 
+def _validate_import_artifacts(
+    versions: list[sqlite3.Row],
+    data_dir: str | None,
+) -> None:
+    if not data_dir:
+        return
+    from app.core.structure_repair.storage import import_artifact_paths
+
+    for version in versions:
+        if version["parsed_json_path"]:
+            import_artifact_paths(data_dir, version["parsed_json_path"])
+
+
+def _delete_version_rows(
+    conn: sqlite3.Connection,
+    version_ids: list[str],
+) -> None:
+    if not version_ids:
+        return
+    placeholders = ",".join("?" * len(version_ids))
+    task_ids = [
+        row[0]
+        for row in conn.execute(
+            f"SELECT id FROM compare_tasks WHERE baseline_version_id IN ({placeholders})"
+            f" OR target_version_id IN ({placeholders})",
+            version_ids + version_ids,
+        ).fetchall()
+    ]
+    if task_ids:
+        task_placeholders = ",".join("?" * len(task_ids))
+        conn.execute(
+            f"DELETE FROM diff_items WHERE compare_task_id IN ({task_placeholders})",
+            task_ids,
+        )
+        conn.execute(
+            f"DELETE FROM compare_tasks WHERE id IN ({task_placeholders})",
+            task_ids,
+        )
+    conn.execute(
+        f"DELETE FROM chunks WHERE version_id IN ({placeholders})",
+        version_ids,
+    )
+    conn.execute(
+        f"DELETE FROM document_versions WHERE id IN ({placeholders})",
+        version_ids,
+    )
+
+
+def _cleanup_version_files(
+    versions: list[sqlite3.Row],
+    data_dir: str | None,
+) -> tuple[Path, ...]:
+    if not data_dir:
+        return ()
+    from app.core.structure_repair.storage import delete_import_artifacts
+
+    cleanup_failures: list[Path] = []
+    for version in versions:
+        faiss_dir = Path(data_dir) / "faiss" / version["id"]
+        try:
+            if faiss_dir.exists():
+                shutil.rmtree(faiss_dir)
+        except OSError:
+            cleanup_failures.append(faiss_dir)
+        if version["parsed_json_path"]:
+            cleanup_failures.extend(
+                delete_import_artifacts(data_dir, version["parsed_json_path"])
+            )
+    return tuple(cleanup_failures)
+
+
+def delete_version(
+    conn: sqlite3.Connection,
+    version_id: str,
+    data_dir: str | None = None,
+) -> DeleteVersionResult:
+    """Delete one version and its dependent data, removing an empty parent document."""
+    version = conn.execute(
+        "SELECT id, document_id, parsed_json_path FROM document_versions WHERE id = ?",
+        (version_id,),
+    ).fetchone()
+    if version is None:
+        raise ValueError(f"Version not found: {version_id}")
+
+    versions = [version]
+    _validate_import_artifacts(versions, data_dir)
+    document_id = str(version["document_id"])
+    with conn:
+        _delete_version_rows(conn, [version_id])
+        has_versions = conn.execute(
+            "SELECT 1 FROM document_versions WHERE document_id = ? LIMIT 1",
+            (document_id,),
+        ).fetchone()
+        document_deleted = has_versions is None
+        if document_deleted:
+            conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+
+    return DeleteVersionResult(
+        document_deleted=document_deleted,
+        cleanup_failures=_cleanup_version_files(versions, data_dir),
+    )
+
+
 def delete_document(
     conn: sqlite3.Connection,
     doc_id: str,
     data_dir: str | None = None,
-) -> None:
+) -> tuple[Path, ...]:
     """Delete a document and all associated data (versions, chunks, compare tasks, diff items).
 
-    If data_dir is provided, also removes FAISS index dirs and parsed JSON files from disk.
+    If data_dir is provided, also removes each version's FAISS and import artifacts.
     """
-    import shutil
-    from pathlib import Path
-
     versions = conn.execute(
         "SELECT id, parsed_json_path FROM document_versions WHERE document_id = ?",
         (doc_id,),
     ).fetchall()
     version_ids = [v["id"] for v in versions]
 
-    if version_ids:
-        placeholders = ",".join("?" * len(version_ids))
-        task_ids = [
-            row[0]
-            for row in conn.execute(
-                f"SELECT id FROM compare_tasks WHERE baseline_version_id IN ({placeholders})"
-                f" OR target_version_id IN ({placeholders})",
-                version_ids + version_ids,
-            ).fetchall()
-        ]
-        if task_ids:
-            t_placeholders = ",".join("?" * len(task_ids))
-            conn.execute(f"DELETE FROM diff_items WHERE compare_task_id IN ({t_placeholders})", task_ids)
-            conn.execute(f"DELETE FROM compare_tasks WHERE id IN ({t_placeholders})", task_ids)
-        conn.execute(f"DELETE FROM chunks WHERE version_id IN ({placeholders})", version_ids)
+    _validate_import_artifacts(versions, data_dir)
 
-    conn.execute("DELETE FROM document_versions WHERE document_id = ?", (doc_id,))
-    conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
-    conn.commit()
+    with conn:
+        _delete_version_rows(conn, version_ids)
+        conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
-    if data_dir:
-        for ver in versions:
-            faiss_dir = Path(data_dir) / "faiss" / ver["id"]
-            if faiss_dir.exists():
-                shutil.rmtree(faiss_dir, ignore_errors=True)
-            if ver["parsed_json_path"]:
-                p = Path(ver["parsed_json_path"])
-                if p.exists():
-                    p.unlink(missing_ok=True)
+    return _cleanup_version_files(versions, data_dir)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from app.core.normalization import NormalizationDepth
 from app.core.types import DocumentIR, Paragraph, Section, Sentence
 
@@ -68,6 +70,79 @@ def test_prepare_import_ir_persists_raw_normalized_and_trace(tmp_path):
     assert normalization_trace["table_trace"]["baseline"]["doc_id"] == "raw-doc"
     assert boundary_profile["doc_id"] == "raw-doc"
     assert "deferred_table_candidates" not in boundary_profile
+
+
+def test_delete_import_artifacts_removes_one_versions_complete_artifact_set(
+    tmp_path,
+):
+    from app.core.structure_repair.storage import (
+        delete_import_artifacts,
+        prepare_import_ir,
+    )
+
+    target = prepare_import_ir(tmp_path, _raw_document())
+    sibling_document = _raw_document()
+    sibling_document.doc_id = "sibling-doc"
+    sibling = prepare_import_ir(tmp_path, sibling_document)
+
+    failures = delete_import_artifacts(tmp_path, target.normalized_path)
+
+    assert failures == []
+    assert delete_import_artifacts(tmp_path, target.normalized_path) == []
+    assert not target.normalized_path.exists()
+    assert not target.raw_path.exists()
+    assert not target.trace_path.exists()
+    assert not target.normalization_trace_path.exists()
+    assert not target.boundary_profile_path.exists()
+    assert sibling.normalized_path.exists()
+    assert sibling.raw_path.exists()
+    assert sibling.trace_path.exists()
+    assert sibling.normalization_trace_path.exists()
+    assert sibling.boundary_profile_path.exists()
+
+
+def test_delete_import_artifacts_rejects_paths_outside_parsed_root(tmp_path):
+    from app.core.structure_repair.storage import delete_import_artifacts
+
+    data_dir = tmp_path / "data"
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="outside the expected parsed root"):
+        delete_import_artifacts(data_dir, outside)
+
+    assert outside.exists()
+
+
+def test_delete_import_artifacts_reports_one_failure_and_continues(
+    tmp_path,
+    monkeypatch,
+):
+    from app.core.structure_repair.storage import (
+        delete_import_artifacts,
+        prepare_import_ir,
+    )
+
+    artifacts = prepare_import_ir(tmp_path, _raw_document())
+    raw_path = artifacts.raw_path.resolve()
+    path_type = type(raw_path)
+    original_unlink = path_type.unlink
+
+    def fail_raw(path, *args, **kwargs):
+        if path == raw_path:
+            raise PermissionError("locked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(path_type, "unlink", fail_raw)
+
+    failures = delete_import_artifacts(tmp_path, artifacts.normalized_path)
+
+    assert failures == [raw_path]
+    assert raw_path.exists()
+    assert not artifacts.normalized_path.exists()
+    assert not artifacts.trace_path.exists()
+    assert not artifacts.normalization_trace_path.exists()
+    assert not artifacts.boundary_profile_path.exists()
 
 
 def test_prepare_import_ir_persists_skipped_low_depth_artifacts(tmp_path):
