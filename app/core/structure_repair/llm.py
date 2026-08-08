@@ -66,10 +66,10 @@ _PAGE_NOISE_SYSTEM_MESSAGE = """你需要对接近物理页面边界的固定文
 """
 _PAGE_NOISE_REVIEW_SYSTEM_MESSAGE = _PAGE_NOISE_SYSTEM_MESSAGE + """
 审核任务：
-- 这是对所提供的 `initial_labels` 中相同固定项目的最终安全审核。请根据原始文本和完整边界批次重新评估每个项目。
+- 这是对所提供的 `initial_labels` 中相同固定项目的最终复审。请根据原始文本、完整边界批次和初判理由重新评估每个项目。
 - 特别注意编号业务行、需求、目标、标准、参考文献以及附件文件名的误删。
-- 返回完整的替换标签列表。不要仅仅批准初始结果。
-- 仅当两轮独立审核都返回有效的、高置信度的 `remove_as_page_noise` 标签时，候选项才会被移除。如不确定，请返回 `keep`。
+- `initial_labels` 仅作为辅助证据，不是必须确认的答案。
+- 返回完整的替换标签列表，不要仅仅批准初始结果。有效复审将作为最终 LLM 结论。
 """
 _PARAGRAPH_SYSTEM_MESSAGE = """你是一个文档段落合并分类器。
 任务边界：
@@ -146,6 +146,8 @@ def _parse_page_noise_batch_response(
     raw: str,
     boundary_id: str,
     items: list[dict[str, str]],
+    *,
+    require_min_confidence: bool = False,
 ) -> tuple[list[PageNoiseLabel] | None, str]:
     try:
         data: Any = json.loads(
@@ -175,6 +177,8 @@ def _parse_page_noise_batch_response(
             return None, "invalid_confidence"
         if not 0.0 <= float(confidence) <= 1.0:
             return None, "invalid_confidence"
+        if require_min_confidence and float(confidence) < _PAGE_NOISE_MIN_CONFIDENCE:
+            return None, "low_confidence"
         reason = label["reason"]
         if (
             not isinstance(reason, str)
@@ -205,9 +209,11 @@ def _chat_and_parse_with_validation_retry(
     model: str,
     parse: Any,
     call_budget: LLMCallBudget | None = None,
+    *,
+    max_attempts: int = 2,
 ) -> tuple[Any | None, str]:
     budget = call_budget or LLMCallBudget()
-    for attempt in range(2):
+    for attempt in range(max_attempts):
         if not budget.consume():
             return None, "llm_call_budget_exhausted"
         try:
@@ -217,7 +223,7 @@ def _chat_and_parse_with_validation_retry(
         parsed, failure_code = parse(raw)
         if parsed is not None or failure_code == "low_confidence":
             return parsed, failure_code
-        if attempt == 1 or budget.remaining <= 0:
+        if attempt == max_attempts - 1 or budget.remaining <= 0:
             return None, failure_code
     return None, "invalid_response"
 
@@ -228,6 +234,8 @@ def adjudicate_page_noise_batch(
     provider: object,
     model: str = "",
     call_budget: LLMCallBudget | None = None,
+    *,
+    max_attempts: int = 2,
 ) -> tuple[list[PageNoiseLabel] | None, str]:
     """Label one fixed page-boundary batch with strict, fail-closed validation."""
     payload: dict[str, object] = {
@@ -260,6 +268,7 @@ def adjudicate_page_noise_batch(
         model,
         lambda raw: _parse_page_noise_batch_response(raw, boundary_id, items),
         call_budget,
+        max_attempts=max_attempts,
     )
 
 
@@ -270,6 +279,8 @@ def review_page_noise_batch(
     provider: object,
     model: str = "",
     call_budget: LLMCallBudget | None = None,
+    *,
+    max_attempts: int = 1,
 ) -> tuple[list[PageNoiseLabel] | None, str]:
     """Review one fixed batch within the caller's shared LLM call budget."""
     payload: dict[str, object] = {
@@ -319,8 +330,10 @@ def review_page_noise_batch(
             raw,
             boundary_id,
             review_items,
+            require_min_confidence=True,
         ),
         call_budget,
+        max_attempts=max_attempts,
     )
 
 
@@ -330,6 +343,9 @@ def adjudicate_section_parent(
     provider: object,
     model: str = "",
     call_budget: LLMCallBudget | None = None,
+    *,
+    max_attempts: int = 2,
+    _initial_judgment: SectionMoveJudgment | None = None,
 ) -> tuple[SectionMoveJudgment | None, str]:
     """Return a validated move judgment and a stable rejection code."""
     candidate_id = f"section:{section.section_id}"
@@ -349,19 +365,31 @@ def adjudicate_section_parent(
             "paragraphs": [paragraph.text[:800] for paragraph in previous.paragraphs[-3:]],
         },
     }
+    if _initial_judgment is not None:
+        payload["initial_judgment"] = {
+            "action": _initial_judgment.action,
+            "confidence": _initial_judgment.confidence,
+            "reason": _initial_judgment.reason,
+        }
+    system_message = (
+        "判断待处理的无编号章节是否应归入前一个有编号章节之下。请返回一个包含以下字段的 JSON 对象：\n"
+        "- candidate_id：待处理章节的标识符，例如 \"section:xxx\"（字符串）\n"
+        "- action：必须为 \"keep\" 或 \"move_to_section\"\n"
+        "- source_ids：一个包含且仅包含一个元素（即 candidate_id 的值）的 JSON 数组\n"
+        "- target_section_id：前一个章节的 section_id（字符串，不带前缀）\n"
+        "- confidence：0.0 到 1.0 之间的数值\n"
+        "- reason：解释您判断依据的非空字符串\n"
+        "仅使用提供的 ID。切勿重写或生成文档文本。"
+    )
+    if _initial_judgment is not None:
+        system_message += (
+            "\n这是最终复审。initial_judgment 仅作为辅助证据，不是必须确认的答案。"
+            "请针对相同固定候选重新评估并返回完整替代结论；有效复审将作为最终 LLM 结论。"
+        )
     messages = [
         {
             "role": "system",
-            "content": (
-                "判断待处理的无编号章节是否应归入前一个有编号章节之下。请返回一个包含以下字段的 JSON 对象：\n"
-                "- candidate_id：待处理章节的标识符，例如 \"section:xxx\"（字符串）\n"
-                "- action：必须为 \"keep\" 或 \"move_to_section\"\n"
-                "- source_ids：一个包含且仅包含一个元素（即 candidate_id 的值）的 JSON 数组\n"
-                "- target_section_id：前一个章节的 section_id（字符串，不带前缀）\n"
-                "- confidence：0.0 到 1.0 之间的数值\n"
-                "- reason：解释您判断依据的非空字符串\n"
-                "仅使用提供的 ID。切勿重写或生成文档文本。"
-            ),
+            "content": system_message,
         },
         {
             "role": "user",
@@ -414,6 +442,27 @@ def adjudicate_section_parent(
         model,
         parse,
         call_budget,
+        max_attempts=max_attempts,
+    )
+
+
+def review_section_parent(
+    section: Section,
+    previous: Section,
+    initial: SectionMoveJudgment,
+    provider: object,
+    model: str = "",
+    call_budget: LLMCallBudget | None = None,
+) -> tuple[SectionMoveJudgment | None, str]:
+    """Return one final replacement judgment using the initial result as evidence."""
+    return adjudicate_section_parent(
+        section,
+        previous,
+        provider,
+        model,
+        call_budget,
+        max_attempts=1,
+        _initial_judgment=initial,
     )
 
 
@@ -428,6 +477,9 @@ def adjudicate_paragraph_merge(
     document_title: str = "",
     section_path: tuple[str, ...] = (),
     call_budget: LLMCallBudget | None = None,
+    *,
+    max_attempts: int = 2,
+    _initial_judgment: ParagraphMergeJudgment | None = None,
 ) -> tuple[ParagraphMergeJudgment | None, str]:
     """Return a validated merge judgment for two existing paragraph IDs."""
     candidate_id = f"paragraphs:{previous.paragraph_id}:{following.paragraph_id}"
@@ -475,8 +527,21 @@ def adjudicate_paragraph_merge(
         payload["nearby_context"] = nearby
     if rule_evidence:
         payload["rule_evidence"] = list(rule_evidence)
+    if _initial_judgment is not None:
+        payload["initial_judgment"] = {
+            "action": _initial_judgment.action,
+            "confidence": _initial_judgment.confidence,
+            "reason": _initial_judgment.reason,
+        }
+    system_message = _PARAGRAPH_SYSTEM_MESSAGE
+    if _initial_judgment is not None:
+        system_message += (
+            "\n这是最终复审。initial_judgment 仅作为辅助证据，不是必须确认的答案。"
+            "请针对相同固定 previous/continuation 槽位重新评估并返回完整替代结论；"
+            "有效复审将作为最终 LLM 结论。"
+        )
     messages = [
-        {"role": "system", "content": _PARAGRAPH_SYSTEM_MESSAGE},
+        {"role": "system", "content": system_message},
         {
             "role": "user",
             "content": json.dumps(
@@ -530,4 +595,35 @@ def adjudicate_paragraph_merge(
         model,
         parse,
         call_budget,
+        max_attempts=max_attempts,
+    )
+
+
+def review_paragraph_merge(
+    section: Section,
+    previous: Paragraph,
+    following: Paragraph,
+    context: list[Paragraph],
+    initial: ParagraphMergeJudgment,
+    provider: object,
+    model: str = "",
+    rule_evidence: tuple[str, ...] = (),
+    document_title: str = "",
+    section_path: tuple[str, ...] = (),
+    call_budget: LLMCallBudget | None = None,
+) -> tuple[ParagraphMergeJudgment | None, str]:
+    """Return one final replacement judgment using the initial result as evidence."""
+    return adjudicate_paragraph_merge(
+        section,
+        previous,
+        following,
+        context,
+        provider,
+        model,
+        rule_evidence,
+        document_title,
+        section_path,
+        call_budget,
+        max_attempts=1,
+        _initial_judgment=initial,
     )

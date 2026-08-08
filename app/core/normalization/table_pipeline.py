@@ -505,16 +505,14 @@ def _resolve_assessment(
         provider,
         context,
         call_budget,
+        max_attempts=1 if review_changes else 2,
     )
     initial_judgment = judgment
     review_judgment: LLMJudgment | None = None
     if (
         review_changes
         and judgment is not None
-        and (
-            judgment.row_action == "merge"
-            or judgment.table_action == "merge_fragments"
-        )
+        and judgment.confidence >= _LLM_MERGE_THRESHOLD
     ):
         review = review_continuation(
             candidate,
@@ -524,40 +522,8 @@ def _resolve_assessment(
             call_budget,
         )
         review_judgment = review
-        if review is None:
-            judgment = replace(
-                judgment,
-                decision="keep_separate",
-                confidence=0.0,
-                reason=f"initial: {judgment.reason}; review unavailable",
-                row_action="keep",
-                table_action="keep",
-            )
-        else:
-            row_action = (
-                "merge"
-                if judgment.row_action == review.row_action == "merge"
-                else "keep"
-            )
-            table_action = (
-                "merge_fragments"
-                if judgment.table_action
-                == review.table_action
-                == "merge_fragments"
-                else "keep"
-            )
-            judgment = replace(
-                judgment,
-                decision=(
-                    "merge"
-                    if row_action == "merge" or table_action == "merge_fragments"
-                    else "keep_separate"
-                ),
-                confidence=min(judgment.confidence, review.confidence),
-                reason=f"initial: {judgment.reason}; review: {review.reason}",
-                row_action=row_action,
-                table_action=table_action,
-            )
+        if review is not None and review.confidence >= _LLM_MERGE_THRESHOLD:
+            judgment = review
     accepted = judgment is not None and judgment.confidence >= _LLM_MERGE_THRESHOLD
     row_vetoes = {
         "new_key_value",
@@ -576,13 +542,6 @@ def _resolve_assessment(
     repeated_header_confirmed = bool(
         judgment is not None
         and judgment.roles.get("continuation") == "table_header"
-        and (
-            not review_changes
-            or (
-                review_judgment is not None
-                and review_judgment.roles.get("continuation") == "table_header"
-            )
-        )
     )
     drop_repeated_header = bool(
         merge_fragments

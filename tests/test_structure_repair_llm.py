@@ -189,6 +189,94 @@ def test_valid_keep_judgment_is_traced_without_operation():
     assert result.trace.decisions[0].reason == "该标题是独立章节"
 
 
+def test_review_mode_can_replace_initial_section_keep_with_move():
+    from app.core.structure_repair import repair_document
+
+    class ReviewProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.section_payloads: list[dict] = []
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "items" in payload:
+                return _page_noise_response(payload, lambda _text: "keep")
+            self.section_payloads.append(payload)
+            action = "move_to_section" if "initial_judgment" in payload else "keep"
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": action,
+                    "source_ids": ["s2"],
+                    "target_section_id": "s1",
+                    "confidence": 0.96,
+                    "reason": "复审确认附表属于前一编号章节",
+                },
+                ensure_ascii=False,
+            )
+
+    provider = ReviewProvider()
+
+    result = repair_document(_document(), provider=provider, review_changes=True)
+
+    assert len(provider.section_payloads) == 2
+    assert provider.section_payloads[1]["initial_judgment"]["action"] == "keep"
+    assert result.document.sections[1].level == 4
+    assert result.trace.operations[-1].type == "move_to_section"
+    assert result.trace.decisions[-1].action == "move_to_section"
+
+
+def test_review_mode_uses_initial_section_move_when_review_is_low_confidence():
+    from app.core.structure_repair import repair_document
+
+    class InvalidReviewProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.section_calls = 0
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "items" in payload:
+                return _page_noise_response(payload, lambda _text: "keep")
+            self.section_calls += 1
+            if "initial_judgment" in payload:
+                return json.dumps(
+                    {
+                        "candidate_id": payload["candidate_id"],
+                        "action": "keep",
+                        "source_ids": ["s2"],
+                        "target_section_id": "s1",
+                        "confidence": 0.50,
+                        "reason": "复审置信度不足",
+                    },
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "move_to_section",
+                    "source_ids": ["s2"],
+                    "target_section_id": "s1",
+                    "confidence": 0.96,
+                    "reason": "初判确认附表归属",
+                },
+                ensure_ascii=False,
+            )
+
+    provider = InvalidReviewProvider()
+
+    result = repair_document(_document(), provider=provider, review_changes=True)
+
+    assert provider.section_calls == 2
+    assert result.document.sections[1].level == 4
+    assert result.trace.decisions[-1].action == "move_to_section"
+    assert any(
+        rejected.code == "review_low_confidence" for rejected in result.trace.rejected
+    )
+
+
 def test_llm_can_merge_ambiguous_adjacent_page_fragments():
     from app.core.structure_repair import repair_document
 
@@ -683,8 +771,8 @@ def test_page_boundary_batch_review_keeps_business_rows_and_caps_each_boundary_a
         provider.batch_calls.count(boundary_id) <= 2
         for boundary_id in set(provider.batch_calls)
     )
-    assert any(
-        candidate.code == "page_noise_review_disagreement"
+    assert all(
+        candidate.code != "page_noise_review_disagreement"
         for candidate in result.trace.rejected
     )
 
@@ -799,7 +887,54 @@ def test_page_boundary_batch_skips_review_when_initial_labels_all_keep():
     )
 
 
-def test_page_boundary_batch_keeps_everything_when_review_ids_are_incomplete():
+def test_review_mode_can_replace_initial_page_noise_keep_with_remove():
+    from app.core.structure_repair import repair_document
+
+    class ReviewProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.payloads: list[dict] = []
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            self.payloads.append(payload)
+            return _page_noise_response(
+                payload,
+                lambda _text: (
+                    "remove_as_page_noise"
+                    if "initial_labels" in payload
+                    else "keep"
+                ),
+            )
+
+    document = DocumentIR(
+        "review-page-noise",
+        "Review page noise",
+        "review-page-noise-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [Paragraph("noise", "重复页眉", [Sentence("重复页眉")], 1)],
+            )
+        ],
+    )
+    provider = ReviewProvider()
+
+    result = repair_document(document, provider=provider, review_changes=True)
+
+    assert len(provider.payloads) == 2
+    assert provider.payloads[1]["initial_labels"][0]["action"] == "keep"
+    assert result.document.sections[0].paragraphs == []
+    assert all(
+        rejected.code != "page_noise_review_disagreement"
+        for rejected in result.trace.rejected
+    )
+
+
+def test_page_boundary_batch_uses_initial_labels_when_review_ids_are_incomplete():
     from app.core.structure_repair import repair_document
 
     class IncompleteReviewProvider:
@@ -842,8 +977,53 @@ def test_page_boundary_batch_keeps_everything_when_review_ids_are_incomplete():
     result = repair_document(document, provider=provider, review_changes=True)
 
     assert provider.calls == 2
-    assert result.document.sections[0].paragraphs[0].text == body
+    assert result.document.sections[0].paragraphs == []
     assert result.trace.rejected[0].code == "review_label_set_mismatch"
+
+
+def test_page_boundary_batch_uses_initial_labels_when_review_is_low_confidence():
+    from app.core.structure_repair import repair_document
+
+    class LowConfidenceReviewProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            self.calls += 1
+            payload = json.loads(messages[-1]["content"])
+            response = json.loads(
+                _page_noise_response(
+                    payload,
+                    lambda _text: "remove_as_page_noise",
+                )
+            )
+            if "initial_labels" in payload:
+                response["labels"][0]["confidence"] = 0.50
+            return json.dumps(response, ensure_ascii=False)
+
+    body = "重复页眉"
+    document = DocumentIR(
+        "low-confidence-page-noise-review",
+        "Low confidence page noise review",
+        "low-confidence-page-noise-review-hash",
+        [
+            Section(
+                "s1",
+                "1 Scope",
+                1,
+                [Paragraph("noise", body, [Sentence(body)], 1)],
+            )
+        ],
+    )
+    provider = LowConfidenceReviewProvider()
+
+    result = repair_document(document, provider=provider, review_changes=True)
+
+    assert provider.calls == 2
+    assert result.document.sections[0].paragraphs == []
+    assert result.trace.rejected[0].code == "review_low_confidence"
 
 
 def test_page_noise_llm_retries_invalid_batch_fields_once():
@@ -891,10 +1071,9 @@ def test_page_noise_llm_retries_invalid_batch_fields_once():
     result = repair_document(document, provider=provider)
 
     assert len(provider.messages) == 2
-    system_prompt = provider.messages[0][0]["content"]
-    assert "Every item has exactly id, position, and text" in system_prompt
-    assert "labels must contain exactly one object per input item" in system_prompt
-    assert "Never omit, add, reorder, replace, merge, or split items" in system_prompt
+    payload = json.loads(provider.messages[0][-1]["content"])
+    assert set(payload) == {"boundary_id", "items"}
+    assert all(set(item) == {"id", "position", "text"} for item in payload["items"])
     assert [
         paragraph.text for paragraph in result.document.sections[0].paragraphs
     ] == ["真实正文。"]
@@ -1303,7 +1482,7 @@ def test_short_closing_fragment_is_sent_to_paragraph_merge_llm():
     ]
 
 
-def test_review_mode_keeps_paragraphs_when_second_judgment_disagrees():
+def test_review_mode_uses_second_paragraph_judgment_when_rounds_disagree():
     from app.core.structure_repair import repair_document
 
     class ReviewProvider:
@@ -1311,12 +1490,14 @@ def test_review_mode_keeps_paragraphs_when_second_judgment_disagrees():
 
         def __init__(self) -> None:
             self.paragraph_calls = 0
+            self.paragraph_payloads: list[dict] = []
 
         def chat(self, messages: list[dict], **_kwargs) -> str:
             payload = json.loads(messages[-1]["content"])
             if "items" in payload:
                 return _page_noise_response(payload, lambda _text: "keep")
             self.paragraph_calls += 1
+            self.paragraph_payloads.append(payload)
             return json.dumps(
                 {
                     "candidate_id": payload["candidate_id"],
@@ -1362,9 +1543,132 @@ def test_review_mode_keeps_paragraphs_when_second_judgment_disagrees():
         "p1",
         "p2",
     ]
-    assert any(
-        rejected.code == "paragraph_merge_review_disagreement"
+    assert provider.paragraph_payloads[1]["initial_judgment"]["action"] == (
+        "merge_paragraphs"
+    )
+    assert all(
+        rejected.code != "paragraph_merge_review_disagreement"
         for rejected in result.trace.rejected
+    )
+
+
+def test_review_mode_can_replace_initial_paragraph_keep_with_merge():
+    from app.core.structure_repair import repair_document
+
+    class ReviewProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.paragraph_payloads: list[dict] = []
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "items" in payload:
+                return _page_noise_response(payload, lambda _text: "keep")
+            self.paragraph_payloads.append(payload)
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": (
+                        "merge_paragraphs"
+                        if "initial_judgment" in payload
+                        else "keep"
+                    ),
+                    "confidence": 0.97,
+                    "reason": "复审确认后一固定槽位续写前一段",
+                },
+                ensure_ascii=False,
+            )
+
+    previous = (
+        "- 开启过程中有外力阻止开门；域控检测到有外力阻止开门"
+        "（检测到驱动机构电流的变化，电流≥7A；短"
+    )
+    following = "- 时间内的霍尔变化）"
+    document = DocumentIR(
+        "review-paragraph-correction",
+        "Review paragraph correction",
+        "review-paragraph-correction-hash",
+        [
+            Section(
+                "s1",
+                "1 控制策略",
+                1,
+                [
+                    Paragraph("p1", previous, [Sentence(previous)], 1),
+                    Paragraph("p2", following, [Sentence(following)], 2),
+                ],
+            )
+        ],
+    )
+    provider = ReviewProvider()
+
+    result = repair_document(document, provider=provider, review_changes=True)
+
+    assert len(provider.paragraph_payloads) == 2
+    assert provider.paragraph_payloads[1]["initial_judgment"]["action"] == "keep"
+    assert [paragraph.text for paragraph in result.document.sections[0].paragraphs] == [
+        previous + "时间内的霍尔变化）"
+    ]
+
+
+def test_review_mode_uses_initial_paragraph_merge_when_review_is_invalid():
+    from app.core.structure_repair import repair_document
+
+    class InvalidReviewProvider:
+        chat_model = "fake-model"
+
+        def __init__(self) -> None:
+            self.paragraph_calls = 0
+
+        def chat(self, messages: list[dict], **_kwargs) -> str:
+            payload = json.loads(messages[-1]["content"])
+            if "items" in payload:
+                return _page_noise_response(payload, lambda _text: "keep")
+            self.paragraph_calls += 1
+            if "initial_judgment" in payload:
+                return '{"candidate_id":'
+            return json.dumps(
+                {
+                    "candidate_id": payload["candidate_id"],
+                    "action": "merge_paragraphs",
+                    "confidence": 0.97,
+                    "reason": "初判确认后一固定槽位续写前一段",
+                },
+                ensure_ascii=False,
+            )
+
+    previous = (
+        "- 开启过程中有外力阻止开门；域控检测到有外力阻止开门"
+        "（检测到驱动机构电流的变化，电流≥7A；短"
+    )
+    following = "- 时间内的霍尔变化）"
+    document = DocumentIR(
+        "review-paragraph-fallback",
+        "Review paragraph fallback",
+        "review-paragraph-fallback-hash",
+        [
+            Section(
+                "s1",
+                "1 控制策略",
+                1,
+                [
+                    Paragraph("p1", previous, [Sentence(previous)], 1),
+                    Paragraph("p2", following, [Sentence(following)], 2),
+                ],
+            )
+        ],
+    )
+    provider = InvalidReviewProvider()
+
+    result = repair_document(document, provider=provider, review_changes=True)
+
+    assert provider.paragraph_calls == 2
+    assert [paragraph.text for paragraph in result.document.sections[0].paragraphs] == [
+        previous + "时间内的霍尔变化）"
+    ]
+    assert any(
+        rejected.code == "review_invalid_json" for rejected in result.trace.rejected
     )
 
 

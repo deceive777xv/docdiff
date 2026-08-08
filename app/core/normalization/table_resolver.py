@@ -253,9 +253,11 @@ def _chat_with_validation_retry(
     messages: list[dict[str, str]],
     candidate: ContinuationCandidate,
     call_budget: LLMCallBudget | None = None,
+    *,
+    max_attempts: int = 2,
 ) -> LLMJudgment | None:
     budget = call_budget or LLMCallBudget()
-    for attempt in range(2):
+    for attempt in range(max_attempts):
         if not budget.consume():
             return None
         try:
@@ -265,7 +267,7 @@ def _chat_with_validation_retry(
         judgment = _try_parse_response(response, candidate, provider)
         if judgment is not None:
             return judgment
-        if attempt == 1:
+        if attempt == max_attempts - 1:
             return None
     return None
 
@@ -275,6 +277,8 @@ def adjudicate_continuation(
     provider: BaseProvider,
     context: TableBoundaryContext | None = None,
     call_budget: LLMCallBudget | None = None,
+    *,
+    max_attempts: int = 2,
 ) -> LLMJudgment | None:
     """Request one strict judgment, retrying one validation failure within budget."""
     user_message = {
@@ -295,6 +299,7 @@ def adjudicate_continuation(
         messages,
         candidate,
         call_budget,
+        max_attempts=max_attempts,
     )
 
 
@@ -319,9 +324,9 @@ def review_continuation(
             "role": "system",
             "content": (
                 _SYSTEM_MESSAGE
-                + "\nReview the supplied initial_judgment against the original fixed "
-                "candidate. Return a complete independent replacement judgment. A "
-                "change will be applied only when both rounds agree."
+                + "\n请根据原始固定候选和 initial_judgment 执行最终复审。"
+                "初判仅作为辅助证据，不是必须确认的答案。"
+                "请返回完整、独立可校验的替代结论；有效复审将作为最终 LLM 结论。"
             ),
         },
         {
@@ -339,4 +344,5 @@ def review_continuation(
         messages,
         candidate,
         call_budget,
+        max_attempts=1,
     )

@@ -655,7 +655,7 @@ def test_pipeline_keeps_medium_separate_without_provider(monkeypatch):
     assert result.trace.decisions[0].llm is None
 
 
-def test_review_depth_keeps_two_call_budget_when_initial_response_needs_retry(
+def test_review_depth_does_not_spend_review_budget_retrying_invalid_initial(
     monkeypatch,
 ):
     _stub_candidates(monkeypatch, [_candidate("retry-before-review", "medium")])
@@ -675,7 +675,7 @@ def test_review_depth_keeps_two_call_budget_when_initial_response_needs_retry(
         review_changes=True,
     )
 
-    assert len(provider.chat_calls) == 2
+    assert len(provider.chat_calls) == 1
     assert result.trace.decisions[0].final_action == "keep_separate"
     assert result.trace.decisions[0].review is None
 
@@ -694,7 +694,7 @@ def test_pipeline_records_sub_threshold_llm_merge_but_keeps_separate(monkeypatch
     assert decision.final_action == "keep_separate"
 
 
-def test_review_mode_requires_a_second_agreeing_table_judgment(monkeypatch):
+def test_review_mode_uses_second_table_judgment_when_rounds_disagree(monkeypatch):
     _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
     baseline, target, pairs = _documents()
     provider = QueueProvider(
@@ -719,6 +719,90 @@ def test_review_mode_requires_a_second_agreeing_table_judgment(monkeypatch):
     assert result.trace.decisions[0].llm.table_action == "merge_fragments"
     assert result.trace.decisions[0].review.row_action == "keep"
     assert result.trace.decisions[0].review.table_action == "keep"
+
+
+def test_review_mode_can_replace_initial_table_keep_with_merge(monkeypatch):
+    _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
+    baseline, target, pairs = _documents()
+    provider = QueueProvider(
+        [
+            _response("medium", decision="keep"),
+            _response("medium", decision="merge", confidence=0.96),
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(
+        pairs,
+        baseline,
+        target,
+        provider,
+        review_changes=True,
+    )
+
+    decision = result.trace.decisions[0]
+    assert len(provider.chat_calls) == 2
+    review_payload = json.loads(provider.chat_calls[1][-1]["content"])
+    assert review_payload["initial_judgment"]["row_action"] == "keep"
+    assert decision.llm is not None
+    assert decision.llm.row_action == "keep"
+    assert decision.review is not None
+    assert decision.review.row_action == "merge"
+    assert decision.final_action == "merge"
+
+
+def test_review_mode_uses_initial_table_judgment_when_review_is_invalid(monkeypatch):
+    _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
+    baseline, target, pairs = _documents()
+    provider = QueueProvider(
+        [
+            _response("medium", decision="merge", confidence=0.96),
+            '{"candidate_id":',
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(
+        pairs,
+        baseline,
+        target,
+        provider,
+        review_changes=True,
+    )
+
+    decision = result.trace.decisions[0]
+    assert len(provider.chat_calls) == 2
+    assert decision.llm is not None
+    assert decision.llm.row_action == "merge"
+    assert decision.review is None
+    assert decision.final_action == "merge"
+
+
+def test_review_mode_uses_initial_table_judgment_when_review_is_low_confidence(
+    monkeypatch,
+):
+    _stub_candidates(monkeypatch, [_candidate("medium", "medium")])
+    baseline, target, pairs = _documents()
+    provider = QueueProvider(
+        [
+            _response("medium", decision="merge", confidence=0.96),
+            _response("medium", decision="keep", confidence=0.50),
+        ]
+    )
+
+    result = pipeline.reconstruct_table_pairs(
+        pairs,
+        baseline,
+        target,
+        provider,
+        review_changes=True,
+    )
+
+    decision = result.trace.decisions[0]
+    assert len(provider.chat_calls) == 2
+    assert decision.llm is not None
+    assert decision.llm.row_action == "merge"
+    assert decision.review is not None
+    assert decision.review.confidence == 0.50
+    assert decision.final_action == "merge"
 
 
 def test_pipeline_keeps_medium_separate_for_duplicate_response_member(monkeypatch):

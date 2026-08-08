@@ -20,6 +20,8 @@ from .llm import (
     adjudicate_paragraph_merge,
     adjudicate_section_parent,
     review_page_noise_batch,
+    review_paragraph_merge,
+    review_section_parent,
 )
 from .models import (
     RejectedStructureCandidate,
@@ -31,7 +33,7 @@ from .models import (
 
 
 SCHEMA_VERSION = 2
-ALGORITHM_VERSION = "post-parse-structure-v6"
+ALGORITHM_VERSION = "post-parse-structure-v7"
 CONTENT_CONSERVATION_DISABLE_ENV = (
     "DOC_DIFF_AGENT_DISABLE_CONTENT_CONSERVATION"
 )
@@ -516,6 +518,7 @@ def _adjudicate_page_boundary_noise(
             provider,
             model,
             call_budget,
+            max_attempts=1 if review_changes else 2,
         )
         if initial is None:
             rejected.append(
@@ -537,10 +540,6 @@ def _adjudicate_page_boundary_noise(
                     reason=label.reason,
                 )
             )
-        if not any(
-            label.action == "remove_as_page_noise" for label in initial
-        ):
-            continue
         if review_changes:
             review, failure_code = review_page_noise_batch(
                 boundary_id,
@@ -558,36 +557,27 @@ def _adjudicate_page_boundary_noise(
                         reason="page-boundary batch review was invalid",
                     )
                 )
-                continue
-            for (_, item), label in zip(targets, review, strict=True):
-                decisions.append(
-                    StructureRepairDecision(
-                        candidate_id=f"{boundary_id}:review:{label.item_id}",
-                        action=label.action,
-                        source_ids=[item.paragraph.paragraph_id],
-                        target_section_id="",
-                        confidence=label.confidence,
-                        reason=label.reason,
+                final_labels = initial
+            else:
+                for (_, item), label in zip(targets, review, strict=True):
+                    decisions.append(
+                        StructureRepairDecision(
+                            candidate_id=f"{boundary_id}:review:{label.item_id}",
+                            action=label.action,
+                            source_ids=[item.paragraph.paragraph_id],
+                            target_section_id="",
+                            confidence=label.confidence,
+                            reason=label.reason,
+                        )
                     )
-                )
-            for index, (initial_label, review_label) in enumerate(
-                zip(initial, review, strict=True)
-            ):
-                if initial_label.action == review_label.action:
-                    continue
-                rejected.append(
-                    RejectedStructureCandidate(
-                        candidate_id=(
-                            f"{boundary_id}:{request_items[index]['id']}"
-                        ),
-                        code="page_noise_review_disagreement",
-                        reason=(
-                            "initial and review labels disagree; the fixed item is kept"
-                        ),
-                    )
-                )
+                final_labels = review
         else:
-            review = initial
+            final_labels = initial
+
+        if not any(
+            label.action == "remove_as_page_noise" for label in final_labels
+        ):
+            continue
 
         removable: set[str] = set()
         sides = dict.fromkeys(position for position, _ in targets)
@@ -596,15 +586,14 @@ def _adjudicate_page_boundary_noise(
             for index, (target_position, _item) in enumerate(targets):
                 if target_position != position:
                     continue
-                agreed = (
-                    initial[index].action == "remove_as_page_noise"
-                    and review[index].action == "remove_as_page_noise"
+                should_remove = (
+                    final_labels[index].action == "remove_as_page_noise"
                 )
-                if edge_is_open and agreed:
+                if edge_is_open and should_remove:
                     removable.add(request_items[index]["id"])
                 else:
                     edge_is_open = False
-                    if agreed:
+                    if should_remove:
                         rejected.append(
                             RejectedStructureCandidate(
                                 candidate_id=(
@@ -622,13 +611,8 @@ def _adjudicate_page_boundary_noise(
             item_id = request_items[index]["id"]
             if item_id not in removable:
                 continue
-            confidence = min(
-                initial[index].confidence,
-                review[index].confidence,
-            )
-            reason = initial[index].reason
-            if review_changes:
-                reason = f"initial: {reason}; review: {review[index].reason}"
+            confidence = final_labels[index].confidence
+            reason = final_labels[index].reason
             if item.sentence_index is None:
                 removed_paragraph_ids.add(item.paragraph.paragraph_id)
                 operations.append(
@@ -823,6 +807,7 @@ def _adjudicate_unnumbered_sections(
             provider,
             model,
             call_budget,
+            max_attempts=1 if review_changes else 2,
         )
         candidate_id = f"section:{section.section_id}"
         if judgment is None:
@@ -834,32 +819,48 @@ def _adjudicate_unnumbered_sections(
                 )
             )
             continue
-        if review_changes and judgment.action == "move_to_section":
-            review, review_code = adjudicate_section_parent(
+        if review_changes:
+            decisions.append(
+                StructureRepairDecision(
+                    candidate_id=f"{candidate_id}:initial",
+                    action=judgment.action,
+                    source_ids=[section.section_id],
+                    target_section_id=previous.section_id,
+                    confidence=judgment.confidence,
+                    reason=judgment.reason,
+                )
+            )
+            review, review_code = review_section_parent(
                 section,
                 previous,
+                judgment,
                 provider,
                 model,
                 call_budget,
             )
-            if review is None or review.action != judgment.action:
+            if review is None:
                 rejected.append(
                     RejectedStructureCandidate(
                         candidate_id=candidate_id,
-                        code=(
-                            f"review_{review_code}"
-                            if review is None
-                            else "section_parent_review_disagreement"
+                        code=f"review_{review_code}",
+                        reason=(
+                            "section review was invalid; the valid initial "
+                            "judgment is used"
                         ),
-                        reason="section move was not confirmed by review",
                     )
                 )
-                continue
-            judgment = replace(
-                judgment,
-                confidence=min(judgment.confidence, review.confidence),
-                reason=f"initial: {judgment.reason}; review: {review.reason}",
-            )
+            else:
+                decisions.append(
+                    StructureRepairDecision(
+                        candidate_id=f"{candidate_id}:review",
+                        action=review.action,
+                        source_ids=[section.section_id],
+                        target_section_id=previous.section_id,
+                        confidence=review.confidence,
+                        reason=review.reason,
+                    )
+                )
+                judgment = review
         decisions.append(
             StructureRepairDecision(
                 candidate_id=candidate_id,
@@ -970,6 +971,7 @@ def _adjudicate_paragraph_fragments(
                 document_title=document.title,
                 section_path=section_paths.get(section.section_id, (section.title,)),
                 call_budget=call_budget,
+                max_attempts=1 if review_changes else 2,
             )
             candidate_id = (
                 f"paragraphs:{previous.paragraph_id}:{following.paragraph_id}"
@@ -984,12 +986,26 @@ def _adjudicate_paragraph_fragments(
                 )
                 index += 1
                 continue
-            if review_changes and judgment.action == "merge_paragraphs":
-                review, review_code = adjudicate_paragraph_merge(
+            if review_changes:
+                decisions.append(
+                    StructureRepairDecision(
+                        candidate_id=f"{candidate_id}:initial",
+                        action=judgment.action,
+                        source_ids=[
+                            previous.paragraph_id,
+                            following.paragraph_id,
+                        ],
+                        target_section_id=section.section_id,
+                        confidence=judgment.confidence,
+                        reason=judgment.reason,
+                    )
+                )
+                review, review_code = review_paragraph_merge(
                     section,
                     previous_boundary_view,
                     following,
                     context,
+                    judgment,
                     provider,
                     model,
                     rule_evidence=(
@@ -1001,25 +1017,32 @@ def _adjudicate_paragraph_fragments(
                     section_path=section_paths.get(section.section_id, (section.title,)),
                     call_budget=call_budget,
                 )
-                if review is None or review.action != judgment.action:
+                if review is None:
                     rejected.append(
                         RejectedStructureCandidate(
                             candidate_id=candidate_id,
-                            code=(
-                                f"review_{review_code}"
-                                if review is None
-                                else "paragraph_merge_review_disagreement"
+                            code=f"review_{review_code}",
+                            reason=(
+                                "paragraph review was invalid; the valid initial "
+                                "judgment is used"
                             ),
-                            reason="paragraph merge was not confirmed by review",
                         )
                     )
-                    index += 1
-                    continue
-                judgment = replace(
-                    judgment,
-                    confidence=min(judgment.confidence, review.confidence),
-                    reason=f"initial: {judgment.reason}; review: {review.reason}",
-                )
+                else:
+                    decisions.append(
+                        StructureRepairDecision(
+                            candidate_id=f"{candidate_id}:review",
+                            action=review.action,
+                            source_ids=[
+                                previous.paragraph_id,
+                                following.paragraph_id,
+                            ],
+                            target_section_id=section.section_id,
+                            confidence=review.confidence,
+                            reason=review.reason,
+                        )
+                    )
+                    judgment = review
             decisions.append(
                 StructureRepairDecision(
                     candidate_id=candidate_id,

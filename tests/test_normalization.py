@@ -149,11 +149,11 @@ def test_depth_controls_page_noise_review(depth, expects_review):
         chat_model = "fake-model"
 
         def __init__(self):
-            self.system_prompts: list[str] = []
+            self.payloads: list[dict] = []
 
         def chat(self, messages, **_kwargs):
-            self.system_prompts.append(messages[0]["content"])
             payload = json.loads(messages[-1]["content"])
+            self.payloads.append(payload)
             if "items" not in payload:
                 raise AssertionError("fixture must only produce page-noise candidates")
             return json.dumps(
@@ -199,10 +199,7 @@ def test_depth_controls_page_noise_review(depth, expects_review):
     result = normalize_document(raw, provider=provider, depth=depth)
 
     assert "重复页眉" not in result.document.plain_text
-    review_prompts = [
-        prompt for prompt in provider.system_prompts if "final safety review" in prompt
-    ]
-    assert bool(review_prompts) is expects_review
+    assert any("initial_labels" in payload for payload in provider.payloads) is expects_review
     assert result.trace.normalization_depth == depth.value
 
 

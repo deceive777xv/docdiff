@@ -328,21 +328,17 @@ def test_adjudicator_sends_detailed_strict_system_contract():
 
     prompt = provider.chat_calls[0][0]["content"]
     for required_instruction in (
-        "fixed candidate slots",
-        "exactly these six fields",
         "candidate_id",
         "continuation_role",
         "row_action",
         "table_action",
         "confidence",
         "reason",
-        "duplicate",
-        "Markdown",
-        "200 characters",
-        "JSON number",
-        "row_action=merge is valid only",
     ):
         assert required_instruction in prompt
+    payload = json.loads(provider.chat_calls[0][-1]["content"])
+    assert set(payload["candidate"]) >= {"previous", "continuation"}
+    assert payload["candidate_id"] == make_medium_candidate().candidate_id
 
 
 def test_adjudicator_retries_invalid_response_once():
