@@ -49,15 +49,21 @@ def _sanitized_fixture():
     )
 
 
-def _normalized_pair_texts(pairs):
+def _normalized_pair_texts(plan):
     return [
         (
-            [paragraph.text for paragraph in pair.baseline_section.paragraphs]
-            if pair.baseline_section else [],
-            [paragraph.text for paragraph in pair.target_section.paragraphs]
-            if pair.target_section else [],
+            [
+                paragraph.text
+                for section in group.baseline_sections
+                for paragraph in section.paragraphs
+            ],
+            [
+                paragraph.text
+                for section in group.target_sections
+                for paragraph in section.paragraphs
+            ],
         )
-        for pair in pairs
+        for group in plan.groups
     ]
 
 
@@ -202,7 +208,7 @@ def test_run_compare_marks_failed_and_reraises_when_result_publish_fails(tmp_pat
     )
     monkeypatch.setattr(compare_service.compare_repo, "insert_diff_items", lambda *args: None)
     monkeypatch.setattr(compare_service, "_load_ir", lambda *args: mock_ir)
-    monkeypatch.setattr(compare_service, "align_sections", lambda *args: [])
+    monkeypatch.setattr(compare_service, "align_compare_scopes", lambda *args, **kwargs: MagicMock())
     monkeypatch.setattr(compare_service, "match_paragraphs", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         compare_service,
@@ -240,14 +246,14 @@ def test_graph_and_service_consume_imported_irs_without_mutating_fixture(tmp_pat
     def load_ir(version_id, conn):
         return deepcopy(baseline if version_id == "ver-1" else target)
 
-    def capture_graph_match(pairs, *args, **kwargs):
-        graph_texts.append(_normalized_pair_texts(pairs))
+    def capture_graph_match(plan, *args, **kwargs):
+        graph_texts.append(_normalized_pair_texts(plan))
         assert kwargs["baseline_document_title"] == baseline.title
         assert kwargs["target_document_title"] == target.title
         return []
 
-    def capture_service_match(pairs, *args, **kwargs):
-        service_texts.append(_normalized_pair_texts(pairs))
+    def capture_service_match(plan, *args, **kwargs):
+        service_texts.append(_normalized_pair_texts(plan))
         return []
 
     monkeypatch.setattr(

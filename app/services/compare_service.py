@@ -7,8 +7,8 @@ from pathlib import Path
 from app.core.document_ir_codec import load_document_ir
 from app.core.diff.diff_classifier import classify
 from app.core.diff.result_storage import persist_compare_result
+from app.core.diff.section_scope_aligner import align_compare_scopes
 from app.core.diff.semantic_matcher import match_paragraphs
-from app.core.diff.structure_aligner import align_sections
 from app.core.model.base_provider import BaseProvider
 from app.core.types import ComparePolicy, DiffResult, DocumentIR
 from app.db import compare_repo, document_repo
@@ -63,9 +63,14 @@ def run_compare(
         baseline_ir = _load_ir(baseline_version_id, conn)
         target_ir = _load_ir(target_version_id, conn)
 
-        section_pairs = align_sections(baseline_ir, target_ir)
+        alignment_plan = align_compare_scopes(
+            baseline_ir,
+            target_ir,
+            embedder,
+            similarity_threshold=policy.similarity_threshold,
+        )
         para_pairs = match_paragraphs(
-            section_pairs,
+            alignment_plan,
             embedder,
             policy.similarity_threshold,
             rerank_provider=provider if policy.use_llm_match else None,

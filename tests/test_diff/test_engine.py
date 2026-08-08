@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 
+from app.core.model.base_provider import BaseProvider
 from app.core.types import (
     ComparePolicy,
     DocumentIR,
@@ -127,6 +128,83 @@ class TestCompare:
         result = compare(populated, empty)
         types = {i.diff_type for i in result.items}
         assert "删减" in types
+
+    def test_compare_renamed_reordered_section_reports_body_changes_not_add_delete(self):
+        from app.core.diff import compare
+
+        class ConceptEmbedder(BaseProvider):
+            def embed(self, texts: list[str]) -> list[list[float]]:
+                vectors = []
+                for text in texts:
+                    if "障碍物" in text:
+                        vectors.append([1.0, 0.0, 0.0])
+                    elif "安全距离" in text:
+                        vectors.append([0.0, 1.0, 0.0])
+                    else:
+                        vectors.append([0.0, 0.0, 1.0])
+                return vectors
+
+            def chat(self, messages, **kwargs) -> str:  # pragma: no cover
+                raise NotImplementedError
+
+            def health_check(self) -> bool:
+                return True
+
+        baseline = DocumentIR(
+            "baseline",
+            "Baseline",
+            "baseline-hash",
+            [
+                Section(
+                    "old-safety",
+                    "Old safety chapter",
+                    1,
+                    [
+                        Paragraph("b-1", "探测到障碍物后停止开门。", [Sentence("探测到障碍物后停止开门。")]),
+                        Paragraph("b-2", "车门必须保持安全距离。", [Sentence("车门必须保持安全距离。")]),
+                    ],
+                ),
+                Section(
+                    "stable",
+                    "Stable chapter",
+                    1,
+                    [Paragraph("b-stable", "保持不变的正文。", [Sentence("保持不变的正文。")])],
+                ),
+            ],
+        )
+        target = DocumentIR(
+            "target",
+            "Target",
+            "target-hash",
+            [
+                Section(
+                    "stable-new",
+                    "Stable chapter",
+                    1,
+                    [Paragraph("t-stable", "保持不变的正文。", [Sentence("保持不变的正文。")])],
+                ),
+                Section(
+                    "new-protection",
+                    "New protection chapter",
+                    1,
+                    [
+                        Paragraph("t-1", "发现障碍物时暂停开门动作。", [Sentence("发现障碍物时暂停开门动作。")]),
+                        Paragraph("t-2", "车门应当维持安全距离。", [Sentence("车门应当维持安全距离。")]),
+                    ],
+                ),
+            ],
+        )
+
+        result = compare(
+            baseline,
+            target,
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+            embedder=ConceptEmbedder(),
+        )
+
+        assert result.items
+        assert all(item.diff_type not in {"新增", "删减"} for item in result.items)
+        assert any("安全距离" in item.baseline_text for item in result.items)
 
     def test_compare_accepts_none_embedder(self):
         from app.core.diff import compare
@@ -541,3 +619,70 @@ class TestCompare:
             for item in result.items
         )
         assert len(provider.prompts) == 1
+
+    def test_default_embedder_aligns_renamed_reordered_single_paragraph_sections(self):
+        from app.core.diff import compare
+
+        baseline = DocumentIR(
+            "baseline",
+            "Baseline",
+            "baseline-hash",
+            [
+                Section(
+                    "b-stable",
+                    "第一章 总则",
+                    1,
+                    [Paragraph("b-1", "稳定正文甲。", [Sentence("稳定正文甲。")])],
+                ),
+                Section(
+                    "b-safety",
+                    "第二章 安全要求",
+                    1,
+                    [
+                        Paragraph(
+                            "b-2",
+                            "系统必须保持安全距离。",
+                            [Sentence("系统必须保持安全距离。")],
+                        )
+                    ],
+                ),
+            ],
+        )
+        target = DocumentIR(
+            "target",
+            "Target",
+            "target-hash",
+            [
+                Section(
+                    "t-safety",
+                    "苹果香蕉",
+                    1,
+                    [
+                        Paragraph(
+                            "t-2",
+                            "系统应保持安全距离。",
+                            [Sentence("系统应保持安全距离。")],
+                        )
+                    ],
+                ),
+                Section(
+                    "t-stable",
+                    "天空海洋",
+                    1,
+                    [Paragraph("t-1", "稳定正文甲。", [Sentence("稳定正文甲。")])],
+                ),
+            ],
+        )
+
+        result = compare(
+            baseline,
+            target,
+            policy=ComparePolicy(use_llm_classify=False, rule_strengthen=True),
+        )
+
+        assert all(item.diff_type not in {"新增", "删减"} for item in result.items)
+        assert any(
+            "系统必须保持安全距离" in item.baseline_text
+            and "系统应保持安全距离" in item.target_text
+            for item in result.items
+        )

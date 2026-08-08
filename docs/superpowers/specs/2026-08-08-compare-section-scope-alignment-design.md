@@ -89,9 +89,13 @@ class SectionScopeGroup:
 @dataclass(frozen=True)
 class SectionAlignmentPlan:
     groups: tuple[SectionScopeGroup, ...]
+    baseline_section_order: tuple[str, ...]
+    target_section_order: tuple[str, ...]
 ```
 
 `group_id` 只在当前 compare 请求内使用，不持久化，也不冒充跨版本稳定 ID。每个组至少一侧非空；单侧组直接表达未匹配章节，避免同时维护 group 与 unmatched 两套状态。每个源 section 在计划中恰好属于一个逻辑组。
+
+两侧 `section_order` 保留输入 IR 的完整 section ID 顺序，使换位后的逻辑组仍能重建各自原始层级路径和 paragraph 文档顺序，不能从逻辑组排列反推源文档顺序。
 
 `crossable_boundaries` 使用源 section ID 的有序相邻对表达。逻辑组相同不代表组内所有边界都可用于 `1:n` 窗口；只有显式列出的 fake 边界可以跨越。
 
@@ -105,7 +109,7 @@ compare 对齐不直接复用当前贪心 `SectionPair` 结果作为不可撤销
 
 1. 两侧规格化标题完全相同且各自唯一时，建立强 `title` 候选。
 2. 其他标题继续计算现有字符相似度。只有一侧 section 在另一侧恰好有一个达到现有 `0.3` 门槛的候选、反向也恰好只有当前 section 达到门槛且层级兼容时，才建立弱 `title` 候选。
-3. 强候选优先于弱候选。同分、重复标题、多个互为竞争的候选或层级不兼容时，不固定弱候选。
+3. 强标题候选立即固定；弱标题候选只记录为延后候选。正文精确和 semantic 身份证据优先消费未对齐 section，最后才用双方仍未消费的弱标题候选补齐，避免偶然字符重叠抢占正文身份明确的章节。
 4. 标题候选不要求文档位置相同，因此唯一且可靠的同名章节可以换位。
 5. 只靠弱标题候选形成的映射保持锚点区间内的单调顺序，不能用低强度标题相似度制造交叉匹配。
 
@@ -126,7 +130,7 @@ compare 对齐不直接复用当前贪心 `SectionPair` 结果作为不可撤销
 
 1. **精确正文层**：一个 section 中的全部全文唯一长段锚点必须指向同一个对侧 section，对侧锚点也必须反向指回当前 section。双方至少有两个锚点，或者锚点规格化字符总数在双方普通正文中占比都不低于 `0.5`。任一锚点指向冲突 section 或覆盖率不足时，当前 section 在本层不匹配并继续进入 semantic 层。
 2. **多段 semantic 层**：至少存在两个顺序一致、互为最佳的 semantic paragraph 候选，双方被候选覆盖的普通正文字符比例都不低于 `0.5`。候选质量取这些 paragraph 相似度按规格化字符数加权的平均值；两侧都必须以该质量互选为最佳 section，且与各自次优质量的差都不低于 `0.15`。
-3. **单段 semantic 层**：双方都只有一个普通 paragraph，该 paragraph 互为最佳、相似度不低于 `0.90`，且与各自次优 section 候选的相似度差都不低于 `0.15`。
+3. **单段 semantic 层**：双方都只有一个普通 paragraph，使用与后续 paragraph matcher 一致的“embedding/词法相似度取高值后扣除数值、否定词和义务词差异惩罚”评分；该 paragraph 必须互为最佳、达到 compare policy 的 paragraph similarity threshold，且与各自次优 section 候选的相似度差都不低于 `0.15`。
 
 多段 semantic 候选沿用 compare policy 的 paragraph similarity threshold。最终真实章节映射还必须：
 
@@ -230,6 +234,7 @@ fake 判定的职责到此结束：
 - 真实章节标题或正文候选不是互为最佳；
 - 与次优候选差距不足；
 - 重复标题或正文锚点无法唯一消歧；
+- semantic embedding 为空、非数值、非有限值或维度不一致；
 - 真实章节映射重复消费 section；
 - 弱证据产生顺序交叉或层级不兼容；
 - fake section 没有可靠局部锚点；
@@ -250,8 +255,8 @@ fake 判定的职责到此结束：
 2. 每个 group 至少一侧包含 section；
 3. 每个开放边界对应同一侧源文档中物理相邻的两个 section；
 4. 开放边界两端都属于同一逻辑组；
-5. 每个开放边界至少有一端是已确认 fake section；
-6. evidence 引用的 section 和 `content_ref` 候选内容都存在于输入 IR，table sentence/cell 索引没有越界；
+5. 每个开放边界恰有一端是已确认 fake section，另一端是由标题或正文证据对齐的原始真实 section；
+6. evidence 引用的 section 和 `content_ref` 候选内容都存在于输入 IR，table sentence/cell 索引没有越界，且同一内容候选不能被多条 fake evidence 复用；
 7. 输出 group 和 section 顺序确定，不依赖集合迭代或 provider 返回顺序。
 
 任何校验失败都不得返回部分计划。compare 记录错误并沿用现有任务失败处理，不静默丢弃 section。

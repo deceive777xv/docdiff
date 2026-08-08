@@ -9,7 +9,11 @@ from difflib import SequenceMatcher
 
 import numpy as np
 
-from app.core.diff.structure_aligner import SectionPair
+from app.core.diff.section_scope_aligner import SectionAlignmentPlan
+from app.core.diff.text_similarity import (
+    lexical_similarity as _lexical_similarity,
+    rule_score_delta as _rule_score_delta,
+)
 from app.core.model.base_provider import BaseProvider
 from app.core.types import Paragraph, Section, Sentence
 
@@ -38,6 +42,7 @@ class _ParagraphUnit:
     section_level: int = 0
     document_title: str = ""
     source_paragraph_id: str = ""
+    source_section_id: str = ""
 
 
 @dataclass
@@ -45,6 +50,8 @@ class _SectionMatchScope:
     baseline_sections: list[Section]
     target_sections: list[Section]
     title: str
+    baseline_crossable_boundaries: frozenset[tuple[str, str]] = frozenset()
+    target_crossable_boundaries: frozenset[tuple[str, str]] = frozenset()
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -53,17 +60,9 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return float(np.dot(va, vb) / denom) if denom > 1e-9 else 0.0
 
 
-_RULE_PATTERNS = [
-    re.compile(r'\d+[\.,]\d*'),          # numbers
-    re.compile(r'[不无未没]'),            # negations
-    re.compile(r'(?:应|须|必须|不得|禁止)'),  # obligation words
-]
-
 _TABLE_SEPARATOR_CELL_RE = re.compile(r":?-{2,}:?")
 _HTML_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"</?[^>\n]+>")
-_LEXICAL_TOKEN_RE = re.compile(r"[a-z]+|\d+(?:[\.,]\d+)?%?|[\u4e00-\u9fff]", re.IGNORECASE)
-_NUMERIC_TOKEN_RE = re.compile(r"\d+(?:[\.,]\d+)?%?")
 _EMPHASIZED_PART_RE = re.compile(
     r"^\s*(?:\*\*.+\*\*|__.+__|<(?:strong|b)>.*</(?:strong|b)>)\s*$",
     re.IGNORECASE,
@@ -130,35 +129,6 @@ _CONFLICT_RERANK_PROMPT = """你是文档表格行匹配助手。下面是一组
   "reason": "简短原因"
 }}
 """
-
-
-def _rule_score_delta(text_a: str, text_b: str) -> float:
-    """Return a small penalty (0..0.2) if key rule-patterns differ between texts."""
-    score = 0.0
-    for pat in _RULE_PATTERNS:
-        hits_a = set(pat.findall(text_a))
-        hits_b = set(pat.findall(text_b))
-        if hits_a != hits_b:
-            score += 0.067   # ~0.2 / 3 patterns
-    return score
-
-
-def _set_cosine(left: set[str], right: set[str]) -> float:
-    if not left or not right:
-        return 0.0
-    return len(left & right) / ((len(left) * len(right)) ** 0.5)
-
-
-def _lexical_similarity(text_a: str, text_b: str) -> float:
-    tokens_a = set(_LEXICAL_TOKEN_RE.findall(text_a.lower()))
-    tokens_b = set(_LEXICAL_TOKEN_RE.findall(text_b.lower()))
-    token_sim = _set_cosine(tokens_a, tokens_b)
-
-    non_numeric_a = {token for token in tokens_a if not _NUMERIC_TOKEN_RE.fullmatch(token)}
-    non_numeric_b = {token for token in tokens_b if not _NUMERIC_TOKEN_RE.fullmatch(token)}
-    if len(non_numeric_a) >= 2 and len(non_numeric_b) >= 2:
-        token_sim = max(token_sim, _set_cosine(non_numeric_a, non_numeric_b) * 0.95)
-    return token_sim
 
 
 def _split_table_row(line: str) -> list[str]:
@@ -331,17 +301,11 @@ def _pair_text(pair: ParagraphPair, side: str) -> str:
 
 
 def _document_content_counts(
-    pairs: list[SectionPair],
+    plan: SectionAlignmentPlan,
     side: str,
 ) -> dict[str, int]:
-    section_attribute = "baseline_section" if side == "baseline" else "target_section"
     counts: dict[str, int] = {}
-    seen_sections: set[int] = set()
-    for pair in pairs:
-        section = getattr(pair, section_attribute)
-        if section is None or id(section) in seen_sections:
-            continue
-        seen_sections.add(id(section))
+    for section in _ordered_plan_sections(plan, side):
         texts = [section.title] + [paragraph.text for paragraph in section.paragraphs]
         for text in texts:
             normalized = _normalize_match_text(text)
@@ -352,7 +316,7 @@ def _document_content_counts(
 
 def _reconcile_unique_exact_unmatched(
     results: list[ParagraphPair],
-    pairs: list[SectionPair],
+    plan: SectionAlignmentPlan,
 ) -> list[ParagraphPair]:
     baseline_indexes = [
         index
@@ -372,8 +336,8 @@ def _reconcile_unique_exact_unmatched(
     ]
     selected: dict[int, int] = {}
     target_used: set[int] = set()
-    baseline_counts = _document_content_counts(pairs, "baseline")
-    target_counts = _document_content_counts(pairs, "target")
+    baseline_counts = _document_content_counts(plan, "baseline")
+    target_counts = _document_content_counts(plan, "target")
 
     def select_unique(
         baseline_key,
@@ -486,9 +450,9 @@ def _reconcile_unique_exact_unmatched(
 
 def _remove_paragraphs_covered_by_titles(
     results: list[ParagraphPair],
-    pairs: list[SectionPair],
+    plan: SectionAlignmentPlan,
 ) -> list[ParagraphPair]:
-    scopes = _section_match_scopes(pairs)
+    scopes = _section_match_scopes(plan)
     paragraph_scopes: dict[tuple[str, int], int] = {}
     titles: dict[tuple[str, int, str], list[int]] = {}
     global_titles: dict[tuple[str, str], list[int]] = {}
@@ -558,7 +522,29 @@ def _remove_paragraphs_covered_by_titles(
                     [],
                 ).append(index)
 
-    covered: set[int] = set()
+    locally_proven_paragraph_refs = {
+        (evidence.content_ref.side, evidence.content_ref.paragraph_id)
+        for group in plan.groups
+        for evidence in group.evidence
+        if evidence.kind == "fake_paragraph"
+        and evidence.content_ref is not None
+    }
+    covered: set[int] = {
+        index
+        for index, pair in enumerate(results)
+        if (
+            pair.baseline_para is not None
+            and pair.target_para is None
+            and ("baseline", pair.baseline_para.paragraph_id)
+            in locally_proven_paragraph_refs
+        )
+        or (
+            pair.target_para is not None
+            and pair.baseline_para is None
+            and ("target", pair.target_para.paragraph_id)
+            in locally_proven_paragraph_refs
+        )
+    }
     used_titles: set[tuple[str, int]] = set()
     for (side, scope_index, normalized), indexes in paragraph_groups.items():
         other_side = "target" if side == "baseline" else "baseline"
@@ -659,30 +645,12 @@ def _remove_unique_normalized_fragment(
 
 
 def _paragraph_document_order(
-    pairs: list[SectionPair],
+    plan: SectionAlignmentPlan,
     side: str,
 ) -> dict[int, int]:
-    section_attribute = "baseline_section" if side == "baseline" else "target_section"
-    index_attribute = "baseline_index" if side == "baseline" else "target_index"
-    entries = []
-    for pair_position, pair in enumerate(pairs):
-        section = getattr(pair, section_attribute)
-        if section is None:
-            continue
-        section_index = getattr(pair, index_attribute)
-        entries.append((
-            section_index if section_index is not None else pair_position,
-            pair_position,
-            section,
-        ))
-    entries.sort(key=lambda entry: (entry[0], entry[1]))
     order: dict[int, int] = {}
     position = 0
-    seen_sections: set[int] = set()
-    for _, _, section in entries:
-        if section is None or id(section) in seen_sections:
-            continue
-        seen_sections.add(id(section))
+    for section in _ordered_plan_sections(plan, side):
         for paragraph in section.paragraphs:
             order[id(paragraph)] = position
             position += 1
@@ -706,12 +674,12 @@ def _merge_display_paragraphs(paragraphs: list[Paragraph]) -> Paragraph:
 
 def _reconcile_covered_short_paragraphs(
     results: list[ParagraphPair],
-    pairs: list[SectionPair],
+    plan: SectionAlignmentPlan,
 ) -> list[ParagraphPair]:
-    baseline_order = _paragraph_document_order(pairs, "baseline")
-    target_order = _paragraph_document_order(pairs, "target")
+    baseline_order = _paragraph_document_order(plan, "baseline")
+    target_order = _paragraph_document_order(plan, "target")
     paragraph_scopes: dict[tuple[str, int], int] = {}
-    for scope_index, scope in enumerate(_section_match_scopes(pairs)):
+    for scope_index, scope in enumerate(_section_match_scopes(plan)):
         for side, sections in (
             ("baseline", scope.baseline_sections),
             ("target", scope.target_sections),
@@ -1134,6 +1102,7 @@ def _expand_paragraphs(
     section_path: str = "",
     section_level: int = 0,
     document_title: str = "",
+    section_id: str = "",
 ) -> list[_ParagraphUnit]:
     units: list[_ParagraphUnit] = []
     for para in paras:
@@ -1161,6 +1130,7 @@ def _expand_paragraphs(
                     section_level=section_level,
                     document_title=document_title,
                     source_paragraph_id=para.paragraph_id,
+                    source_section_id=section_id,
                 )
             )
             continue
@@ -1190,6 +1160,7 @@ def _expand_paragraphs(
                     section_level=section_level,
                     document_title=document_title,
                     source_paragraph_id=para.paragraph_id,
+                    source_section_id=section_id,
                 )
             )
     return units
@@ -1364,107 +1335,50 @@ def _select_monotonic_ordinary_matches(
     return selected
 
 
-def _section_match_scopes(pairs: list[SectionPair]) -> list[_SectionMatchScope]:
-    scopes: list[_SectionMatchScope] = []
-    scope_by_pair: dict[int, _SectionMatchScope] = {}
-
-    for pair in pairs:
-        if pair.baseline_section is None or pair.target_section is None:
-            continue
-        scope = _SectionMatchScope(
-            baseline_sections=[pair.baseline_section],
-            target_sections=[pair.target_section],
-            title=pair.baseline_section.title or pair.target_section.title,
+def _section_match_scopes(plan: SectionAlignmentPlan) -> list[_SectionMatchScope]:
+    return [
+        _SectionMatchScope(
+            baseline_sections=list(group.baseline_sections),
+            target_sections=list(group.target_sections),
+            title=(
+                group.baseline_sections[0].title
+                if group.baseline_sections
+                else group.target_sections[0].title
+                if group.target_sections
+                else ""
+            ),
+            baseline_crossable_boundaries=group.baseline_crossable_boundaries,
+            target_crossable_boundaries=group.target_crossable_boundaries,
         )
-        scopes.append(scope)
-        scope_by_pair[id(pair)] = scope
+        for group in plan.groups
+    ]
 
-    def attach_side(side: str) -> None:
-        entries: list[tuple[int, Section, SectionPair]] = []
-        for pair in pairs:
-            section = (
-                pair.baseline_section
-                if side == "baseline"
-                else pair.target_section
-            )
-            index = (
-                pair.baseline_index
-                if side == "baseline"
-                else pair.target_index
-            )
-            if section is not None and index is not None:
-                entries.append((index, section, pair))
 
-        stack: list[tuple[int, _SectionMatchScope]] = []
-        for _, section, pair in sorted(entries, key=lambda item: item[0]):
-            while stack and stack[-1][0] >= section.level:
-                stack.pop()
-
-            scope = scope_by_pair.get(id(pair))
-            if scope is None:
-                scope = stack[-1][1] if stack else None
-                if scope is None:
-                    scope = _SectionMatchScope(
-                        baseline_sections=[],
-                        target_sections=[],
-                        title=section.title,
-                    )
-                    scopes.append(scope)
-                if side == "baseline":
-                    scope.baseline_sections.append(section)
-                else:
-                    scope.target_sections.append(section)
-                scope_by_pair[id(pair)] = scope
-
-            stack.append((section.level, scope))
-
-    attach_side("baseline")
-    attach_side("target")
-
-    for pair in pairs:
-        if id(pair) in scope_by_pair:
-            continue
-        baseline_sections = (
-            [pair.baseline_section] if pair.baseline_section is not None else []
-        )
-        target_sections = (
-            [pair.target_section] if pair.target_section is not None else []
-        )
-        title = (
-            pair.baseline_section.title
-            if pair.baseline_section is not None
-            else pair.target_section.title
-            if pair.target_section is not None
-            else ""
-        )
-        scope = _SectionMatchScope(baseline_sections, target_sections, title)
-        scopes.append(scope)
-        scope_by_pair[id(pair)] = scope
-
-    return scopes
+def _ordered_plan_sections(
+    plan: SectionAlignmentPlan,
+    side: str,
+) -> list[Section]:
+    attribute = "baseline_sections" if side == "baseline" else "target_sections"
+    order = (
+        plan.baseline_section_order
+        if side == "baseline"
+        else plan.target_section_order
+    )
+    sections = {
+        section.section_id: section
+        for group in plan.groups
+        for section in getattr(group, attribute)
+    }
+    return [sections[section_id] for section_id in order if section_id in sections]
 
 
 def _full_section_paths(
-    pairs: list[SectionPair],
+    plan: SectionAlignmentPlan,
     side: str,
 ) -> dict[int, str]:
     paths: dict[int, str] = {}
     stack: list[tuple[int, str]] = []
-    attribute = "baseline_section" if side == "baseline" else "target_section"
-    index_attribute = "baseline_index" if side == "baseline" else "target_index"
-    ordered_pairs = sorted(
-        (
-            pair
-            for pair in pairs
-            if getattr(pair, attribute) is not None
-            and getattr(pair, index_attribute) is not None
-        ),
-        key=lambda pair: getattr(pair, index_attribute),
-    )
-    for pair in ordered_pairs:
-        section = getattr(pair, attribute)
-        if section is None or id(section) in paths:
-            continue
+    for section in _ordered_plan_sections(plan, side):
         while stack and stack[-1][0] >= section.level:
             stack.pop()
         stack.append((section.level, section.title))
@@ -1503,6 +1417,11 @@ def _merge_window_units(units: list[_ParagraphUnit]) -> _ParagraphUnit:
             if len({unit.source_paragraph_id for unit in units}) == 1
             else ""
         ),
+        source_section_id=(
+            units[0].source_section_id
+            if len({unit.source_section_id for unit in units}) == 1
+            else ""
+        ),
     )
 
 
@@ -1524,6 +1443,8 @@ def _specific_section_path(
 def _exact_adjacent_window_matches(
     b_units: list[_ParagraphUnit],
     t_units: list[_ParagraphUnit],
+    baseline_crossable_boundaries: frozenset[tuple[str, str]] = frozenset(),
+    target_crossable_boundaries: frozenset[tuple[str, str]] = frozenset(),
 ) -> list[
     tuple[
         tuple[int, ...],
@@ -1556,9 +1477,23 @@ def _exact_adjacent_window_matches(
             anchored_baseline.add(baseline_indexes[0])
             anchored_target.add(target_indexes[0])
 
+    def window_boundaries_allowed(
+        window: list[_ParagraphUnit],
+        allowed_boundaries: frozenset[tuple[str, str]],
+    ) -> bool:
+        section_ids: list[str] = []
+        for unit in window:
+            if not section_ids or section_ids[-1] != unit.source_section_id:
+                section_ids.append(unit.source_section_id)
+        return all(
+            (left, right) in allowed_boundaries
+            for left, right in zip(section_ids, section_ids[1:])
+        )
+
     def windows(
         units: list[_ParagraphUnit],
         anchored: set[int],
+        allowed_boundaries: frozenset[tuple[str, str]],
     ) -> dict[str, list[tuple[tuple[int, ...], _ParagraphUnit]]]:
         by_text: dict[
             str,
@@ -1583,9 +1518,13 @@ def _exact_adjacent_window_matches(
                     == window[-1].source_paragraph_id
                 ):
                     continue
-                if len({unit.source_paragraph_id for unit in window}) > 2:
+                source_paragraph_count = len({
+                    unit.source_paragraph_id for unit in window
+                })
+                section_count = len({unit.source_section_id for unit in window})
+                if source_paragraph_count > 2 and section_count == 1:
                     continue
-                if len({unit.section_path for unit in window}) != 1:
+                if not window_boundaries_allowed(window, allowed_boundaries):
                     continue
                 if not all(_is_ordinary_unit(unit) for unit in window):
                     continue
@@ -1604,8 +1543,16 @@ def _exact_adjacent_window_matches(
                 )
         return by_text
 
-    baseline_windows = windows(b_units, anchored_baseline)
-    target_windows = windows(t_units, anchored_target)
+    baseline_windows = windows(
+        b_units,
+        anchored_baseline,
+        baseline_crossable_boundaries,
+    )
+    target_windows = windows(
+        t_units,
+        anchored_target,
+        target_crossable_boundaries,
+    )
     candidates: list[
         tuple[
             tuple[int, ...],
@@ -1705,7 +1652,7 @@ def _exact_adjacent_window_matches(
 
 
 def match_paragraphs(
-    pairs: list[SectionPair],
+    plan: SectionAlignmentPlan,
     embedder: BaseProvider,
     similarity_threshold: float = 0.75,
     *,
@@ -1715,32 +1662,51 @@ def match_paragraphs(
     target_document_title: str = "",
 ) -> list[ParagraphPair]:
     """
-    For each SectionPair, match paragraphs by embedding similarity.
+    For each logical section scope, match paragraphs by embedding similarity.
     Returns flat list of ParagraphPairs across all section pairs.
     """
     results: list[ParagraphPair] = []
-    baseline_paths = _full_section_paths(pairs, "baseline")
-    target_paths = _full_section_paths(pairs, "target")
+    baseline_paths = _full_section_paths(plan, "baseline")
+    target_paths = _full_section_paths(plan, "target")
+    title_covered_paragraphs = {
+        (evidence.content_ref.side, evidence.content_ref.paragraph_id)
+        for group in plan.groups
+        for evidence in group.evidence
+        if evidence.kind == "fake_paragraph"
+        and evidence.content_ref is not None
+    }
 
-    for scope in _section_match_scopes(pairs):
+    for scope in _section_match_scopes(plan):
         b_units = [
             unit
             for section in scope.baseline_sections
             for unit in _expand_paragraphs(
-                section.paragraphs,
+                [
+                    paragraph
+                    for paragraph in section.paragraphs
+                    if ("baseline", paragraph.paragraph_id)
+                    not in title_covered_paragraphs
+                ],
                 baseline_paths.get(id(section), section.title),
                 section.level,
                 baseline_document_title,
+                section.section_id,
             )
         ]
         t_units = [
             unit
             for section in scope.target_sections
             for unit in _expand_paragraphs(
-                section.paragraphs,
+                [
+                    paragraph
+                    for paragraph in section.paragraphs
+                    if ("target", paragraph.paragraph_id)
+                    not in title_covered_paragraphs
+                ],
                 target_paths.get(id(section), section.title),
                 section.level,
                 target_document_title,
+                section.section_id,
             )
         ]
         b_ordinary_units = [unit for unit in b_units if _is_ordinary_unit(unit)]
@@ -1801,7 +1767,12 @@ def match_paragraphs(
         all_embeds = embedder.embed(all_texts)
         b_embeds = all_embeds[: len(b_units)]
         t_embeds = all_embeds[len(b_units) :]
-        window_matches = _exact_adjacent_window_matches(b_units, t_units)
+        window_matches = _exact_adjacent_window_matches(
+            b_units,
+            t_units,
+            scope.baseline_crossable_boundaries,
+            scope.target_crossable_boundaries,
+        )
         window_baseline_used = {
             index
             for baseline_indexes, _, _, _ in window_matches
@@ -1983,6 +1954,6 @@ def match_paragraphs(
                     target_match_text=t_unit.match_text,
                 ))
 
-    reconciled = _reconcile_unique_exact_unmatched(results, pairs)
-    reconciled = _remove_paragraphs_covered_by_titles(reconciled, pairs)
-    return _reconcile_covered_short_paragraphs(reconciled, pairs)
+    reconciled = _reconcile_unique_exact_unmatched(results, plan)
+    reconciled = _remove_paragraphs_covered_by_titles(reconciled, plan)
+    return _reconcile_covered_short_paragraphs(reconciled, plan)

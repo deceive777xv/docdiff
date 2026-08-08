@@ -48,7 +48,7 @@ class CompareState(TypedDict, total=False):
     # ── Node-internal ────────────────────────────────────────────────────────
     _baseline_ir: Any          # DocumentIR
     _target_ir: Any            # DocumentIR
-    _section_pairs: list
+    _section_alignment_plan: Any
     _para_pairs: list
 
     # ── Node outputs ────────────────────────────────────────────────────────

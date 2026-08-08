@@ -9,8 +9,8 @@ from langgraph.graph import END, StateGraph
 from app.agent.states import CompareState
 from app.core.diff.diff_classifier import classify
 from app.core.diff.result_storage import persist_compare_result
+from app.core.diff.section_scope_aligner import align_compare_scopes
 from app.core.diff.semantic_matcher import match_paragraphs
-from app.core.diff.structure_aligner import align_sections
 from app.core.document_ir_codec import load_document_ir
 from app.core.types import ComparePolicy, DocumentIR
 from app.db import compare_repo, document_repo
@@ -68,10 +68,16 @@ def ensure_parsed(state: CompareState) -> dict:
 
 
 def do_align(state: CompareState) -> dict:
-    """Align document sections using title similarity."""
+    """Build compare-only logical section scopes."""
     try:
-        pairs = align_sections(state["_baseline_ir"], state["_target_ir"])
-        return {"_section_pairs": pairs, "status": "aligned"}
+        policy = ComparePolicy()
+        plan = align_compare_scopes(
+            state["_baseline_ir"],
+            state["_target_ir"],
+            state["embedder"],
+            similarity_threshold=policy.similarity_threshold,
+        )
+        return {"_section_alignment_plan": plan, "status": "aligned"}
     except Exception as e:
         logger.exception("do_align failed")
         compare_repo.update_task_status(state["conn"], state["task_id"], "failed")
@@ -83,7 +89,7 @@ def do_semantic_compare(state: CompareState) -> dict:
     try:
         policy = ComparePolicy()
         para_pairs = match_paragraphs(
-            state["_section_pairs"],
+            state["_section_alignment_plan"],
             state["embedder"],
             policy.similarity_threshold,
             rerank_provider=state["provider"] if policy.use_llm_match else None,

@@ -73,16 +73,16 @@ def test_compare_graph_matches_imported_irs_and_persists_result_only(base_state,
 
     mock_ir = DocumentIR(doc_id="d1", title="T", file_hash="h", sections=[], plain_text="")
     mock_result = DiffResult(task_id="task-001", baseline_version_id="ver-1", target_version_id="ver-2", items=[])
-    initial_pairs = [object()]
+    initial_plan = object()
     calls: list[str] = []
 
-    def record_align(*args):
+    def record_align(*args, **kwargs):
         calls.append("align")
-        return initial_pairs
+        return initial_plan
 
-    def record_match(pairs, *args, **kwargs):
+    def record_match(plan, *args, **kwargs):
         calls.append("match")
-        assert pairs is initial_pairs
+        assert plan is initial_plan
         assert kwargs["baseline_document_title"] == "T"
         assert kwargs["target_document_title"] == "T"
         return []
@@ -98,7 +98,7 @@ def test_compare_graph_matches_imported_irs_and_persists_result_only(base_state,
         patch("app.agent.compare_graph.compare_repo.update_task_status"),
         patch("app.agent.compare_graph.compare_repo.insert_diff_items"),
         patch("app.agent.compare_graph._load_ir", return_value=mock_ir),
-        patch("app.agent.compare_graph.align_sections", side_effect=record_align),
+        patch("app.agent.compare_graph.align_compare_scopes", side_effect=record_align),
         patch("app.agent.compare_graph.match_paragraphs", side_effect=record_match),
         patch("app.agent.compare_graph.classify", return_value=mock_result),
         patch("app.agent.compare_graph.persist_compare_result", side_effect=record_persist),
@@ -130,7 +130,7 @@ def test_graph_marks_failed_when_result_publish_fails(base_state, tmp_path):
         ),
         patch("app.agent.compare_graph.compare_repo.insert_diff_items"),
         patch("app.agent.compare_graph._load_ir", return_value=mock_ir),
-        patch("app.agent.compare_graph.align_sections", return_value=[]),
+        patch("app.agent.compare_graph.align_compare_scopes", return_value=object()),
         patch("app.agent.compare_graph.match_paragraphs", return_value=[]),
         patch("app.agent.compare_graph.classify", return_value=mock_result),
         patch(

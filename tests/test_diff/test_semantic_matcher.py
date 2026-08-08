@@ -7,8 +7,91 @@ from typing import List
 import pytest
 
 from app.core.diff.structure_aligner import SectionPair
+from app.core.diff.section_scope_aligner import (
+    SectionAlignmentPlan,
+    SectionScopeGroup,
+)
+from app.core.diff.semantic_matcher import match_paragraphs as _match_paragraphs
 from app.core.model.base_provider import BaseProvider
 from app.core.types import DocumentIR, Section, Paragraph, Sentence
+
+
+def _plan_from_pairs(pairs: list[SectionPair]) -> SectionAlignmentPlan:
+    groups: list[dict[str, object]] = []
+    group_by_pair: dict[int, dict[str, object]] = {}
+
+    for pair in pairs:
+        if pair.baseline_section is None or pair.target_section is None:
+            continue
+        group = {
+            "baseline": [pair.baseline_section],
+            "target": [pair.target_section],
+        }
+        groups.append(group)
+        group_by_pair[id(pair)] = group
+
+    def attach_side(side: str) -> None:
+        entries = []
+        for pair in pairs:
+            section = pair.baseline_section if side == "baseline" else pair.target_section
+            index = pair.baseline_index if side == "baseline" else pair.target_index
+            if section is not None and index is not None:
+                entries.append((index, section, pair))
+        stack: list[tuple[int, dict[str, object]]] = []
+        for _, section, pair in sorted(entries, key=lambda item: item[0]):
+            while stack and stack[-1][0] >= section.level:
+                stack.pop()
+            group = group_by_pair.get(id(pair))
+            if group is None:
+                group = stack[-1][1] if stack else None
+                if group is None:
+                    group = {"baseline": [], "target": []}
+                    groups.append(group)
+                sections = group[side]
+                assert isinstance(sections, list)
+                sections.append(section)
+                group_by_pair[id(pair)] = group
+            stack.append((section.level, group))
+
+    attach_side("baseline")
+    attach_side("target")
+
+    for pair in pairs:
+        if id(pair) in group_by_pair:
+            continue
+        group = {
+            "baseline": [pair.baseline_section] if pair.baseline_section is not None else [],
+            "target": [pair.target_section] if pair.target_section is not None else [],
+        }
+        groups.append(group)
+        group_by_pair[id(pair)] = group
+
+    def section_order(side: str) -> tuple[str, ...]:
+        entries = []
+        for position, pair in enumerate(pairs):
+            section = pair.baseline_section if side == "baseline" else pair.target_section
+            index = pair.baseline_index if side == "baseline" else pair.target_index
+            if section is not None:
+                entries.append((index if index is not None else position, position, section))
+        entries.sort(key=lambda item: (item[0], item[1]))
+        return tuple(dict.fromkeys(section.section_id for _, _, section in entries))
+
+    return SectionAlignmentPlan(
+        groups=tuple(
+            SectionScopeGroup(
+                group_id=f"test:{index:04d}",
+                baseline_sections=tuple(group["baseline"]),
+                target_sections=tuple(group["target"]),
+            )
+            for index, group in enumerate(groups)
+        ),
+        baseline_section_order=section_order("baseline"),
+        target_section_order=section_order("target"),
+    )
+
+
+def match_paragraphs(pairs: list[SectionPair], *args, **kwargs):
+    return _match_paragraphs(_plan_from_pairs(pairs), *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +261,6 @@ def make_section(title: str, paras: list[Paragraph]) -> Section:
 
 def test_matched_pair_above_threshold():
     """Baseline and target with same text → embedder returns identical vectors → matched."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     same_text = "本合同自签署之日起生效。"
     b_para = make_para(same_text)
@@ -198,7 +280,6 @@ def test_matched_pair_above_threshold():
 
 def test_unmatched_goes_to_deleted():
     """Baseline para with no similar target → target_para=None (deleted)."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_para = make_para("甲方应在30日内完成交付。")
     t_para = make_para("完全不同的内容ZZZZZZ")
@@ -219,7 +300,6 @@ def test_unmatched_goes_to_deleted():
 
 def test_section_with_only_target_paras():
     """SectionPair with baseline_section=None → all target paras become ParagraphPair(None, para, 0.0)."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     t_para1 = make_para("新增段落一")
     t_para2 = make_para("新增段落二")
@@ -239,7 +319,6 @@ def test_section_with_only_target_paras():
 
 def test_short_paragraph_boundary_changes_match_sentence_units():
     """Same sentences should match even when parser paragraph boundaries differ."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     sentences = [
         "Alpha warranty obligation remains unchanged.",
@@ -271,7 +350,6 @@ def test_short_paragraph_boundary_changes_match_sentence_units():
 
 def test_large_table_paragraph_is_matched_by_table_rows():
     """Large table paragraphs should be compared row-by-row, not as one blob."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     unchanged_rows = [f"| 项目{i} | 内容{i} |" for i in range(40)]
     b_rows = [
@@ -306,7 +384,6 @@ def test_large_table_paragraph_is_matched_by_table_rows():
 
 def test_table_rows_with_ordinal_first_column_match_by_content_not_sequence():
     """Ordinal table columns should not force mismatched rows after reordering."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "| 序号 | 区域 | 销售代表 | 一月(万元) |",
@@ -338,7 +415,6 @@ def test_table_rows_with_ordinal_first_column_match_by_content_not_sequence():
 
 def test_table_row_matching_prefers_vector_similarity_over_first_column_key():
     """Generic tables should not hard-match rows by a positional/index column."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "| Index | Label | Status | Amount |",
@@ -369,7 +445,6 @@ def test_table_row_matching_prefers_vector_similarity_over_first_column_key():
 
 def test_table_row_matching_ignores_leading_number_metadata_for_insertions():
     """Identical content with shifted row numbers should beat same-number near matches."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "| A | B |",
@@ -405,7 +480,6 @@ def test_table_row_matching_ignores_leading_number_metadata_for_insertions():
 
 def test_llm_rerank_selects_better_candidate_when_numbers_are_ambiguous():
     """LLM rerank can choose content-equivalent rows over same-number near matches."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "| 序号 | 位置 | 标题 |",
@@ -451,7 +525,6 @@ def test_llm_rerank_selects_better_candidate_when_numbers_are_ambiguous():
 
 def test_llm_conflict_cluster_rerank_resolves_shifted_table_rows():
     """A local LLM rerank can resolve rows that compete for the same target after insertion."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "| 序号 | 类型 | 项目 | 要求 |",
@@ -503,7 +576,6 @@ def test_llm_conflict_cluster_rerank_resolves_shifted_table_rows():
 
 def test_pdf_header_value_cells_do_not_require_known_header_names():
     """Header/value cells should be normalized generically, without business labels."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         (
@@ -534,7 +606,6 @@ def test_pdf_header_value_cells_do_not_require_known_header_names():
 
 def test_pdf_styled_ordinal_header_matches_rows_by_business_content():
     """PDF extraction may split and style the ordinal header as Markdown/HTML."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "|**序**<br>**号**|**区**<br>**域**|**销售**<br>**代表**|**一月**|",
@@ -566,7 +637,6 @@ def test_pdf_styled_ordinal_header_matches_rows_by_business_content():
 
 def test_pdf_key_value_table_row_matches_plain_row_by_values():
     """Some PDF rows are extracted as cells containing header and value."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "|**序号**<br>`3`|**姓名**<br>赵六|**部门**<br>销售|**出勤天数**<br>`23`|",
@@ -595,7 +665,6 @@ def test_pdf_key_value_table_row_matches_plain_row_by_values():
 
 def test_empty_pdf_table_rows_are_ignored():
     """PDF extraction can emit empty pipe-only rows at page splits."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "|**序号**|**姓名**|**部门**|",
@@ -640,7 +709,6 @@ def test_table_content_row_before_separator_is_not_treated_as_header():
 
 def test_single_new_header_like_table_row_is_reported_as_added():
     """A one-off new row parsed like a header must not be silently suppressed."""
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     b_rows = [
         "| 编号 | 名称 |",
@@ -670,7 +738,6 @@ def test_single_new_header_like_table_row_is_reported_as_added():
 
 
 def test_repeated_short_paragraph_uses_neighbor_context():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     first_heading = make_para("A）工作条件")
     surviving_heading = make_para("A）工作条件")
@@ -705,7 +772,6 @@ def test_repeated_short_paragraph_uses_neighbor_context():
 
 
 def test_repeated_short_paragraph_context_skips_all_table_units():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     first_heading = make_para("A）工作条件")
     surviving_heading = make_para("A）工作条件")
@@ -749,7 +815,6 @@ def test_repeated_short_paragraph_context_skips_all_table_units():
 
 
 def test_ordinary_paragraph_matches_are_monotonic():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     baseline_paras = [
         make_para("Alpha unique ordinary paragraph"),
@@ -787,7 +852,6 @@ def test_ordinary_paragraph_matches_are_monotonic():
 
 
 def test_unique_long_text_can_match_across_parent_child_section_split():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     shared = "车门电动打开过程中遇到障碍物时立即停止，并悬停在当前位置。"
@@ -820,7 +884,6 @@ def test_unique_long_text_can_match_across_parent_child_section_split():
 
 
 def test_unique_same_section_short_text_ignores_markdown_list_marker():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     baseline = make_section(
         "1.1.4 开启关闭防夹功能",
@@ -849,7 +912,6 @@ def test_unique_same_section_short_text_ignores_markdown_list_marker():
 
 
 def test_sentence_windows_do_not_cross_paragraphs_or_section_paths():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     baseline_parent = make_section("1.1.28 附件功能", [])
@@ -901,7 +963,6 @@ def test_sentence_windows_do_not_cross_paragraphs_or_section_paths():
 
 
 def test_exact_window_does_not_join_three_distinct_paragraphs():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     baseline = make_section(
         "正文",
@@ -937,7 +998,6 @@ def test_exact_window_does_not_join_three_distinct_paragraphs():
 
 
 def test_exact_window_matches_different_sentence_boundaries_inside_one_paragraph():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     parts = [
         "开启过程中按下外把手电容开关；",
@@ -975,7 +1035,6 @@ def test_exact_window_matches_different_sentence_boundaries_inside_one_paragraph
 
 
 def test_exact_window_allows_minor_title_changes_in_an_aligned_section():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     parts = ["系统检测到异常后记录故障码，", "并立即通知诊断模块。"]
     baseline = make_section("3.1 故障处理", [make_para("".join(parts))])
@@ -1003,7 +1062,6 @@ def test_exact_window_allows_minor_title_changes_in_an_aligned_section():
 
 
 def test_exact_window_never_synthesizes_a_cross_paragraph_match():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     ordinary = "稍后出现的唯一普通段落，用于验证匹配顺序不能跨过窗口锚点。"
     combined = "系统检测到故障后记录故障码，并通过CAN向诊断仪输出。"
@@ -1033,7 +1091,6 @@ def test_exact_window_never_synthesizes_a_cross_paragraph_match():
 
 
 def test_target_only_child_uses_the_more_specific_section_path():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     text = "目标侧子章节中的稳定正文内容，应保留最具体的章节路径。"
@@ -1067,7 +1124,6 @@ def test_target_only_child_uses_the_more_specific_section_path():
 
 
 def test_inserted_child_path_is_not_attached_to_a_later_parent():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     text = "插入子章节中的正文应归属于前面的父章节。"
@@ -1110,7 +1166,6 @@ def test_inserted_child_path_is_not_attached_to_a_later_parent():
 
 
 def test_exact_adjacent_paragraphs_match_one_combined_target_paragraph():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     first = "系统需采集用户操作信息并上传至平台进行后台监控；"
@@ -1143,7 +1198,6 @@ def test_exact_adjacent_paragraphs_match_one_combined_target_paragraph():
 
 
 def test_one_combined_baseline_paragraph_matches_exact_adjacent_targets():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     first = "系统需采集用户操作信息并上传至平台进行后台监控；"
@@ -1176,7 +1230,6 @@ def test_one_combined_baseline_paragraph_matches_exact_adjacent_targets():
 
 
 def test_short_adjacent_headings_match_one_combined_heading():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     baseline = make_section("目录", [make_para("功能"), make_para("说明")])
     target = make_section("目录", [make_para("功能说明")])
@@ -1195,7 +1248,6 @@ def test_short_adjacent_headings_match_one_combined_heading():
 
 
 def test_exact_window_does_not_take_partial_units_from_adjacent_paragraphs():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     baseline = make_section(
         "正文",
@@ -1224,7 +1276,6 @@ def test_exact_window_does_not_take_partial_units_from_adjacent_paragraphs():
 
 
 def test_unique_short_paragraph_matches_across_unaligned_section_paths():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     shared = "唯一短文本"
@@ -1254,7 +1305,6 @@ def test_unique_short_paragraph_matches_across_unaligned_section_paths():
 
 
 def test_paragraph_is_silently_covered_by_equal_child_section_title():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     shared = "附表：悬停方式对应悬停动作"
@@ -1283,7 +1333,6 @@ def test_paragraph_is_silently_covered_by_equal_child_section_title():
 
 
 def test_target_paragraph_is_silently_covered_by_equal_baseline_title():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     shared = "附表：悬停方式对应悬停动作"
@@ -1313,7 +1362,6 @@ def test_target_paragraph_is_silently_covered_by_equal_baseline_title():
 
 def test_modified_paragraph_with_covered_short_neighbor_reports_only_residual_change():
     from app.core.diff.diff_classifier import classify
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.types import ComparePolicy
 
     old_main = (
@@ -1349,7 +1397,6 @@ def test_modified_paragraph_with_covered_short_neighbor_reports_only_residual_ch
 
 
 def test_covered_short_neighbor_does_not_cross_incompatible_section_scope():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     old_main = "主章节中的稳定正文内容发生了少量修改。"
     preserved = "独立章节正文。"
@@ -1380,7 +1427,6 @@ def test_covered_short_neighbor_does_not_cross_incompatible_section_scope():
 
 
 def test_repeated_paragraphs_match_repeated_titles_monotonically_within_scope():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     shared = "B）触发条件及执行动作"
@@ -1414,7 +1460,6 @@ def test_repeated_paragraphs_match_repeated_titles_monotonically_within_scope():
 
 
 def test_globally_unique_paragraph_is_covered_by_title_without_shared_scope():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     shared = "附表：悬停方式对应悬停动作"
@@ -1441,7 +1486,6 @@ def test_globally_unique_paragraph_is_covered_by_title_without_shared_scope():
 
 
 def test_cross_scope_short_text_is_not_unique_when_opposite_title_repeats_it():
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.structure_aligner import align_sections
 
     shared = "唯一短文本"
@@ -1476,7 +1520,6 @@ def test_cross_scope_short_text_is_not_unique_when_opposite_title_repeats_it():
 
 def test_target_short_neighbor_covered_by_baseline_long_paragraph_is_symmetric():
     from app.core.diff.diff_classifier import classify
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.types import ComparePolicy
 
     old_main = "系统检测到障碍物后，车门需保持安全距离。"
@@ -1510,7 +1553,6 @@ def test_target_short_neighbor_covered_by_baseline_long_paragraph_is_symmetric()
 
 def test_unique_middle_fragment_is_removed_before_residual_classification():
     from app.core.diff.diff_classifier import classify
-    from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.types import ComparePolicy
 
     main = "系统启动后继续执行后续流程。"
@@ -1537,7 +1579,6 @@ def test_unique_middle_fragment_is_removed_before_residual_classification():
 
 
 def test_repeated_fragment_inside_long_paragraph_is_not_consumed():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     old_main = "系统启动后继续执行后续流程。"
     preserved = "重复短段。"
@@ -1564,7 +1605,6 @@ def test_repeated_fragment_inside_long_paragraph_is_not_consumed():
 
 
 def test_table_like_short_neighbor_is_not_consumed_as_covered_text():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     old_main = "系统检测到障碍物后，车门需保持安全距离。"
     table_row = "状态|动作"
@@ -1594,7 +1634,6 @@ def test_table_like_short_neighbor_is_not_consumed_as_covered_text():
 
 
 def test_competing_adjacent_short_fragments_are_not_consumed():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     before = "前置短段。"
     old_main = "系统检测到障碍物后，车门需保持安全距离。"
@@ -1625,7 +1664,6 @@ def test_competing_adjacent_short_fragments_are_not_consumed():
 
 
 def test_short_neighbor_already_inside_main_paragraph_is_not_consumed():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     main = "系统保持安全距离。"
     duplicated_fragment = "安全距离"
@@ -1651,7 +1689,6 @@ def test_short_neighbor_already_inside_main_paragraph_is_not_consumed():
 
 
 def test_title_coverage_preserves_unequal_total_occurrence_counts():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     shared = "重复内容"
     baseline_parent = make_section(
@@ -1687,7 +1724,6 @@ def test_title_coverage_preserves_unequal_total_occurrence_counts():
 
 
 def test_cross_path_short_boundary_does_not_fall_through_to_long_matching():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     shared = "甲" * 24
     baseline_section = make_section("旧章节", [make_para(shared)])
@@ -1712,7 +1748,6 @@ def test_cross_path_short_boundary_does_not_fall_through_to_long_matching():
 
 
 def test_covered_list_paragraph_removes_its_marker_from_middle_projection():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     old_main = "系统检测到障碍物后，车门需保持安全距离。"
     preserved = "- 随后平稳悬停。"
@@ -1739,7 +1774,6 @@ def test_covered_list_paragraph_removes_its_marker_from_middle_projection():
 
 
 def test_cross_path_exact_match_uses_more_specific_section_path():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     shared = "唯一短文本"
     baseline_section = make_section("旧章节", [make_para(shared)])
@@ -1764,7 +1798,6 @@ def test_cross_path_exact_match_uses_more_specific_section_path():
 
 
 def test_mismatched_list_marker_is_not_removed_as_covered_text():
-    from app.core.diff.semantic_matcher import match_paragraphs
 
     old_main = "系统检测状态正常并继续运行。"
     preserved = "- 5"

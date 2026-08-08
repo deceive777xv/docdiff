@@ -67,8 +67,8 @@ def compare(
 ) -> DiffResult:
     """Run the full three-stage semantic diff pipeline.
 
-    Stage 1 — align_sections:   title-similarity section alignment
-    Stage 2 — match_paragraphs: embedding cosine paragraph matching
+    Stage 1 — align scopes:     compare-only logical section alignment
+    Stage 2 — match_paragraphs: scoped semantic paragraph matching
     Stage 3 — classify:         LLM + rule-based diff type classification
 
     When embedder is None a character-bigram Jaccard embedder is used so the
@@ -76,7 +76,7 @@ def compare(
     When provider is None or policy.use_llm_classify is False, rule-based
     classification is used for Stage 3.
     """
-    from app.core.diff.structure_aligner import align_sections
+    from app.core.diff.section_scope_aligner import align_compare_scopes
     from app.core.diff.semantic_matcher import match_paragraphs
     from app.core.diff.diff_classifier import classify
     from dataclasses import replace as dc_replace
@@ -91,9 +91,14 @@ def compare(
     if provider is None and policy.use_llm_classify:
         effective_policy = dc_replace(policy, use_llm_classify=False)
 
-    section_pairs = align_sections(baseline, target)
+    alignment_plan = align_compare_scopes(
+        baseline,
+        target,
+        effective_embedder,
+        similarity_threshold=effective_policy.similarity_threshold,
+    )
     para_pairs = match_paragraphs(
-        section_pairs,
+        alignment_plan,
         effective_embedder,
         effective_policy.similarity_threshold,
         rerank_provider=provider if effective_policy.use_llm_match else None,
