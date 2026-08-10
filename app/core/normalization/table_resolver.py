@@ -53,22 +53,24 @@ candidate_id, continuation_role, row_action, table_action, confidence, reason.
     必须是以下之一：continuation_row, new_business_row, table_header, page_header, page_footer, ordinary_text, new_table。
     - `continuation_row`：当`candidate.continuation`的内容是`candidate.previous`同一行“对应列”的剩余部分时使用（通常存在对应列内容不完整、缺少结尾标点，或有延续性列表内容等），列映射必须正确。
     - `new_business_row`：当`candidate.continuation`是同一表格中新的一整行，而不是上一行的延续时使用。
-- row_action：JSON 字符串，必须是 `merge` 或 `keep`。当 `continuation_role` 为 `continuation_row` 时，`row_action=merge` 才有效。重复的表头或新的业务行即使属于同一表，也必须使用 `keep`。当固定行在继续的表中开始一个完整的新记录时，使用 `new_business_row`。
-- table_action：JSON 字符串，必须是 `merge_fragments` 或 `keep`。独立于 `row_action` 决定。`merge_fragments` 表示右边的片段继续左边的逻辑表；这并不意味着边界行应合并。`new_table`、`page_header`、`page_footer` 和 `ordinary_text` 必须使用 `keep`。当 `continuation_role` 为 `continuation_row` 或 `new_business_row` 时，`table_action=merge_fragments` 有效。
-- confidence：JSON 数字，范围从 0.0 到 1.0（包括 0.0 和 1.0）。不要返回带引号的数字、布尔值、null、NaN 或无穷大。
+- row_action：JSON 字符串，必须是 `merge` 或 `keep`。当 `continuation_role` 为 `continuation_row` 时，`row_action=merge` 才有效。对于重复的表头或新的业务行，即使判断属于同一表，也必须使用 `keep`。当候选行在续表中是一行完整的新内容时，使用 `new_business_row`。
+- table_action：JSON 字符串，必须是 `merge_fragments` 或 `keep`。独立于 `row_action` 做出决定。`merge_fragments` 表示右边的片段是左边逻辑表的继续；这并不意味着边界行应合并。`new_table`、`page_header`、`page_footer` 和 `ordinary_text` 必须使用 `keep`。`table_action=merge_fragments`可在 `continuation_role` 为 `continuation_row` 或 `new_business_row` 时使用。
+- confidence：JSON 数字，范围从 0.0 到 1.0（包括 0.0 和 1.0）。不要返回带引号的数字、布尔值、null、NaN 或 infinity。
 - reason：非空 JSON 字符串，最多 200 个字符。解释两个结论的原因。
 
+注意：想清楚原因再输出结论。
+
 严格的 JSON 规则：
-- 输出一个裸 JSON 对象，前后不要有任何内容。
-- 不使用 Markdown 代码块或对象外的文字。
-- 不遗漏、添加或重复字段。
+- 输出一个裸 JSON 对象，前后不要有任何其它内容。
+- 不要使用所提供 Markdown 对象外的文本。
+- 不省略、添加或重复字段。
 - 字段名和枚举值区分大小写。
-- 不允许捏造或修改 `candidate_id`。
+- 绝不编造或修改 `candidate_id`。
 
 合法的输出示例:
 {"candidate_id":"copy-exactly","continuation_role":"continuation_row",\
 "row_action":"merge","table_action":"merge_fragments","confidence":0.92,\
-"reason":"同一张表，并完成前一行。"}
+"reason":"是前一行表格的延续，是同一个表格。"}
 """
 
 
