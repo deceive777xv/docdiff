@@ -55,7 +55,10 @@ candidate_id, continuation_role, row_action, table_action, confidence, reason.
     - `new_business_row`：当`candidate.continuation`是同一表格中新的一整行，而不是上一行的延续时使用。
 - row_action：JSON 字符串，必须是 `merge` 或 `keep`。当 `continuation_role` 为 `continuation_row` 时，`row_action=merge` 才有效。对于重复的表头或新的业务行，即使判断属于同一表，也必须使用 `keep`。当候选行在续表中是一行完整的新内容时，使用 `new_business_row`。
 - table_action：JSON 字符串，必须是 `merge_fragments` 或 `keep`。独立于 `row_action` 做出决定。`merge_fragments` 表示右边的片段是左边逻辑表的继续；这并不意味着边界行应合并。`new_table`、`page_header`、`page_footer` 和 `ordinary_text` 必须使用 `keep`。`table_action=merge_fragments`可在 `continuation_role` 为 `continuation_row` 或 `new_business_row` 时使用。
-- confidence：JSON 数字，范围从 0.0 到 1.0（包括 0.0 和 1.0）。不要返回带引号的数字、布尔值、null、NaN 或 infinity。
+- confidence：JSON 数字，范围从 0.0 到 1.0（包括 0.0 和 1.0）。不要返回带引号的数字、布尔值、null、NaN 或 infinity。和 `row_action`、`table_action`相关：
+    - row_action==merge && table_action==merge_fragments: confifence >= 0.9;
+    - row_action==keep && table_action==merge_fragments: 0.8 <= confifence < 0.9;
+    - row_action==keep && table_action==keep: confifence < 0.8;
 - reason：非空 JSON 字符串，最多 200 个字符。解释两个结论的原因。
 
 注意：想清楚原因再输出结论。
