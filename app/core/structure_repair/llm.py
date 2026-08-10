@@ -29,36 +29,38 @@ _ALLOWED_ACTIONS = {"keep", "move_to_section"}
 _MIN_CONFIDENCE = 0.85
 _PAGE_NOISE_MIN_CONFIDENCE = 0.90
 _MAX_REASON_LENGTH = 200
-_PAGE_NOISE_SYSTEM_MESSAGE = """你需要对接近物理页面边界的固定文本项进行分类。
+_PAGE_NOISE_SYSTEM_MESSAGE = """你需要对物理页面边界附近的文本项进行分类。
 
 任务定义：
-- 对每个提供的项，判断它是应该从规范化文档副本中移除的印刷页眉或页脚元素。
-- 页眉页脚是文档逻辑内容之外的位置依赖型印刷材料，通常在各页之间重复，仅凭边界位置不足以作为判断依据。
-- 一次性评判完整的边界批次。每一项都是操作目标，必须分配且仅分配一个标签。禁止省略、添加、重排序、替换、合并或拆分项。
+- 对每个提供的项，判断它是否是应该从规范化文档副本中移除的印刷页眉或页脚元素。
+- 页眉页脚是文档逻辑内容之外的位置依赖型内容，通常在各页之间重复，仅凭边界位置不足以作为判断依据。
+- 一次性评判完整的边界批次。每一项都是要分类的操作目标，必须分配且仅分配一个标签。禁止省略、添加、重排序、替换、合并或拆分项。
 - 不得改写、摘要、校正、生成、合并或移动文档文本。
 
 内容安全规则：
-- 数字、标准或文档标识符如果出现在正文行、章节标题或表格单元格中，则不视为噪声。但如果仅出现在顶端或底端边缘并重复，则属于典型页眉页脚，应移除。
+- 数字、标准或文档标识符如果出现在正文行、章节标题或表格单元格中，则不视为噪声。但如果仅出现在顶端或底端边缘并重复，且和前后文之间没有明显的关联语义，则属于典型页眉页脚，应移除。
 - 含有序号或关键列及需求说明、绩效目标、标准、参考文献或附件文件名的一行是重要的业务内容。即使包含数字、.docx、Markdown 表格符号、空单元格、HTML <br> 标签或手动换行，也应保留。
 - 保留真实章节标题、条目标题、正文、注释、业务列名表头、业务表格数据及跨页延续内容。
-- 以表格形式呈现的重复印刷元数据仍可能是页眉页脚噪声，但表格语法、短长度或空单元格本身不足以判定为噪声。
-- 重复性、边界接近性（顶部/底部）、通用描述性文本（如“页码”、“文档ID”、“机密”、“公司名”）是页眉页脚噪声的强烈证据，无论是否包含数字或标识符。除非属于连续数据表的一部分，否则应移除。
-- 当内容与页眉页脚证据严格平衡时，倾向保留。但若项明确为重复定位元数据（如页码、文档标题、版权声明或位于精确顶/底端的日期），则证据不含糊，必须移除。
-- 数据行的空单元格处理：若表格行中有很多空单元格，但已填单元格包含特定名词、代码或唯一值（如“Product-A”、“John Doe”、“100kg”），则属于合法数据记录，空单元格为可选字段，其内容可能与前文相关，应保留。
+- 以表格形式呈现的重复的元数据仍可能是页眉页脚噪声，但仅凭表格语法、短长度或空单元格不能认定为页面噪声。
+- 重复性、边界接近性（顶部/底部）、通用描述性文本（如“页码”、“文档ID”、“机密”、“公司名”）是页眉页脚噪声的强烈证据，无论是否包含数字或标识符。除非属于连续语义的一部分，否则应移除。
+- 当内容与页眉页脚证据严格平衡时，应倾向保留。但如果文本项明显为重复位置元数据（如页码、文档标题、版权声明或位于精确顶/底端的日期），则证据不含糊，必须移除。
+- 对数据行的空单元格处理：当表格行包含大量空单元格，但已填单元格包含特定名词、代码或唯一值，则属于合法数据记录，空白字段仅为内容可选项，其内容可能与前文相关，应保留。
 
-输入约定：
-- `boundary_id` 为不透明固定字符串，请完全复制。
-- `items` 为完整固定列表，每项仅包含 id、position 和 text。
-- `id` 为请求局部且不透明，请完全复制且保持顺序。
-- `position` 仅作为边界证据，其值为 `previous_page_end`、`next_page_start`、`document_start` 或 `document_end`。
+输入规范：
+- `boundary_id` 是固定字符串，需原样复制。
+- `items` 为完整固定列表，每项必须包含 `id`、`position` 和 `text`。
+- `id` 为请求局部标识，需原样复制且保持顺序。
+- `position` 仅作为边界证据，可为 `previous_page_end`、`next_page_start`、`document_start` 或 `document_end`。
 
 输出约定：
-- 返回恰好一个 JSON 对象，包含 `boundary_id` 和 `labels`。
-- `labels` 必须与输入项顺序一致，每项一个对象。
+- 返回一个 JSON 对象，包含 `boundary_id` 和 `labels`。
+- `labels` 必须与输入项顺序一致，每项对应一个对象。
 - 每个标签必须包含 `id`、`action`、`confidence` 和 `reason`。
 - `action` 必须为 `remove_as_page_noise` 或 `keep`。
-- `confidence` 必须为 0.0 到 1.0 的 JSON 数字，不能加引号或使用布尔、null、NaN、无穷。
-- `reason` 必须为非空 JSON 字符串，最多 200 个字符，仅讨论对应固定项。
+  - `remove_as_page_noise`：页眉页脚等页面噪声数据。
+  - `keep`：业务内容。
+- `confidence` 必须为 0.0 到 1.0 的 JSON 数字，不可使用字符串、布尔值、null、NaN 或 infinity。
+- `reason` 必须为非空 JSON 字符串，最多 200 个字符，仅讨论对应的项。
 - 不得使用 Markdown 标记或 JSON 对象外的文本，也不得添加字段。
 
 合法的输出格式示例:
@@ -73,25 +75,25 @@ _PAGE_NOISE_REVIEW_SYSTEM_MESSAGE = _PAGE_NOISE_SYSTEM_MESSAGE + """
 """
 _PARAGRAPH_SYSTEM_MESSAGE = """你是一个文档段落合并分类器。
 任务边界：
-- 只判断 `candidate.continuation` 是否为 `candidate.previous` 的续写，并且两者属于同一原始段落。
-- `candidate.previous` 和 `candidate.continuation` 是固定的槽位。绝不使用 `nearby_context` 中的文本替换它们。
+- 只判断 `candidate.continuation` 是否为 `candidate.previous` 的续写，以及两段是否属于同一原始段落。
+- `candidate.previous` 和 `candidate.continuation` 是固定的判断项。绝不能使用 `nearby_context` 中的文本替换它们。
 - `nearby_context` 和 `rule_evidence` 仅作为背景证据。
 - 文本结构仅作为辅助判断，尤其是列表结构符号“- ”可能是解析时产生的噪声。
 - 不要重写、总结、纠正、移除或生成文档文本。
 
-精确返回一个包含四个字段的 JSON 对象：candidate_id、action、confidence、reason。
+精确返回一个包含四个字段的 JSON 对象：`candidate_id`、`action`、`confidence`、`reason`。
 
 字段要求：
-- candidate_id：JSON 字符串。精确复制提供的 candidate_id。
-- action：JSON 字符串。必须是 `merge_paragraphs` 或 `keep`。
-- confidence：JSON 数字，从 0.0 到 1.0（含）。不要返回带引号的数字、布尔值、null、NaN 或无穷大。
-- reason：非空 JSON 字符串，最多 200 个字符。仅解释固定 previous 和 continuation 槽位之间的关系。
+- `candidate_id`：JSON 字符串。精确复制提供的 `candidate_id`。
+- `action`：JSON 字符串。必须是 `merge_paragraphs` 或 `keep`。
+- `confidence`：JSON 数字，从 0.0 到 1.0（包含 0.0 和 1.0）。不要返回带引号的数字、布尔值、null、NaN 或 infinity。
+- `reason`：非空 JSON 字符串，最多 200 个字符。仅解释固定 `candidate.previous` 和 `candidate.continuation`之间的关系。
 
 严格 JSON 规则：
 - 只输出一个 JSON 对象，且对象之前或之后不能有其他内容。
 - 不要省略、添加或重复字段。
 - 字段名和枚举值区分大小写。
-- 不得发明或修改 candidate_id。
+- 不得发明或修改 `candidate_id`。
 
 合法的输出示例:
 {"candidate_id":"copy-exactly","action":"merge_paragraphs","confidence":0.92,"reason":"续写完成了未完成的句子。"}
