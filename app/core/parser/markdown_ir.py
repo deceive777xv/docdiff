@@ -113,7 +113,7 @@ def parse_markdown(md_text: str, title: str, doc_hash: str) -> DocumentIR:
             ))
         table_buffer.clear()
 
-    heading_pattern = re.compile(r"^(#{1,3})\s+(.+)")
+    heading_pattern = re.compile(r"^(#{1,6})\s+(.+)")
     for line in md_text.splitlines():
         heading_match = heading_pattern.match(line)
         if heading_match:
