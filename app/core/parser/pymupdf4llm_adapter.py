@@ -104,7 +104,7 @@ class _MarkdownPageParser:
         self.para_buffer: list[str] = []
         self.table_buffer: list[str] = []
         self.page_no: int | None = None
-        self.heading_re = re.compile(r"^(#{1,3})\s+(.+)")
+        self.heading_re = re.compile(r"^(#{1,6})\s+(.+)")
 
     def parse_page(self, markdown: str, page_no: int | None) -> None:
         self.flush()
