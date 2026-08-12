@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -965,6 +966,8 @@ def _find_conflict_clusters(
         if baseline_set & seen_baselines:
             continue
         baseline_indices = sorted(baseline_set)
+        if not _same_subtable(b_units, baseline_indices):
+            continue
         target_indices = sorted(target_set)
         if (
             len(baseline_indices) > _LLM_CONFLICT_MAX_BASELINES
@@ -1170,6 +1173,17 @@ def _is_ordinary_unit(unit: _ParagraphUnit) -> bool:
     return unit.table_values is None
 
 
+def _same_subtable(units: list[_ParagraphUnit], indices: list[int]) -> bool:
+    if len(indices) <= 1:
+        return True
+    sorted_idx = sorted(indices)
+    lo, hi = sorted_idx[0], sorted_idx[-1]
+    for k in range(lo + 1, hi):
+        if _is_ordinary_unit(units[k]):
+            return False
+    return True
+
+
 def _context_side_similarity(left: str, right: str) -> float | None:
     if not left and not right:
         return None
@@ -1332,7 +1346,128 @@ def _select_monotonic_ordinary_matches(
             row -= 1
         else:
             column -= 1
+
+    _reconcile_duplicate_target_collisions(
+        selected, b_units, t_units, baseline_indices, target_indices, score_map,
+    )
     return selected
+
+
+def _reconcile_duplicate_target_collisions(
+    selected: dict[int, tuple[int, float]],
+    b_units: list[_ParagraphUnit],
+    t_units: list[_ParagraphUnit],
+    baseline_indices: list[int],
+    target_indices: list[int],
+    score_map: dict[tuple[int, int], tuple[float, float]],
+) -> None:
+    """Re-map baseline units when multiple map to the same target index.
+
+    When the same text appears multiple times in both documents, the DP may
+    assign several baseline units to a single target unit, leaving other
+    identical target units unmatched.  This function groups units by
+    normalised text and re-assigns them in occurrence order.
+    """
+    target_to_baselines: dict[int, list[int]] = {}
+    for b_idx, (t_idx, _score) in selected.items():
+        target_to_baselines.setdefault(t_idx, []).append(b_idx)
+
+    for t_idx, b_list in list(target_to_baselines.items()):
+        if len(b_list) < 2:
+            continue
+
+        t_unit = t_units[t_idx]
+        t_norm = _normalize_match_text(_unit_match_text(t_unit))
+        if not t_norm:
+            continue
+
+        unmatched_targets: list[int] = []
+        for candidate_t in target_indices:
+            if candidate_t in target_to_baselines:
+                continue
+            candidate_norm = _normalize_match_text(_unit_match_text(t_units[candidate_t]))
+            if candidate_norm == t_norm:
+                unmatched_targets.append(candidate_t)
+
+        if not unmatched_targets:
+            continue
+
+        b_list.sort()
+        unmatched_targets.sort()
+
+        for offset, b_idx in enumerate(b_list[1:], start=1):
+            if offset - 1 >= len(unmatched_targets):
+                break
+            new_t_idx = unmatched_targets[offset - 1]
+            candidate_score = score_map.get((b_idx, new_t_idx))
+            if candidate_score is not None:
+                selected[b_idx] = (new_t_idx, candidate_score[1])
+            else:
+                selected[b_idx] = (new_t_idx, selected[b_idx][1])
+        
+
+def _reconcile_duplicate_table_collisions(
+    b_matched: dict[int, tuple[int, float]],
+    t_used: set[int],
+    b_units: list[_ParagraphUnit],
+    t_units: list[_ParagraphUnit],
+    candidates: list[tuple[float, float, int, int]],
+) -> None:
+    """Re-map table-row baseline units when multiple map to the same target.
+
+    The greedy table-row matcher may assign several baseline rows to a single
+    target row when identical text appears multiple times (e.g. duplicate rows
+    in a table).  This function detects such collisions and re-assigns by
+    occurrence order, updating both *b_matched* and *t_used*.
+    """
+    # Build reverse mapping: target -> list of baseline indices (table rows only)
+    target_to_baselines: dict[int, list[int]] = {}
+    for b_idx, (t_idx, _score) in b_matched.items():
+        if _is_ordinary_unit(b_units[b_idx]):
+            continue
+        target_to_baselines.setdefault(t_idx, []).append(b_idx)
+
+    for t_idx, b_list in list(target_to_baselines.items()):
+        if len(b_list) < 2:
+            continue
+
+        t_unit = t_units[t_idx]
+        t_norm = _normalize_match_text(_unit_match_text(t_unit))
+        if not t_norm:
+            continue
+
+        # Find all unmatched target table rows with the same normalised text
+        unmatched_targets: list[int] = []
+        for candidate_t, _ in enumerate(t_units):
+            if candidate_t in t_used:
+                continue
+            if _is_ordinary_unit(t_units[candidate_t]):
+                continue
+            candidate_norm = _normalize_match_text(_unit_match_text(t_units[candidate_t]))
+            if candidate_norm == t_norm:
+                unmatched_targets.append(candidate_t)
+
+        if not unmatched_targets:
+            continue
+
+        b_list.sort()
+        unmatched_targets.sort()
+
+        for offset, b_idx in enumerate(b_list[1:], start=1):
+            if offset - 1 >= len(unmatched_targets):
+                break
+            new_t_idx = unmatched_targets[offset - 1]
+            # Look up the similarity from candidates
+            sim = b_matched[b_idx][1]
+            for c_sim, c_score, c_i, c_j in candidates:
+                if c_i == b_idx and c_j == new_t_idx:
+                    sim = c_score
+                    break
+            # Update mappings
+            old_t_idx = b_matched[b_idx][0]
+            t_used.discard(old_t_idx)
+            b_matched[b_idx] = (new_t_idx, sim)
+            t_used.add(new_t_idx)
 
 
 def _section_match_scopes(plan: SectionAlignmentPlan) -> list[_SectionMatchScope]:
@@ -1894,6 +2029,10 @@ def match_paragraphs(
             b_matched[i] = (j, sim)
             t_used.add(j)
 
+        _reconcile_duplicate_table_collisions(
+            b_matched, t_used, b_units, t_units, candidates,
+        )
+        
         for _, _, baseline_unit, target_unit in window_matches:
             baseline_match_text, target_match_text = _classification_texts(
                 baseline_unit,
