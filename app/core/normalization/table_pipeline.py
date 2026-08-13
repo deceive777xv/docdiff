@@ -744,7 +744,7 @@ def _has_invalid_known_page_boundary(
     return (
         previous_page is not None
         and continuation_page is not None
-        and continuation_page != previous_page + 1
+        and continuation_page <= previous_page
     )
 
 
