@@ -8,7 +8,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 # URL to a plain-text file containing only the latest version string, e.g. "1.1.0"
 _VERSION_URL = (

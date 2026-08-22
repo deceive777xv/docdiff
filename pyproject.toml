@@ -1,6 +1,6 @@
 [project]
 name = "doc-diff-agent"
-version = "1.0.1"
+version = "1.0.2"
 description = "Windows desktop document diff and QA agent"
 readme = "README.md"
 requires-python = ">=3.11"
